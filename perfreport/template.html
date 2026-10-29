@@ -1,0 +1,514 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__</title>
+<style>
+:root{color-scheme:light;--surface-1:#fcfcfb;--surface-2:#f3f2ef;--border:#dcdbd6;--text-primary:#0b0b0b;--text-secondary:#52514e;--text-muted:#77766f;--grid:#e4e3df;--accent:#2a78d6;--warn:#8a5a00;--track:#e8e7e3;--thumb:#9fb9dc}
+:root[data-theme="dark"]{color-scheme:dark;--surface-1:#1a1a19;--surface-2:#242422;--border:#3a3a37;--text-primary:#fff;--text-secondary:#c3c2b7;--text-muted:#9a998f;--grid:#33332f;--accent:#3987e5;--warn:#e8b34a;--track:#2c2c2a;--thumb:#3f5f8c}
+*{box-sizing:border-box}
+body{margin:0;font-family:"Malgun Gothic","Apple SD Gothic Neo","Noto Sans KR",sans-serif;background:var(--surface-1);color:var(--text-primary);font-size:14px}
+header{padding:16px 20px 8px;display:flex;flex-wrap:wrap;gap:8px;align-items:baseline;justify-content:space-between}
+h1{font-size:18px;margin:0}
+.sub{color:var(--text-secondary);font-size:12px}
+.filters{display:flex;flex-wrap:wrap;gap:12px;padding:8px 20px 12px;border-bottom:1px solid var(--border)}
+.box{background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:8px 10px;min-width:220px;flex:1 1 220px}
+.box h2{font-size:12px;margin:0 0 6px;color:var(--text-secondary);font-weight:600}
+.box input[type=search],.box select{width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--surface-1);color:var(--text-primary);font:inherit}
+.list{max-height:150px;overflow:auto;margin-top:6px}
+.list .hosthdr{font-size:11.5px;color:var(--text-muted);margin:6px 0 2px;font-weight:600}
+.list label.off{opacity:.45}
+.vmrow{display:flex;gap:6px;align-items:center;padding:2px 0;font-size:13px}
+.vmrow input[type=color]{width:26px;height:20px;padding:0;border:1px solid var(--border);border-radius:4px;background:none;cursor:pointer;flex:0 0 26px}
+.vmname{background:none;border:none;padding:0;font:inherit;color:var(--text-primary);cursor:pointer;text-align:left;text-decoration:underline dotted var(--text-muted)}
+.vmname:hover{color:var(--accent)}
+.hostinfo{font-size:12px;color:var(--text-secondary);margin-top:6px}
+#plots.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(560px,1fr));gap:0 16px}
+.list label{display:flex;gap:6px;align-items:center;padding:2px 0;cursor:pointer;font-size:13px}
+.list input[type=color]{width:26px;height:20px;padding:0;border:1px solid var(--border);border-radius:4px;background:none;cursor:pointer;flex:0 0 26px}
+.sw{width:22px;height:0;border-top:3px solid;flex:0 0 22px}
+.seg{display:flex;gap:4px;flex-wrap:wrap}
+.seg button,.btn{border:1px solid var(--border);background:var(--surface-1);color:var(--text-primary);border-radius:6px;padding:5px 10px;cursor:pointer;font:inherit;font-size:13px}
+.btn.small{padding:3px 8px;font-size:12px}
+.seg button[aria-pressed=true]{background:var(--accent);border-color:var(--accent);color:#fff}
+.toolbar{display:flex;flex-wrap:wrap;gap:8px 16px;align-items:center;padding:8px 20px 0;font-size:12.5px;color:var(--text-secondary)}
+.legend{display:flex;flex-wrap:wrap;gap:6px 16px;padding:8px 20px 0;font-size:12.5px;color:var(--text-secondary)}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.note{color:var(--warn);font-size:12px;min-height:16px;padding:6px 20px 0}
+main{padding:4px 12px 24px}
+.pwrap{display:grid;grid-template-columns:1fr 18px;grid-template-rows:auto 18px;gap:4px 6px;margin-top:6px}
+.plot{width:100%;height:440px;min-width:0}
+.pwrap.small .plot{height:300px}
+.ptitle{font-size:13px;color:var(--text-secondary);margin:14px 8px 0}
+.track{position:relative;background:var(--track);border-radius:9px;touch-action:none;cursor:pointer}
+.track.h{height:18px}
+.track.v{width:18px}
+.thumb{position:absolute;background:var(--thumb);border-radius:9px;cursor:grab}
+.thumb:active{cursor:grabbing}
+.track.h .thumb{top:2px;bottom:2px}
+.track.v .thumb{left:2px;right:2px}
+.grip{position:absolute;background:var(--accent);border-radius:3px}
+.track.h .grip{top:2px;bottom:2px;width:5px;cursor:ew-resize}
+.track.v .grip{left:2px;right:2px;height:5px;cursor:ns-resize}
+table{border-collapse:collapse;width:100%;font-size:12.5px;margin-top:8px}
+th,td{border-bottom:1px solid var(--border);padding:5px 8px;text-align:right;white-space:nowrap}
+th{color:var(--text-secondary);font-weight:600;background:var(--surface-2)}
+td:nth-child(-n+3),th:nth-child(-n+3){text-align:left}
+.tblwrap{overflow-x:auto;margin:8px}
+@media (max-width:640px){.filters{padding:8px}.box{min-width:100%}.plot{height:340px}}
+</style>
+</head>
+<body>
+<div id="jsWarn" style="margin:12px 20px;padding:12px 14px;border:2px solid #c98500;border-radius:8px;background:#fff7e6;color:#5a3d00;font-size:14px;line-height:1.6">
+  <b>그래프가 표시되지 않았습니다.</b> 지금 이 화면은 HTML 안의 스크립트를 실행하지 않습니다(구글 드라이브 미리보기, 메신저·메일·파일 앱의 내장 뷰어 등).<br>
+  파일을 내려받은 뒤 <b>Chrome · Edge · Safari 브라우저</b>로 여십시오. 인터넷 연결은 필요 없습니다.
+</div>
+<header>
+  <div><h1 id="title"></h1><div class="sub" id="subtitle"></div></div>
+  <div class="seg"><button id="themeBtn" aria-pressed="false">어두운 화면</button></div>
+</header>
+<section class="filters">
+  <div class="box"><h2>케이스 선택</h2>
+    <input type="search" id="tcFilter" placeholder="케이스 검색">
+    <div class="list" id="tcList"></div></div>
+  <div class="box"><h2>지표</h2>
+    <input type="search" id="mFilter" placeholder="지표 검색">
+    <select id="mSel" size="6" style="margin-top:6px"></select></div>
+  <div class="box"><h2>VM 선택 (선 하나 = 케이스 + VM · 최대 8개 · 이름을 누르면 그 케이스에서 그 VM 만)</h2>
+    <input type="search" id="vmFilter" placeholder="VM 검색">
+    <div class="seg" style="margin-top:6px">
+      <button class="btn small" id="vmAll">전체 선택</button>
+      <button class="btn small" id="vmNone">전체 해제</button>
+      <button class="btn small" id="vmShown">검색 결과만 선택</button></div>
+    <div class="seg" style="margin-top:4px">
+      <button class="btn small" id="colorReset">선 색 초기화</button>
+      <button class="btn small" id="colorExport">색 설정 내보내기</button>
+      <button class="btn small" id="colorImport">색 설정 가져오기</button>
+      <input type="file" id="colorFile" accept=".json" hidden></div>
+    <div class="list" id="vmList"></div></div>
+  <div class="box"><h2>보기</h2>
+    <div class="seg" id="viewSeg" style="margin-bottom:8px">
+      <button data-v="one" aria-pressed="true">한 그래프에 비교</button>
+      <button data-v="case" aria-pressed="false">케이스별 그래프</button></div>
+    <div class="sub" style="margin-bottom:8px">선 하나 = 케이스 + VM · 모두 실선 · 색으로 구별</div>
+    <div class="seg" id="xSeg">
+      <button data-x="sec" aria-pressed="true">가로축: 경과 시간 (s)</button>
+      <button data-x="time" aria-pressed="false">가로축: 실제 시각</button></div>
+    <div class="seg" id="binSeg" style="margin-top:8px">
+      <button data-b="auto" aria-pressed="true">자동 평균</button>
+      <button data-b="0" aria-pressed="false">원 데이터</button>
+      <button data-b="60" aria-pressed="false">1분 평균</button>
+      <button data-b="300" aria-pressed="false">5분 평균</button>
+      <button data-b="600" aria-pressed="false">10분 평균</button></div></div>
+</section>
+<div class="toolbar">
+  <span>그래프 위 드래그:</span>
+  <div class="seg" id="dragSeg">
+    <button data-d="zoom" aria-pressed="true">영역 확대</button>
+    <button data-d="pan" aria-pressed="false">이동</button></div>
+  <label><input type="checkbox" id="linkY"> 세로축 범위도 연동</label>
+  <button class="btn small" id="resetView">전체 보기</button>
+  <span id="rangeText"></span>
+</div>
+<div class="note" id="note"></div>
+<div class="legend" id="legend"></div>
+<main>
+  <div id="plots"></div>
+  <div class="ptitle">표. 선택한 케이스·VM 의 통계 (원 데이터 전체 구간 기준)</div>
+  <div class="tblwrap"><table id="stats"></table></div>
+</main>
+<script>__PLOTLY__</script>
+<script>
+const D = __DATA__;
+const LIGHT = ['#2a78d6','#eb6834','#1baf7a','#eda100','#e87ba4','#008300','#4a3aa7','#e34948'];
+const DARK  = ['#3987e5','#d95926','#199e70','#c98500','#d55181','#008300','#9085e9','#e66767'];
+const DASH = ['solid','dash','dot','dashdot','longdash','longdashdot'];
+const SYM  = ['circle','square','diamond','triangle-up','triangle-down','x'];
+const CSS_DASH = ['', '6,3', '1.5,2', '6,2,1.5,2', '10,3', '10,2,1.5,2'];
+const RECOMMENDED = 3, MAX = 8;
+const COLOR_KEY = 'perfreport.colors.v1';   // 브라우저 저장소 키: 같은 PC 의 다른 리포트 HTML 과 공유된다
+
+// 화면 상태. xr: 가로축 표시 범위(숫자, 경과 초 또는 ms): 모든 그래프가 공유한다.
+// yr: 세로축 표시 범위: 그래프별(연동을 켜면 공통 하나). null 이면 보이는 구간의 데이터에 맞춘다.
+const vmKey = s => `${s.entity}|${s.host}`;
+const lineKey = (cs, s) => `${cs}|${s.entity}|${s.host}`;          // 선택 단위: 케이스 안의 VM
+const st = {tcs: [], sel: new Set(), metric: D.metrics[0].name, view: 'one', x: 'sec', dark: false, bin: 'auto',
+            drag: 'zoom', linkY: false, xr: null, yr: {}};
+let plots = [];        // [{key, div, data: [{x:[], y:[]}], hs, vs}]
+let syncing = false;   // 연동 중 다른 그래프의 이벤트가 다시 연동을 부르지 않게 막는다
+
+// ── 색 ─────────────────────────────────────────────────────────────
+// 선 하나 = 케이스 + VM. 선을 고른 순서대로 빈 색 번호를 받고, 선택이 풀릴 때 반납한다.
+// 그래서 다른 선을 넣고 빼도 이미 그려진 선의 색은 바뀌지 않는다. 사용자가 바꾼 색이 우선한다.
+const MAX_LINES = 8;
+const lineSlot = {};
+function takeLineSlot(k){
+  if (lineSlot[k] != null) return;
+  const used = new Set(Object.values(lineSlot));
+  for (let i = 0; i < MAX_LINES; i++) if (!used.has(i)) { lineSlot[k] = i; return; }
+}
+function dropLineSlot(k){ delete lineSlot[k]; }
+function userColors(){ try { return JSON.parse(localStorage.getItem(COLOR_KEY) || '{}'); } catch (e) { return {}; } }
+function saveColors(m){ try { localStorage.setItem(COLOR_KEY, JSON.stringify(m)); } catch (e) { note('이 브라우저는 색 설정 저장을 막고 있습니다. "색 설정 내보내기" 를 쓰십시오.'); } }
+function lineColor(k){
+  const u = userColors();
+  if (u['line:' + k]) return u['line:' + k];
+  return (st.dark ? DARK : LIGHT)[(lineSlot[k] ?? 0) % 8];
+}
+// 선 추가: 최대 8개. 넘으면 false.
+function addLine(k){
+  if (st.sel.has(k)) return true;
+  if (st.sel.size >= MAX_LINES) { st.flash = `한 그래프에 선은 최대 ${MAX_LINES}개입니다. 다른 선을 해제한 뒤 추가하십시오.`; note(st.flash); return false; }
+  st.sel.add(k); takeLineSlot(k); return true;
+}
+function removeLine(k){ st.sel.delete(k); dropLineSlot(k); }
+
+// ── 공통 도우미 ─────────────────────────────────────────────────────
+function css(v){ return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+function fmt(v){ if (v == null || isNaN(v)) return '-'; return Math.abs(v) >= 1000 ? v.toLocaleString('ko-KR', {maximumFractionDigits: 0}) : (Math.abs(v) < 1 && v !== 0 ? v.toFixed(3) : v.toFixed(2)); }
+function note(t){ document.getElementById('note').textContent = t || ''; }
+function unit(){ const m = D.metrics.find(m => m.name === st.metric); return m ? m.unit : ''; }
+// 가로축 값 ↔ 숫자. 실제 시각 모드에서 plotly 는 'YYYY-MM-DD HH:MM:SS' 문자열을 쓰고, 내부는 ms 숫자로 다룬다.
+function toAxis(v){ return st.x === 'sec' ? v : new Date(v).toISOString().slice(0, 23).replace('T', ' '); }
+function fromAxis(v){ return st.x === 'sec' ? +v : Date.parse(String(v).replace(' ', 'T') + (String(v).length > 10 ? 'Z' : 'T00:00:00Z')); }
+function xLabel(v){ return st.x === 'sec' ? `${Math.round(v).toLocaleString('ko-KR')} s` : new Date(v).toISOString().slice(0, 19).replace('T', ' '); }
+
+const NICE = [1, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1200, 1800, 3600];
+// 자동 평균: 보이는 구간에서 선 하나의 점이 600개를 넘을 때만 구간 평균으로 줄인다.
+// 확대하면 구간이 짧아져 원 데이터에 가까워진다. 표의 통계는 항상 원 데이터 기준.
+function binOf(series){
+  if (st.bin !== 'auto') return +st.bin;
+  let n = 0, span = 0;
+  const lo = st.x === 'sec' && st.xr ? st.xr[0] : -Infinity, hi = st.x === 'sec' && st.xr ? st.xr[1] : Infinity;
+  series.forEach(s => {
+    let c = 0; for (const v of s.x) if (v >= lo && v <= hi) c++;
+    n = Math.max(n, c); span = Math.max(span, Math.min(hi, s.x[s.x.length - 1] || 0) - Math.max(lo, s.x[0] || 0));
+  });
+  if (n <= 600) return 0;
+  return NICE.find(b => b >= span / 600) || 3600;
+}
+function binned(s, b){
+  if (!b) return {x: s.x, y: s.y};
+  const acc = new Map();
+  s.x.forEach((v, i) => { if (s.y[i] == null) return; const k = Math.floor(v / b); const a = acc.get(k) || [0, 0]; a[0] += s.y[i]; a[1]++; acc.set(k, a); });
+  const keys = [...acc.keys()].sort((a, c) => a - c);
+  return {x: keys.map(k => k * b + b / 2), y: keys.map(k => acc.get(k)[0] / acc.get(k)[1])};
+}
+// 그릴 시계열. cs 를 주면 그 케이스만.
+function picked(cs){
+  return D.series.filter(s => s.metric === st.metric && st.tcs.includes(s.case) && st.sel.has(lineKey(s.case, s)) && (!cs || s.case === cs));
+}
+// 케이스에 들어 있는 VM 목록
+const caseVms = {};
+D.vms.forEach(v => v.cases.forEach(c => (caseVms[c] = caseVms[c] || []).push(v)));
+function selectCaseAll(cs){
+  let n = 0;
+  for (const v of (caseVms[cs] || [])) { if (!addLine(lineKey(cs, v))) break; n++; }
+  return n;
+}
+
+// ── 목록 ───────────────────────────────────────────────────────────
+function renderTcList(){
+  const q = document.getElementById('tcFilter').value.toLowerCase();
+  const box = document.getElementById('tcList'); box.innerHTML = '';
+  D.cases.filter(c => (c.id + ' ' + (c.label || '') + ' ' + (c.host || '')).toLowerCase().includes(q)).forEach(c => {
+    const on = st.tcs.includes(c.id);
+    const l = document.createElement('label');
+    l.innerHTML = `<input type="checkbox" ${on ? 'checked' : ''}><span>${c.id}</span><span class="sub">${c.host || ''}${c.label ? ' · ' + c.label : ''}</span>`;
+    l.querySelector('input').onchange = e => toggleTc(c.id, e.target.checked);
+    box.appendChild(l);
+  });
+}
+function toggleTc(tc, on){
+  if (on) {
+    if (st.tcs.length >= MAX) { note(`한 번에 비교할 수 있는 케이스는 최대 ${MAX}개입니다.`); renderTcList(); return; }
+    st.tcs.push(tc);                                // 케이스를 고르면 VM 목록이 나온다. 선은 VM 을 골라 추가한다
+  } else {
+    st.tcs = st.tcs.filter(t => t !== tc);
+    [...st.sel].filter(k => k.startsWith(tc + '|')).forEach(removeLine);
+  }
+  renderTcList(); renderVms(); draw();
+}
+function renderVms(){
+  const q = document.getElementById('vmFilter').value.toLowerCase();
+  const box = document.getElementById('vmList'); box.innerHTML = '';
+  D.cases.filter(c => st.tcs.includes(c.id)).forEach(c => {
+    const h = document.createElement('div'); h.className = 'hosthdr';
+    h.textContent = `${c.id} · 호스트 ${c.host}`;
+    box.appendChild(h);
+    (caseVms[c.id] || []).filter(v => v.entity.toLowerCase().includes(q)).forEach(v => {
+      const k = lineKey(c.id, v), on = st.sel.has(k);
+      const row = document.createElement('div'); row.className = 'vmrow';
+      row.innerHTML = `<input type="checkbox" ${on ? 'checked' : ''} title="선 추가 · 해제"><input type="color" value="${lineColor(k)}" title="이 선의 색 변경" style="visibility:${on ? 'visible' : 'hidden'}"><button class="vmname" title="이 케이스에서 이 VM 만 보기">${v.entity}</button>`;
+      row.querySelector('input[type=checkbox]').onchange = e => { if (e.target.checked) addLine(k); else removeLine(k); renderVms(); draw(true); };
+      row.querySelector('input[type=color]').oninput = e => { const u = userColors(); u['line:' + k] = e.target.value; saveColors(u); recolor(); };
+      row.querySelector('.vmname').onclick = () => {        // 이 케이스의 선택만 이 VM 하나로 바꾼다. 다른 케이스의 선택은 그대로 둔다.
+        (caseVms[c.id] || []).forEach(x => { const xk = lineKey(c.id, x); if (xk !== k) removeLine(xk); }); addLine(k); renderVms(); draw(true);
+      };
+      box.appendChild(row);
+    });
+  });
+}
+function vmsShown(){
+  const q = document.getElementById('vmFilter').value.toLowerCase(), out = [];
+  st.tcs.forEach(cs => (caseVms[cs] || []).filter(v => v.entity.toLowerCase().includes(q)).forEach(v => out.push(lineKey(cs, v))));
+  return out;
+}
+function renderMetrics(){
+  const q = document.getElementById('mFilter').value.toLowerCase();
+  const sel = document.getElementById('mSel'); sel.innerHTML = '';
+  let grp = null, cat = null;
+  D.metrics.filter(m => (m.name + ' ' + (m.category || '')).toLowerCase().includes(q)).forEach(m => {
+    if (m.category !== cat) { cat = m.category; grp = document.createElement('optgroup'); grp.label = cat || '기타'; sel.appendChild(grp); }
+    const o = document.createElement('option'); o.value = m.name; o.textContent = m.name;
+    if (m.name === st.metric) o.selected = true; grp.appendChild(o);
+  });
+}
+
+// ── 그래프 ─────────────────────────────────────────────────────────
+function trace(s, b){
+  const d = binned(s, b), xs = st.x === 'sec' ? d.x : d.x.map(v => s.t0 + v * 1000);
+  const k = lineKey(s.case, s), name = `${s.case} · ${s.entity}`;
+  return {type: 'scatter', mode: 'lines', x: st.x === 'sec' ? xs : xs.map(toAxis), y: d.y, _xn: xs, name, meta: k,
+    line: {color: lineColor(k), width: 1.8}, hovertemplate: `${name}  %{y:,.3~f} ${unit()}<extra></extra>`};
+}
+function fullX(){
+  let lo = Infinity, hi = -Infinity;
+  plots.forEach(p => p.data.forEach(t => { if (t._xn.length) { lo = Math.min(lo, t._xn[0]); hi = Math.max(hi, t._xn[t._xn.length - 1]); } }));
+  return lo < hi ? [lo, hi] : [0, 1];
+}
+function fullY(p){
+  let lo = Infinity, hi = -Infinity;
+  p.data.forEach(t => t.y.forEach(v => { if (v != null) { lo = Math.min(lo, v); hi = Math.max(hi, v); } }));
+  if (!(lo < hi)) { lo = (lo === Infinity ? 0 : lo) - 1; hi = lo + 2; }
+  const pad = (hi - lo) * 0.05; return [lo - pad, hi + pad];
+}
+// 세로축 자동 맞춤: 지금 보이는 가로 구간 안의 데이터 최솟값~최댓값
+function fitY(p){
+  const xr = st.xr || fullX();
+  let lo = Infinity, hi = -Infinity;
+  p.data.forEach(t => t._xn.forEach((x, i) => { const v = t.y[i]; if (x >= xr[0] && x <= xr[1] && v != null) { lo = Math.min(lo, v); hi = Math.max(hi, v); } }));
+  if (!(lo < hi)) return fullY(p);
+  const pad = (hi - lo) * 0.06; return [lo - pad, hi + pad];
+}
+function yOf(p){ return (st.linkY ? st.yr.__all : st.yr[p.key]) || fitY(p); }
+
+function layout(ytitle, p){
+  const ax = {gridcolor: css('--grid'), linecolor: css('--border'), zerolinecolor: css('--border'),
+              tickfont: {color: css('--text-secondary'), size: 11}, title: {font: {color: css('--text-secondary'), size: 12}}};
+  const xr = st.xr || fullX();
+  return {paper_bgcolor: css('--surface-1'), plot_bgcolor: css('--surface-1'),
+    font: {family: getComputedStyle(document.body).fontFamily, color: css('--text-primary')},
+    margin: {l: 64, r: 10, t: 10, b: 46}, hovermode: 'x unified', dragmode: st.drag,
+    hoverlabel: {bgcolor: css('--surface-2'), font: {color: css('--text-primary')}},
+    xaxis: {...ax, range: xr.map(toAxis), type: st.x === 'sec' ? 'linear' : 'date',
+            title: {...ax.title, text: st.x === 'sec' ? '경과 시간 (s, 잡 시작 기준)' : '시각'}},
+    yaxis: {...ax, range: yOf(p), title: {...ax.title, text: ytitle}},
+    showlegend: false, uirevision: 'keep'};
+}
+
+// 한 그래프의 범위가 바뀌면 상태에 기록하고 나머지 그래프에 같은 가로 범위를 적용한다.
+function onRelayout(p, ev){
+  if (syncing) return;
+  if (ev['xaxis.autorange'] || ev['yaxis.autorange']) { st.xr = null; st.yr = {}; applyRanges(); return; }
+  const x0 = ev['xaxis.range[0]'] ?? (ev['xaxis.range'] || [])[0], x1 = ev['xaxis.range[1]'] ?? (ev['xaxis.range'] || [])[1];
+  const y0 = ev['yaxis.range[0]'] ?? (ev['yaxis.range'] || [])[0], y1 = ev['yaxis.range[1]'] ?? (ev['yaxis.range'] || [])[1];
+  const same = (a, b) => a && b && Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]) < 1e-9 * (1 + Math.abs(a[1]));
+  let changed = false;
+  if (x0 !== undefined && x1 !== undefined) {
+    const nx = [fromAxis(x0), fromAxis(x1)];
+    const f = fullX(), whole = Math.abs(nx[0] - f[0]) + Math.abs(nx[1] - f[1]) < (f[1] - f[0]) * 1e-6;
+    if (whole) { if (st.xr) { st.xr = null; changed = true; } }   // 전체 범위는 '확대 안 함' 으로 기록: 케이스를 추가하면 새 전체 범위를 따른다
+    else if (!same(nx, st.xr)) { st.xr = nx; changed = true; if (!st.linkY && y0 === undefined) delete st.yr[p.key]; }
+  }
+  if (y0 !== undefined && y1 !== undefined) {
+    const ny = [+y0, +y1], k = st.linkY ? '__all' : p.key;
+    if (!same(ny, st.yr[k])) { st.yr[k] = ny; changed = true; }
+  }
+  if (changed) applyRanges();      // 같은 범위를 다시 받으면 무시한다: 그래프끼리 이벤트가 되풀이되지 않게
+}
+function applyRanges(rebin){
+  if (rebin !== false && st.bin === 'auto' && st.x === 'sec') {
+    // 확대·축소로 자동 평균 구간이 달라지면 선을 다시 계산한다
+    const nb = binOf(picked(null));
+    if (nb !== st._bin) { draw(true); return; }
+  }
+  syncing = true;
+  const xr = st.xr || fullX();
+  plots.forEach(p => Plotly.relayout(p.div, {'xaxis.range': xr.map(toAxis), 'yaxis.range': yOf(p)}));
+  syncing = false;
+  plots.forEach(p => { p.hs.update(); p.vs.update(); });
+  const f = fullX();
+  const whole = !st.xr || (xr[1] - xr[0]) >= (f[1] - f[0]) * 0.999;
+  document.getElementById('rangeText').textContent = !whole
+    ? `표시 구간: ${xLabel(xr[0])} ~ ${xLabel(xr[1])} (전체의 ${Math.round((xr[1] - xr[0]) / (f[1] - f[0]) * 100)}%)` : '표시 구간: 전체';
+}
+
+// ── 스크롤바 (가로·세로) ────────────────────────────────────────────
+// 막대 가운데를 끌면 이동, 양 끝 손잡이를 끌면 범위를 넓히거나 좁힌다. 빈 곳을 누르면 그 위치로 옮긴다.
+function slider(track, vertical, getFull, getView, setView){
+  const thumb = document.createElement('div'); thumb.className = 'thumb';
+  const g0 = document.createElement('div'), g1 = document.createElement('div'); g0.className = g1.className = 'grip';
+  thumb.append(g0, g1); track.appendChild(thumb);
+  const size = () => vertical ? track.clientHeight : track.clientWidth;
+  function update(){
+    const f = getFull(), v = getView(), span = f[1] - f[0] || 1;
+    let a = (Math.max(v[0], f[0]) - f[0]) / span, b = (Math.min(v[1], f[1]) - f[0]) / span;
+    a = Math.max(0, Math.min(1, a)); b = Math.max(a + 0.01, Math.min(1, b));
+    if (vertical) { thumb.style.top = `${(1 - b) * 100}%`; thumb.style.height = `${(b - a) * 100}%`; g0.style.bottom = '0'; g1.style.top = '0'; }
+    else { thumb.style.left = `${a * 100}%`; thumb.style.width = `${(b - a) * 100}%`; g0.style.left = '0'; g1.style.right = '0'; }
+  }
+  function drag(e, mode){
+    e.preventDefault(); e.stopPropagation();
+    const f = getFull(), v0 = getView().slice(), span = f[1] - f[0], start = vertical ? e.clientY : e.clientX;
+    const move = ev => {
+      let d = ((vertical ? ev.clientY : ev.clientX) - start) / size() * span;
+      if (vertical) d = -d;
+      let v = v0.slice(), w = v0[1] - v0[0], min = span * 0.002;
+      if (mode === 'move') { v = [v0[0] + d, v0[1] + d]; if (v[0] < f[0]) v = [f[0], f[0] + w]; if (v[1] > f[1]) v = [f[1] - w, f[1]]; }
+      if (mode === 'lo') v[0] = Math.max(f[0], Math.min(v0[0] + d, v0[1] - min));
+      if (mode === 'hi') v[1] = Math.min(f[1], Math.max(v0[1] + d, v0[0] + min));
+      setView(v, false);
+    };
+    const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); setView(getView(), true); };
+    window.addEventListener('pointermove', move); window.addEventListener('pointerup', up);
+  }
+  thumb.addEventListener('pointerdown', e => drag(e, 'move'));
+  (vertical ? g1 : g0).addEventListener('pointerdown', e => drag(e, vertical ? 'hi' : 'lo'));
+  (vertical ? g0 : g1).addEventListener('pointerdown', e => drag(e, vertical ? 'lo' : 'hi'));
+  track.addEventListener('pointerdown', e => {
+    if (e.target !== track) return;
+    const r = track.getBoundingClientRect(), f = getFull(), v = getView(), w = v[1] - v[0];
+    const pos = vertical ? 1 - (e.clientY - r.top) / r.height : (e.clientX - r.left) / r.width;
+    let c = f[0] + pos * (f[1] - f[0]), n = [c - w / 2, c + w / 2];
+    if (n[0] < f[0]) n = [f[0], f[0] + w]; if (n[1] > f[1]) n = [f[1] - w, f[1]];
+    setView(n, true);
+  });
+  return {update};
+}
+
+function makePlot(box, key, title, small, data, ytitle, cfg){
+  const cell = document.createElement('div'); box.appendChild(cell);      // 제목과 그래프를 한 칸으로 묶어 격자 배치가 어긋나지 않게
+  if (title) { const t = document.createElement('div'); t.className = 'ptitle'; t.textContent = title; cell.appendChild(t); }
+  const wrap = document.createElement('div'); wrap.className = 'pwrap' + (small ? ' small' : '');
+  const div = document.createElement('div'); div.className = 'plot';
+  const vt = document.createElement('div'); vt.className = 'track v'; vt.title = '세로축 범위';
+  const ht = document.createElement('div'); ht.className = 'track h'; ht.title = '가로축 범위 (모든 그래프 연동)';
+  wrap.append(div, vt, ht); cell.appendChild(wrap);
+  const p = {key, div, data};
+  plots.push(p);
+  Plotly.newPlot(div, data, layout(ytitle, p), cfg);
+  div.on('plotly_relayout', ev => onRelayout(p, ev));
+  div.on('plotly_doubleclick', () => { st.xr = null; st.yr = {}; applyRanges(); return false; });
+  p.hs = slider(ht, false, fullX, () => st.xr || fullX(), (v, done) => { st.xr = v; if (!st.linkY) plots.forEach(q => delete st.yr[q.key]); applyRanges(done); });
+  p.vs = slider(vt, true, () => fullY(p), () => yOf(p), (v, done) => { if (st.linkY) st.yr.__all = v; else st.yr[p.key] = v; applyRanges(false); });
+  return p;
+}
+
+function draw(keepRange){
+  const box = document.getElementById('plots'); box.innerHTML = ''; box.classList.remove('grid'); plots = [];
+  if (!keepRange) { st.yr = {}; }
+  if (!st.tcs.length) { note('비교할 케이스를 목록에서 선택하십시오.'); document.getElementById('legend').innerHTML = ''; drawStats(); return; }
+  const warn = [];
+  const all = picked();
+  if (!all.length) { note('그릴 선이 없습니다. VM 목록에서 하나 이상 선택하십시오.'); document.getElementById('legend').innerHTML = ''; drawStats(); return; }
+  if (st.flash) { warn.unshift(st.flash); st.flash = null; }      // 선 개수 제한 안내는 다음 그리기에서 한 번 보인다
+  note(warn.join(' '));
+  const cfg = {responsive: true, displaylogo: false, showTips: false, scrollZoom: true, modeBarButtonsToRemove: ['lasso2d', 'select2d', 'autoScale2d']};
+  const u = unit(), yt = (u && !st.metric.includes(`(${u})`)) ? `${st.metric} (${u})` : st.metric;
+  const b = binOf(all); st._bin = b;
+  drawLegend(b);
+  if (st.view === 'one') {
+    makePlot(box, 'one', null, false, all.map(s => trace(s, b)), yt, cfg);
+  } else {
+    const empty = [];
+    D.cases.filter(c => st.tcs.includes(c.id)).forEach(c => {
+      const t = picked(c.id).map(s => trace(s, b));   // 케이스별 그래프도 같은 선 색을 쓴다
+      if (t.length) makePlot(box, c.id, `${c.id} · 호스트 ${c.host}${c.label ? ' · ' + c.label : ''}`, st.tcs.length > 1, t, yt, cfg);
+      else empty.push(c.id);
+    });
+    if (empty.length) { const t = document.createElement('div'); t.className = 'ptitle'; t.textContent = `선택한 VM 이 없는 케이스: ${empty.join(', ')}`; box.appendChild(t); }
+  }
+  applyRanges(false);
+  drawStats();
+}
+function recolor(){
+  plots.forEach(p => {
+    const idx = p.data.map((_, i) => i);
+    Plotly.restyle(p.div, {'line.color': p.data.map(t => lineColor(t.meta))}, idx);
+  });
+  drawLegend(st._bin); drawStats();
+  renderVms();
+}
+function drawLegend(b){
+  const items = picked().map(s => { const k = lineKey(s.case, s); return `<span><span class="sw" style="border-color:${lineColor(k)}"></span>${s.case} · ${s.entity}</span>`; }).join('');
+  document.getElementById('legend').innerHTML = items + `<span>선 ${st.sel.size}/${MAX_LINES}</span><span>${b ? b + '초 구간 평균' : '원 데이터'}</span>`;
+}
+function drawStats(){
+  const u = unit(), order = Object.fromEntries(D.vms.map((v, i) => [vmKey(v), i]));
+  const rows = D.stats.filter(s => s.metric === st.metric && st.tcs.includes(s.case) && st.sel.has(lineKey(s.case, s)));
+  rows.sort((a, b) => (D.cases.findIndex(c => c.id === a.case) - D.cases.findIndex(c => c.id === b.case)) || (order[vmKey(a)] - order[vmKey(b)]));
+  const ref = rows[0];
+  const diff = (s, r) => {
+    if (!r || s === r) return '기준';
+    const d = s.mean - r.mean;
+    if (u === '%') return `${d >= 0 ? '+' : '-'}${fmt(Math.abs(d))}%p`;
+    return r.mean ? `${d >= 0 ? '+' : ''}${(d / Math.abs(r.mean) * 100).toFixed(1)}%` : `${d >= 0 ? '+' : '-'}${fmt(Math.abs(d))}`;
+  };
+  let h = `<tr><th>케이스</th><th>VM</th><th>호스트</th><th>표본 수</th><th>평균</th><th>p95</th><th>최댓값</th><th>첫 번째 선(${ref ? ref.case + ' · ' + ref.entity : '-'}) 대비 평균 차이</th></tr>`;
+  rows.forEach(s => {
+    h += `<tr><td><span class="sw" style="display:inline-block;vertical-align:middle;margin-right:6px;border-color:${lineColor(lineKey(s.case, s))}"></span>${s.case}</td><td>${s.entity}</td><td>${s.host}</td><td>${s.n}</td><td>${fmt(s.mean)}</td><td>${fmt(s.p95)}</td><td>${fmt(s.max)}</td><td>${diff(s, ref)}</td></tr>`;
+  });
+  document.getElementById('stats').innerHTML = h + (u ? `<caption style="caption-side:bottom;text-align:left;color:var(--text-muted);padding-top:6px">단위: ${u} · 비교 기준은 표의 첫 번째 선(케이스 순서 → VM 순서). 다른 선을 기준으로 하려면 VM 선택을 바꾼다.</caption>` : '');
+}
+
+// ── 이벤트 연결 ────────────────────────────────────────────────────
+function seg(id, attr, fn){
+  document.querySelectorAll(`#${id} button`).forEach(b => b.onclick = () => {
+    document.querySelectorAll(`#${id} button`).forEach(x => x.setAttribute('aria-pressed', x === b)); fn(b.dataset[attr]);
+  });
+}
+document.getElementById('title').textContent = D.title;
+document.getElementById('subtitle').textContent = `작성일 ${D.date} · 케이스 ${D.cases.length}개 · 지표 ${D.metrics.length}개 · 선 하나 = 케이스 + VM (최대 8개)`;
+document.getElementById('tcFilter').oninput = renderTcList;
+document.getElementById('mFilter').oninput = renderMetrics;
+document.getElementById('mSel').onchange = e => { st.metric = e.target.value; draw(true); };   // 지표를 바꿔도 가로 구간은 유지
+seg('viewSeg', 'v', v => { st.view = v; draw(true); });
+seg('xSeg', 'x', v => { st.x = v; st.xr = null; draw(); });
+seg('binSeg', 'b', v => { st.bin = v; draw(true); });
+seg('dragSeg', 'd', v => { st.drag = v; plots.forEach(p => Plotly.relayout(p.div, {dragmode: v})); });
+document.getElementById('linkY').onchange = e => { st.linkY = e.target.checked; st.yr = {}; applyRanges(false); };
+document.getElementById('resetView').onclick = () => { st.xr = null; st.yr = {}; applyRanges(); };
+document.getElementById('colorReset').onclick = () => {
+  const u = userColors(); Object.keys(u).filter(k => k.startsWith('line:')).forEach(k => delete u[k]); saveColors(u); recolor();
+};
+document.getElementById('colorExport').onclick = () => {
+  const m = {}; [...st.sel].forEach(k => m['line:' + k] = lineColor(k));
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([JSON.stringify(Object.assign(userColors(), m), null, 1)], {type: 'application/json'}));
+  a.download = 'perfreport_colors.json'; a.click();
+};
+document.getElementById('colorImport').onclick = () => document.getElementById('colorFile').click();
+document.getElementById('colorFile').onchange = e => {
+  const f = e.target.files[0]; if (!f) return;
+  f.text().then(t => { try { const m = JSON.parse(t); saveColors(Object.assign(userColors(), m)); recolor(); } catch (err) { note('색 설정 파일을 읽지 못했습니다: ' + err.message); } });
+};
+// 같은 PC 에서 열려 있는 다른 리포트 창이 색을 바꾸면 이 창에도 바로 적용한다
+window.addEventListener('storage', e => { if (e.key === COLOR_KEY) recolor(); });
+document.getElementById('themeBtn').onclick = e => {
+  st.dark = !st.dark; document.documentElement.dataset.theme = st.dark ? 'dark' : 'light';
+  e.target.setAttribute('aria-pressed', st.dark); e.target.textContent = st.dark ? '밝은 화면' : '어두운 화면';
+  renderTcList(); renderVms(); draw(true);
+};
+if (D.cases.length) { st.tcs.push(D.cases[0].id); selectCaseAll(D.cases[0].id); }   // 처음에는 첫 케이스의 VM 을 8대까지
+const pref = D.metrics.find(m => /CPU\|Usage \(%\)/.test(m.name)); if (pref) st.metric = pref.name;
+document.getElementById('vmFilter').oninput = renderVms;
+document.getElementById('vmAll').onclick = () => { st.tcs.forEach(selectCaseAll); renderVms(); draw(true); };
+document.getElementById('vmNone').onclick = () => { [...st.sel].forEach(removeLine); renderVms(); draw(true); };
+document.getElementById('vmShown').onclick = () => { [...st.sel].forEach(removeLine); vmsShown().some(k => !addLine(k)); renderVms(); draw(true); };
+renderTcList(); renderMetrics(); renderVms(); draw();
+document.getElementById('jsWarn').remove();   // 여기까지 실행됐으면 그래프가 정상으로 그려진 것: 안내 문구를 지운다
+</script>
+</body>
+</html>

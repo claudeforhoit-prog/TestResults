@@ -1,0 +1,8 @@
+# 직접 만든 CSV (한 행 = 대상 1개 × 시각 1개, 지표는 열)
+# 열 이름 예: Time, Host, VM, CPU Usage (%), Memory Used (GB) ...
+type: csv_wide
+source_system: CSV (Time · Host · VM 열 형식)
+time_column: Time
+entity_column: VM
+host_column: Host
+metrics: all_numeric

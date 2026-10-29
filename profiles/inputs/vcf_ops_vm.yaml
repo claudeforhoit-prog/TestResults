@@ -1,0 +1,8 @@
+# VCF Operations 의 VM 지표 CSV export (한 행 = VM 1개 × 시각 1개, 지표는 열)
+type: csv_wide
+source_system: VCF Operations (VM 지표 CSV export)
+time_column: timestamp            # 예: "14 Sep 2026, 15:13:24"
+time_format: "%d %b %Y, %H:%M:%S" # 이 형식으로 읽히지 않으면 일반 날짜 형식으로 다시 읽는다
+entity_column: Name               # VM 이름
+host_column: ['Summary|Parent Host', 'Parent Host', 'Host', 'Host Name']   # 상위 호스트 열이 있으면 쓴다. 없으면 케이스 CSV 의 VM 열 또는 호스트 이름으로 VM 을 고른다
+metrics: all_numeric

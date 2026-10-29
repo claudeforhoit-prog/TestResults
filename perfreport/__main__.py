@@ -1,0 +1,61 @@
+"""명령줄 실행.
+
+  perfreport run <케이스정보.csv> <데이터폴더> [--out 폴더] [--title 제목] [--baseline 케이스명] [--core]
+                                        케이스 정보 CSV 로 리포트 생성 (기본 방식)
+  perfreport split <케이스정보.csv> <원본폴더> <정리폴더>
+                                        원본에서 TC 별 구간만 잘라 정리폴더/<케이스명>/ 에 저장 (리포트 없이)
+  perfreport build <작업파일.yaml>      작업 파일로 리포트 생성
+  perfreport gui                        창 화면으로 실행
+  perfreport inspect <파일> [프로파일]   입력 파일에서 읽히는 지표·개체·시각 범위 확인
+"""
+import argparse
+import os
+import sys
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog='perfreport')
+    sub = ap.add_subparsers(dest='cmd')
+    r = sub.add_parser('run'); r.add_argument('cases'); r.add_argument('data')
+    r.add_argument('--out'); r.add_argument('--title'); r.add_argument('--baseline')
+    r.add_argument('--split', help='TC 별 정리 폴더 (지정하면 원본에서 TC 구간만 잘라 저장)')
+    sp = sub.add_parser('split'); sp.add_argument('cases'); sp.add_argument('data'); sp.add_argument('out')
+    r.add_argument('--core', action='store_true', help='VM 핵심 지표만 (profiles/analysis/vm_core.yaml)')
+    b = sub.add_parser('build'); b.add_argument('job')
+    sub.add_parser('gui')
+    i = sub.add_parser('inspect'); i.add_argument('file'); i.add_argument('profile', nargs='?')
+    a = ap.parse_args(argv)
+    if a.cmd == 'run':
+        from .build import run_csv
+        run_csv(a.cases, a.data, a.out, a.title, a.baseline,
+                'profiles/analysis/vm_core.yaml' if a.core else None, split_dir=a.split)
+    elif a.cmd == 'split':
+        from .build import run_csv
+        run_csv(a.cases, a.data, split_dir=a.out, report=False)
+    elif a.cmd == 'build':
+        from .build import run
+        run(a.job)
+    elif a.cmd == 'inspect':
+        from .build import APP_DIR, load_profiles
+        from .ingest import load_source
+        profs = load_profiles(os.path.join(APP_DIR, 'profiles', 'inputs'))
+        names = [a.profile] if a.profile else list(profs)
+        for n in names:
+            try:
+                df = load_source({'path': a.file, 'profile': n}, profs[n])
+            except Exception as e:
+                print(f'[{n}] 읽기 실패: {type(e).__name__}: {e}')
+                continue
+            if df.empty:
+                print(f'[{n}] 읽힌 값 없음'); continue
+            print(f'[{n}] 값 {len(df):,}개 · 시각 {df.t.min()} ~ {df.t.max()}')
+            print('  개체:', ', '.join(sorted(df.entity.unique())))
+            for m, u in df[['metric', 'unit']].drop_duplicates().values:
+                print(f'  지표: {m}' + (f'  [{u}]' if u else ''))
+    else:
+        from .gui import main as gui_main
+        gui_main()
+
+
+if __name__ == '__main__':
+    sys.exit(main())

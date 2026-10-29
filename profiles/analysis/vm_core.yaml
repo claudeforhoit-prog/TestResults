@@ -1,0 +1,11 @@
+# VM 핵심 지표만 (VCF Operations VM 지표 이름 기준)
+compare_stat: mean
+metrics:
+  - CPU|Usage (%)
+  - CPU|Ready (%)
+  - CPU|Co-stop (%)
+  - Memory|Usage (%)
+  - Guest|Used Memory (GB)
+  - Guest|CPU Context Switch Rate
+  - Virtual Disk:Aggregate of all instances|Read Latency (ms)
+  - Virtual Disk:Aggregate of all instances|Write Latency (ms)

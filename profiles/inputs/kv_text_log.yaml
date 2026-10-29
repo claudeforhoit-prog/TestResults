@@ -1,0 +1,9 @@
+# 'Key:Value, Key:Value' 형식 텍스트 로그: 한 줄이 한 레코드
+# 예: Timestamp:2026-01-05 10:00:00, Hostname:esx01-vm01, Mem_Used_MB:1234, Swap_Used_MB:0
+type: kv_text
+source_system: 텍스트 로그 (Key:Value 형식)
+time_key: Timestamp
+time_format: "%Y-%m-%d %H:%M:%S"
+entity_key: Hostname               # 대상(VM) 이름이 들어 있는 키
+metrics: all_numeric
+units: {}                          # 이름에 단위가 없는 지표의 단위. 예: {Mem_Used_MB: MB}
