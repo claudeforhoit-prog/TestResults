@@ -17,9 +17,14 @@ h1{font-size:18px;margin:0}
 .box h2{font-size:12px;margin:0 0 6px;color:var(--text-secondary);font-weight:600}
 .box input[type=search],.box select{width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--surface-1);color:var(--text-primary);font:inherit}
 .list{max-height:150px;overflow:auto;margin-top:6px}
+.mlist{max-height:220px}
 .list .hosthdr{font-size:11.5px;color:var(--text-muted);margin:6px 0 2px;font-weight:600}
 .list label.off{opacity:.45}
 .vmrow{display:flex;gap:6px;align-items:center;padding:2px 0;font-size:13px}
+.palrow{display:flex;gap:5px;align-items:center;padding:0 0 4px 24px;font-size:12px}
+.palrow .sub{white-space:nowrap}
+.palrow select{font-size:12px;padding:1px 4px;border:1px solid var(--border);border-radius:4px;background:transparent;color:inherit;max-width:150px}
+.chip{width:12px;height:12px;border-radius:3px;display:inline-block;flex:0 0 12px}
 .vmrow input[type=color]{width:26px;height:20px;padding:0;border:1px solid var(--border);border-radius:4px;background:none;cursor:pointer;flex:0 0 26px}
 .vmname{background:none;border:none;padding:0;font:inherit;color:var(--text-primary);cursor:pointer;text-align:left;text-decoration:underline dotted var(--text-muted)}
 .vmname:hover{color:var(--accent)}
@@ -33,13 +38,14 @@ h1{font-size:18px;margin:0}
 .btn.small{padding:3px 8px;font-size:12px}
 .seg button[aria-pressed=true]{background:var(--accent);border-color:var(--accent);color:#fff}
 .toolbar{display:flex;flex-wrap:wrap;gap:8px 16px;align-items:center;padding:8px 20px 0;font-size:12.5px;color:var(--text-secondary)}
+.toolbar select{font-size:12px;padding:2px 4px;border:1px solid var(--border);border-radius:4px;background:transparent;color:inherit}
 .legend{display:flex;flex-wrap:wrap;gap:6px 16px;padding:8px 20px 0;font-size:12.5px;color:var(--text-secondary)}
 .legend span{display:inline-flex;align-items:center;gap:6px}
 .note{color:var(--warn);font-size:12px;min-height:16px;padding:6px 20px 0}
 main{padding:4px 12px 24px}
 .pwrap{display:grid;grid-template-columns:1fr 18px;grid-template-rows:auto 18px;gap:4px 6px;margin-top:6px}
-.plot{width:100%;height:440px;min-width:0}
-.pwrap.small .plot{height:300px}
+.plot{width:100%;height:var(--ph,440px);min-width:0}
+.pwrap.small .plot{height:calc(var(--ph,440px) * .68)}
 .ptitle{font-size:13px;color:var(--text-secondary);margin:14px 8px 0}
 .track{position:relative;background:var(--track);border-radius:9px;touch-action:none;cursor:pointer}
 .track.h{height:18px}
@@ -72,9 +78,11 @@ td:nth-child(-n+3),th:nth-child(-n+3){text-align:left}
   <div class="box"><h2>케이스 선택</h2>
     <input type="search" id="tcFilter" placeholder="케이스 검색">
     <div class="list" id="tcList"></div></div>
-  <div class="box"><h2>지표</h2>
+  <div class="box"><h2>지표 (여러 개 선택 · 최대 6개 · 지표마다 그래프 1개)</h2>
     <input type="search" id="mFilter" placeholder="지표 검색">
-    <select id="mSel" size="6" style="margin-top:6px"></select></div>
+    <div class="seg" style="margin-top:6px"><button class="btn small" id="mNone">지표 선택 해제</button>
+      <span class="sub" id="mCount" style="align-self:center"></span></div>
+    <div class="list mlist" id="mList"></div></div>
   <div class="box"><h2>VM 선택 (선 하나 = 케이스 + VM · 최대 8개 · 이름을 누르면 그 케이스에서 그 VM 만)</h2>
     <input type="search" id="vmFilter" placeholder="VM 검색">
     <div class="seg" style="margin-top:6px">
@@ -82,7 +90,7 @@ td:nth-child(-n+3),th:nth-child(-n+3){text-align:left}
       <button class="btn small" id="vmNone">전체 해제</button>
       <button class="btn small" id="vmShown">검색 결과만 선택</button></div>
     <div class="seg" style="margin-top:4px">
-      <button class="btn small" id="colorReset">선 색 초기화</button>
+      <button class="btn small" id="colorReset">색 초기화</button>
       <button class="btn small" id="colorExport">색 설정 내보내기</button>
       <button class="btn small" id="colorImport">색 설정 가져오기</button>
       <input type="file" id="colorFile" accept=".json" hidden></div>
@@ -91,7 +99,7 @@ td:nth-child(-n+3),th:nth-child(-n+3){text-align:left}
     <div class="seg" id="viewSeg" style="margin-bottom:8px">
       <button data-v="one" aria-pressed="true">한 그래프에 비교</button>
       <button data-v="case" aria-pressed="false">케이스별 그래프</button></div>
-    <div class="sub" style="margin-bottom:8px">선 하나 = 케이스 + VM · 모두 실선 · 색으로 구별</div>
+    <div class="sub" style="margin-bottom:8px">선 하나 = 케이스 + VM · 모두 실선 · 케이스마다 색 계열이 다르다</div>
     <div class="seg" id="xSeg">
       <button data-x="sec" aria-pressed="true">가로축: 경과 시간 (s)</button>
       <button data-x="time" aria-pressed="false">가로축: 실제 시각</button></div>
@@ -109,6 +117,10 @@ td:nth-child(-n+3),th:nth-child(-n+3){text-align:left}
     <button data-d="pan" aria-pressed="false">이동</button></div>
   <label><input type="checkbox" id="linkY"> 세로축 범위도 연동</label>
   <button class="btn small" id="resetView">전체 보기</button>
+  <span>그래프 크기:</span>
+  <select id="plotH" title="그래프 높이"><option value="300">높이 작게</option><option value="440">높이 보통</option><option value="600">높이 크게</option><option value="800">높이 아주 크게</option></select>
+  <select id="plotW" title="그래프 폭 (화면 폭 대비)"><option value="100">폭 100%</option><option value="80">폭 80%</option><option value="60">폭 60%</option></select>
+  <button class="btn small" id="selExport" title="지금 고른 케이스 · VM · 지표를 파일로 저장합니다. 리포트 생성기의 'HTML 선택 파일' 칸에 넣으면 그 항목만으로 Word 리포트를 만듭니다.">선택 내보내기</button>
   <span id="rangeText"></span>
 </div>
 <div class="note" id="note"></div>
@@ -121,8 +133,6 @@ td:nth-child(-n+3),th:nth-child(-n+3){text-align:left}
 <script>__PLOTLY__</script>
 <script>
 const D = __DATA__;
-const LIGHT = ['#2a78d6','#eb6834','#1baf7a','#eda100','#e87ba4','#008300','#4a3aa7','#e34948'];
-const DARK  = ['#3987e5','#d95926','#199e70','#c98500','#d55181','#008300','#9085e9','#e66767'];
 const DASH = ['solid','dash','dot','dashdot','longdash','longdashdot'];
 const SYM  = ['circle','square','diamond','triangle-up','triangle-down','x'];
 const CSS_DASH = ['', '6,3', '1.5,2', '6,2,1.5,2', '10,3', '10,2,1.5,2'];
@@ -133,42 +143,61 @@ const COLOR_KEY = 'perfreport.colors.v1';   // 브라우저 저장소 키: 같�
 // yr: 세로축 표시 범위: 그래프별(연동을 켜면 공통 하나). null 이면 보이는 구간의 데이터에 맞춘다.
 const vmKey = s => `${s.entity}|${s.host}`;
 const lineKey = (cs, s) => `${cs}|${s.entity}|${s.host}`;          // 선택 단위: 케이스 안의 VM
-const st = {tcs: [], sel: new Set(), metric: D.metrics[0].name, view: 'one', x: 'sec', dark: false, bin: 'auto',
+const MAX_METRICS = 6;
+const st = {tcs: [], sel: new Set(), metrics: [], view: 'one', x: 'sec', dark: false, bin: 'auto',
             drag: 'zoom', linkY: false, xr: null, yr: {}};
 let plots = [];        // [{key, div, data: [{x:[], y:[]}], hs, vs}]
 let syncing = false;   // 연동 중 다른 그래프의 이벤트가 다시 연동을 부르지 않게 막는다
 
 // ── 색 ─────────────────────────────────────────────────────────────
-// 선 하나 = 케이스 + VM. 선을 고른 순서대로 빈 색 번호를 받고, 선택이 풀릴 때 반납한다.
-// 그래서 다른 선을 넣고 빼도 이미 그려진 선의 색은 바뀌지 않는다. 사용자가 바꾼 색이 우선한다.
+// 선 하나 = 케이스 + VM. 케이스마다 팔레트(색 계열) 하나를 쓰고, VM 은 그 팔레트의 색을 VM 순서(호스트 → VM 이름)대로 받는다.
+// 그래서 같은 VM 이라도 케이스가 다르면 다른 계열의 색이 되고, 다른 선을 넣고 빼도 이미 그려진 선의 색은 바뀌지 않는다.
+// 팔레트는 케이스를 체크한 순서대로 아직 쓰지 않은 것을 받는다(자동 배정 대상만). 사용자가 고른 팔레트와 선 색이 우선한다.
+// 팔레트 안의 색은 이웃한 VM 끼리 구별되도록 진하기를 번갈아 놓았다.
+const PALETTES = D.palettes;   // 리포트 생성기(palette.py)와 같은 목록. auto 가 false 인 팔레트는 자동 배정에서 뺀다
 const MAX_LINES = 8;
-const lineSlot = {};
-function takeLineSlot(k){
-  if (lineSlot[k] != null) return;
-  const used = new Set(Object.values(lineSlot));
-  for (let i = 0; i < MAX_LINES; i++) if (!used.has(i)) { lineSlot[k] = i; return; }
-}
-function dropLineSlot(k){ delete lineSlot[k]; }
+const casePal = {};    // 케이스 → {p: 팔레트 번호, off: 색 시작 위치}. 자동 배정이고, 케이스 체크를 풀면 반납한다
 function userColors(){ try { return JSON.parse(localStorage.getItem(COLOR_KEY) || '{}'); } catch (e) { return {}; } }
 function saveColors(m){ try { localStorage.setItem(COLOR_KEY, JSON.stringify(m)); } catch (e) { note('이 브라우저는 색 설정 저장을 막고 있습니다. "색 설정 내보내기" 를 쓰십시오.'); } }
+function lighten(hex, a){     // 어두운 화면에서는 같은 색을 밝게 그린다
+  const n = parseInt(hex.slice(1), 16), f = v => Math.round(v + (255 - v) * a);
+  return '#' + [n >> 16, (n >> 8) & 255, n & 255].map(v => f(v).toString(16).padStart(2, '0')).join('');
+}
+function palPicked(cs){ const v = userColors()['pal:' + cs]; return v != null && PALETTES[v] ? +v : null; }
+function assignPal(cs){       // 체크한 케이스에 가장 적게 쓴 팔레트를 배정한다 (모두 비어 있으면 첫 팔레트)
+  if (casePal[cs]) return;
+  const used = st.tcs.filter(t => t !== cs).map(t => palPicked(t) ?? (casePal[t] ? casePal[t].p : null)).filter(v => v != null);
+  const auto = PALETTES.map((x, i) => i).filter(i => PALETTES[i].auto !== false);
+  const cnt = auto.map(i => used.filter(u => u === i).length), k = cnt.indexOf(Math.min(...cnt));
+  casePal[cs] = {p: auto[k], off: cnt[k] * 4};   // 팔레트가 모자라 같은 팔레트를 다시 쓰면 색 시작 위치를 옮긴다
+}
+function palOf(cs){
+  const mine = palPicked(cs);
+  if (mine != null) return {p: mine, off: 0};
+  assignPal(cs);
+  return casePal[cs];
+}
+function palColor(cs, i){ const {p, off} = palOf(cs), cs8 = PALETTES[p].c, c = cs8[(i + off) % cs8.length]; return st.dark ? lighten(c, 0.3) : c; }
 function lineColor(k){
   const u = userColors();
   if (u['line:' + k]) return u['line:' + k];
-  return (st.dark ? DARK : LIGHT)[(lineSlot[k] ?? 0) % 8];
+  const info = lineInfo[k] || {cs: k.split('|')[0], i: 0};
+  return palColor(info.cs, info.i);
 }
 // 선 추가: 최대 8개. 넘으면 false.
 function addLine(k){
   if (st.sel.has(k)) return true;
   if (st.sel.size >= MAX_LINES) { st.flash = `한 그래프에 선은 최대 ${MAX_LINES}개입니다. 다른 선을 해제한 뒤 추가하십시오.`; note(st.flash); return false; }
-  st.sel.add(k); takeLineSlot(k); return true;
+  st.sel.add(k); return true;
 }
-function removeLine(k){ st.sel.delete(k); dropLineSlot(k); }
+function removeLine(k){ st.sel.delete(k); }
 
 // ── 공통 도우미 ─────────────────────────────────────────────────────
 function css(v){ return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
 function fmt(v){ if (v == null || isNaN(v)) return '-'; return Math.abs(v) >= 1000 ? v.toLocaleString('ko-KR', {maximumFractionDigits: 0}) : (Math.abs(v) < 1 && v !== 0 ? v.toFixed(3) : v.toFixed(2)); }
 function note(t){ document.getElementById('note').textContent = t || ''; }
-function unit(){ const m = D.metrics.find(m => m.name === st.metric); return m ? m.unit : ''; }
+function unit(name){ const m = D.metrics.find(m => m.name === name); return m ? m.unit : ''; }
+function ytitleOf(m){ const u = unit(m); return (u && !m.includes(`(${u})`)) ? `${m} (${u})` : m; }
 // 가로축 값 ↔ 숫자. 실제 시각 모드에서 plotly 는 'YYYY-MM-DD HH:MM:SS' 문자열을 쓰고, 내부는 ms 숫자로 다룬다.
 function toAxis(v){ return st.x === 'sec' ? v : new Date(v).toISOString().slice(0, 23).replace('T', ' '); }
 function fromAxis(v){ return st.x === 'sec' ? +v : Date.parse(String(v).replace(' ', 'T') + (String(v).length > 10 ? 'Z' : 'T00:00:00Z')); }
@@ -196,12 +225,15 @@ function binned(s, b){
   return {x: keys.map(k => k * b + b / 2), y: keys.map(k => acc.get(k)[0] / acc.get(k)[1])};
 }
 // 그릴 시계열. cs 를 주면 그 케이스만.
-function picked(cs){
-  return D.series.filter(s => s.metric === st.metric && st.tcs.includes(s.case) && st.sel.has(lineKey(s.case, s)) && (!cs || s.case === cs));
+function picked(cs, m){
+  return D.series.filter(s => (m ? s.metric === m : st.metrics.includes(s.metric)) && st.tcs.includes(s.case)
+                              && st.sel.has(lineKey(s.case, s)) && (!cs || s.case === cs));
 }
 // 케이스에 들어 있는 VM 목록
 const caseVms = {};
 D.vms.forEach(v => v.cases.forEach(c => (caseVms[c] = caseVms[c] || []).push(v)));
+const lineInfo = {};   // 선 → {cs: 케이스, i: 케이스 안 VM 순서}. 선 색은 케이스 팔레트의 i 번째 색
+Object.entries(caseVms).forEach(([cs, vs]) => vs.forEach((v, i) => { lineInfo[lineKey(cs, v)] = {cs, i}; }));
 function selectCaseAll(cs){
   let n = 0;
   for (const v of (caseVms[cs] || [])) { if (!addLine(lineKey(cs, v))) break; n++; }
@@ -218,15 +250,25 @@ function renderTcList(){
     l.innerHTML = `<input type="checkbox" ${on ? 'checked' : ''}><span>${c.id}</span><span class="sub">${c.host || ''}${c.label ? ' · ' + c.label : ''}</span>`;
     l.querySelector('input').onchange = e => toggleTc(c.id, e.target.checked);
     box.appendChild(l);
+    if (on) {                                       // 체크한 케이스: 색 계열(팔레트) 고르기
+      const {p} = palOf(c.id), row = document.createElement('div'); row.className = 'palrow';
+      row.innerHTML = `<span class="sub">색 계열</span><select title="이 케이스 선들의 색 계열">${PALETTES.map((x, i) => `<option value="${i}" ${i === p ? 'selected' : ''}>${x.name}</option>`).join('')}</select>`
+        + [0, 1, 2, 3].map(i => `<span class="chip" style="background:${palColor(c.id, i)}"></span>`).join('');
+      row.querySelector('select').onchange = e => { const u = userColors(); u['pal:' + c.id] = +e.target.value; saveColors(u); recolor(); renderTcList(); };
+      box.appendChild(row);
+    }
   });
 }
 function toggleTc(tc, on){
   if (on) {
     if (st.tcs.length >= MAX) { note(`한 번에 비교할 수 있는 케이스는 최대 ${MAX}개입니다.`); renderTcList(); return; }
-    st.tcs.push(tc);                                // 케이스를 고르면 VM 목록이 나온다. 선은 VM 을 골라 추가한다
+    st.tcs.push(tc); assignPal(tc);
+    const total = (caseVms[tc] || []).length, n = selectCaseAll(tc);   // 케이스를 고르면 그 케이스의 VM 을 선으로 모두 추가한다
+    if (n < total) st.flash = `한 그래프에 선은 최대 ${MAX_LINES}개입니다. ${tc} 의 VM ${total - n}개는 추가하지 못했습니다. VM 목록에서 다른 선을 해제한 뒤 체크하십시오.`;
   } else {
     st.tcs = st.tcs.filter(t => t !== tc);
     [...st.sel].filter(k => k.startsWith(tc + '|')).forEach(removeLine);
+    delete casePal[tc];
   }
   renderTcList(); renderVms(); draw();
 }
@@ -257,13 +299,30 @@ function vmsShown(){
 }
 function renderMetrics(){
   const q = document.getElementById('mFilter').value.toLowerCase();
-  const sel = document.getElementById('mSel'); sel.innerHTML = '';
-  let grp = null, cat = null;
-  D.metrics.filter(m => (m.name + ' ' + (m.category || '')).toLowerCase().includes(q)).forEach(m => {
-    if (m.category !== cat) { cat = m.category; grp = document.createElement('optgroup'); grp.label = cat || '기타'; sel.appendChild(grp); }
-    const o = document.createElement('option'); o.value = m.name; o.textContent = m.name;
-    if (m.name === st.metric) o.selected = true; grp.appendChild(o);
+  const box = document.getElementById('mList'); box.innerHTML = '';
+  const hasRoles = D.metrics.some(m => m.role);
+  let head = null;
+  D.metrics.filter(m => `${m.name} ${m.category || ''} ${m.role || ''}`.toLowerCase().includes(q)).forEach(m => {
+    // 역할 지정 지표는 역할 이름 아래(역할 순서), 미지정 지표는 분류 이름 아래
+    const g = m.role || (hasRoles ? `역할 미지정 · ${m.category || '기타'}` : (m.category || '기타'));
+    if (g !== head) { head = g; const h = document.createElement('div'); h.className = 'hosthdr'; h.textContent = g; box.appendChild(h); }
+    const l = document.createElement('label');
+    l.innerHTML = `<input type="checkbox" ${st.metrics.includes(m.name) ? 'checked' : ''}><span>${m.name}</span>`;
+    l.querySelector('input').onchange = e => toggleMetric(m.name, e.target.checked);
+    box.appendChild(l);
   });
+  document.getElementById('mCount').textContent = `선택 ${st.metrics.length}/${MAX_METRICS}`;
+}
+function toggleMetric(name, on){
+  if (on && !st.metrics.includes(name)) {
+    if (st.metrics.length >= MAX_METRICS) { st.flash = `한 번에 볼 수 있는 지표는 최대 ${MAX_METRICS}개입니다. 다른 지표를 해제한 뒤 선택하십시오.`; note(st.flash); renderMetrics(); return; }
+    st.metrics.push(name);
+  } else if (!on) {
+    st.metrics = st.metrics.filter(m => m !== name);
+  }
+  const pos = Object.fromEntries(D.metrics.map((m, i) => [m.name, i]));   // 그래프는 지표 목록 순서(역할 → 역할 안 순서)대로
+  st.metrics.sort((a, b) => pos[a] - pos[b]);
+  renderMetrics(); draw(true);
 }
 
 // ── 그래프 ─────────────────────────────────────────────────────────
@@ -271,7 +330,7 @@ function trace(s, b){
   const d = binned(s, b), xs = st.x === 'sec' ? d.x : d.x.map(v => s.t0 + v * 1000);
   const k = lineKey(s.case, s), name = `${s.case} · ${s.entity}`;
   return {type: 'scatter', mode: 'lines', x: st.x === 'sec' ? xs : xs.map(toAxis), y: d.y, _xn: xs, name, meta: k,
-    line: {color: lineColor(k), width: 1.8}, hovertemplate: `${name}  %{y:,.3~f} ${unit()}<extra></extra>`};
+    line: {color: lineColor(k), width: 1.8}, hovertemplate: `${name}  %{y:,.3~f} ${unit(s.metric)}<extra></extra>`};
 }
 function fullX(){
   let lo = Infinity, hi = -Infinity;
@@ -292,7 +351,8 @@ function fitY(p){
   if (!(lo < hi)) return fullY(p);
   const pad = (hi - lo) * 0.06; return [lo - pad, hi + pad];
 }
-function yOf(p){ return (st.linkY ? st.yr.__all : st.yr[p.key]) || fitY(p); }
+function ykey(p){ return st.linkY ? '__m:' + p.metric : p.key; }      // 세로축 연동은 같은 지표 그래프끼리만
+function yOf(p){ return st.yr[ykey(p)] || fitY(p); }
 
 function layout(ytitle, p){
   const ax = {gridcolor: css('--grid'), linecolor: css('--border'), zerolinecolor: css('--border'),
@@ -323,7 +383,7 @@ function onRelayout(p, ev){
     else if (!same(nx, st.xr)) { st.xr = nx; changed = true; if (!st.linkY && y0 === undefined) delete st.yr[p.key]; }
   }
   if (y0 !== undefined && y1 !== undefined) {
-    const ny = [+y0, +y1], k = st.linkY ? '__all' : p.key;
+    const ny = [+y0, +y1], k = ykey(p);
     if (!same(ny, st.yr[k])) { st.yr[k] = ny; changed = true; }
   }
   if (changed) applyRanges();      // 같은 범위를 다시 받으면 무시한다: 그래프끼리 이벤트가 되풀이되지 않게
@@ -331,7 +391,7 @@ function onRelayout(p, ev){
 function applyRanges(rebin){
   if (rebin !== false && st.bin === 'auto' && st.x === 'sec') {
     // 확대·축소로 자동 평균 구간이 달라지면 선을 다시 계산한다
-    const nb = binOf(picked(null));
+    const nb = binOf(picked());
     if (nb !== st._bin) { draw(true); return; }
   }
   syncing = true;
@@ -388,7 +448,7 @@ function slider(track, vertical, getFull, getView, setView){
   return {update};
 }
 
-function makePlot(box, key, title, small, data, ytitle, cfg){
+function makePlot(box, key, title, small, data, ytitle, cfg, metric){
   const cell = document.createElement('div'); box.appendChild(cell);      // 제목과 그래프를 한 칸으로 묶어 격자 배치가 어긋나지 않게
   if (title) { const t = document.createElement('div'); t.className = 'ptitle'; t.textContent = title; cell.appendChild(t); }
   const wrap = document.createElement('div'); wrap.className = 'pwrap' + (small ? ' small' : '');
@@ -396,13 +456,13 @@ function makePlot(box, key, title, small, data, ytitle, cfg){
   const vt = document.createElement('div'); vt.className = 'track v'; vt.title = '세로축 범위';
   const ht = document.createElement('div'); ht.className = 'track h'; ht.title = '가로축 범위 (모든 그래프 연동)';
   wrap.append(div, vt, ht); cell.appendChild(wrap);
-  const p = {key, div, data};
+  const p = {key, div, data, metric};
   plots.push(p);
   Plotly.newPlot(div, data, layout(ytitle, p), cfg);
   div.on('plotly_relayout', ev => onRelayout(p, ev));
   div.on('plotly_doubleclick', () => { st.xr = null; st.yr = {}; applyRanges(); return false; });
   p.hs = slider(ht, false, fullX, () => st.xr || fullX(), (v, done) => { st.xr = v; if (!st.linkY) plots.forEach(q => delete st.yr[q.key]); applyRanges(done); });
-  p.vs = slider(vt, true, () => fullY(p), () => yOf(p), (v, done) => { if (st.linkY) st.yr.__all = v; else st.yr[p.key] = v; applyRanges(false); });
+  p.vs = slider(vt, true, () => fullY(p), () => yOf(p), (v, done) => { st.yr[ykey(p)] = v; applyRanges(false); });
   return p;
 }
 
@@ -410,26 +470,30 @@ function draw(keepRange){
   const box = document.getElementById('plots'); box.innerHTML = ''; box.classList.remove('grid'); plots = [];
   if (!keepRange) { st.yr = {}; }
   if (!st.tcs.length) { note('비교할 케이스를 목록에서 선택하십시오.'); document.getElementById('legend').innerHTML = ''; drawStats(); return; }
+  if (!st.metrics.length) { note('지표를 하나 이상 선택하십시오.'); document.getElementById('legend').innerHTML = ''; drawStats(); return; }
   const warn = [];
   const all = picked();
   if (!all.length) { note('그릴 선이 없습니다. VM 목록에서 하나 이상 선택하십시오.'); document.getElementById('legend').innerHTML = ''; drawStats(); return; }
   if (st.flash) { warn.unshift(st.flash); st.flash = null; }      // 선 개수 제한 안내는 다음 그리기에서 한 번 보인다
   note(warn.join(' '));
   const cfg = {responsive: true, displaylogo: false, showTips: false, scrollZoom: true, modeBarButtonsToRemove: ['lasso2d', 'select2d', 'autoScale2d']};
-  const u = unit(), yt = (u && !st.metric.includes(`(${u})`)) ? `${st.metric} (${u})` : st.metric;
   const b = binOf(all); st._bin = b;
   drawLegend(b);
-  if (st.view === 'one') {
-    makePlot(box, 'one', null, false, all.map(s => trace(s, b)), yt, cfg);
-  } else {
-    const empty = [];
-    D.cases.filter(c => st.tcs.includes(c.id)).forEach(c => {
-      const t = picked(c.id).map(s => trace(s, b));   // 케이스별 그래프도 같은 선 색을 쓴다
-      if (t.length) makePlot(box, c.id, `${c.id} · 호스트 ${c.host}${c.label ? ' · ' + c.label : ''}`, st.tcs.length > 1, t, yt, cfg);
-      else empty.push(c.id);
-    });
-    if (empty.length) { const t = document.createElement('div'); t.className = 'ptitle'; t.textContent = `선택한 VM 이 없는 케이스: ${empty.join(', ')}`; box.appendChild(t); }
-  }
+  const multi = st.metrics.length > 1, empty = [];
+  st.metrics.forEach(m => {
+    if (st.view === 'one') {                         // 지표마다 그래프 1개, 선 = 케이스 + VM
+      const t = picked(null, m).map(s => trace(s, b));
+      if (t.length) makePlot(box, 'm:' + m, m, multi, t, ytitleOf(m), cfg, m);
+      else empty.push(m);
+    } else {                                         // 지표마다, 케이스마다 그래프
+      D.cases.filter(c => st.tcs.includes(c.id)).forEach(c => {
+        const t = picked(c.id, m).map(s => trace(s, b));   // 케이스별 그래프도 같은 선 색을 쓴다
+        if (t.length) makePlot(box, m + '|' + c.id, `${m} · ${c.id} · 호스트 ${c.host}${c.label ? ' · ' + c.label : ''}`, true, t, ytitleOf(m), cfg, m);
+        else empty.push(`${m} · ${c.id}`);
+      });
+    }
+  });
+  if (empty.length) { const t = document.createElement('div'); t.className = 'ptitle'; t.textContent = `선택한 VM 의 데이터가 없는 항목: ${empty.join(', ')}`; box.appendChild(t); }
   applyRanges(false);
   drawStats();
 }
@@ -442,25 +506,30 @@ function recolor(){
   renderVms();
 }
 function drawLegend(b){
-  const items = picked().map(s => { const k = lineKey(s.case, s); return `<span><span class="sw" style="border-color:${lineColor(k)}"></span>${s.case} · ${s.entity}</span>`; }).join('');
-  document.getElementById('legend').innerHTML = items + `<span>선 ${st.sel.size}/${MAX_LINES}</span><span>${b ? b + '초 구간 평균' : '원 데이터'}</span>`;
+  const seen = new Set(), items = [];
+  picked().forEach(s => { const k = lineKey(s.case, s); if (seen.has(k)) return; seen.add(k);
+    items.push(`<span><span class="sw" style="border-color:${lineColor(k)}"></span>${s.case} · ${s.entity}</span>`); });
+  document.getElementById('legend').innerHTML = items.join('') + `<span>선 ${st.sel.size}/${MAX_LINES}</span><span>${b ? b + '초 구간 평균' : '원 데이터'}</span>`;
 }
 function drawStats(){
-  const u = unit(), order = Object.fromEntries(D.vms.map((v, i) => [vmKey(v), i]));
-  const rows = D.stats.filter(s => s.metric === st.metric && st.tcs.includes(s.case) && st.sel.has(lineKey(s.case, s)));
-  rows.sort((a, b) => (D.cases.findIndex(c => c.id === a.case) - D.cases.findIndex(c => c.id === b.case)) || (order[vmKey(a)] - order[vmKey(b)]));
-  const ref = rows[0];
-  const diff = (s, r) => {
-    if (!r || s === r) return '기준';
-    const d = s.mean - r.mean;
-    if (u === '%') return `${d >= 0 ? '+' : '-'}${fmt(Math.abs(d))}%p`;
-    return r.mean ? `${d >= 0 ? '+' : ''}${(d / Math.abs(r.mean) * 100).toFixed(1)}%` : `${d >= 0 ? '+' : '-'}${fmt(Math.abs(d))}`;
-  };
-  let h = `<tr><th>케이스</th><th>VM</th><th>호스트</th><th>표본 수</th><th>평균</th><th>p95</th><th>최댓값</th><th>첫 번째 선(${ref ? ref.case + ' · ' + ref.entity : '-'}) 대비 평균 차이</th></tr>`;
-  rows.forEach(s => {
-    h += `<tr><td><span class="sw" style="display:inline-block;vertical-align:middle;margin-right:6px;border-color:${lineColor(lineKey(s.case, s))}"></span>${s.case}</td><td>${s.entity}</td><td>${s.host}</td><td>${s.n}</td><td>${fmt(s.mean)}</td><td>${fmt(s.p95)}</td><td>${fmt(s.max)}</td><td>${diff(s, ref)}</td></tr>`;
+  const order = Object.fromEntries(D.vms.map((v, i) => [vmKey(v), i]));
+  let h = `<tr><th>지표</th><th>케이스</th><th>VM</th><th>호스트</th><th>표본 수</th><th>평균</th><th>p95</th><th>최댓값</th><th>같은 지표 첫 번째 선 대비 평균 차이</th></tr>`;
+  st.metrics.forEach(m => {
+    const u = unit(m);
+    const rows = D.stats.filter(s => s.metric === m && st.tcs.includes(s.case) && st.sel.has(lineKey(s.case, s)));
+    rows.sort((a, b) => (D.cases.findIndex(c => c.id === a.case) - D.cases.findIndex(c => c.id === b.case)) || (order[vmKey(a)] - order[vmKey(b)]));
+    const ref = rows[0];
+    const diff = (s, r) => {
+      if (!r || s === r) return '기준';
+      const d = s.mean - r.mean;
+      if (u === '%') return `${d >= 0 ? '+' : '-'}${fmt(Math.abs(d))}%p`;
+      return r.mean ? `${d >= 0 ? '+' : ''}${(d / Math.abs(r.mean) * 100).toFixed(1)}%` : `${d >= 0 ? '+' : '-'}${fmt(Math.abs(d))}`;
+    };
+    rows.forEach((s, i) => {
+      h += `<tr><td>${i ? '' : ytitleOf(m)}</td><td><span class="sw" style="display:inline-block;vertical-align:middle;margin-right:6px;border-color:${lineColor(lineKey(s.case, s))}"></span>${s.case}</td><td>${s.entity}</td><td>${s.host}</td><td>${s.n}</td><td>${fmt(s.mean)}</td><td>${fmt(s.p95)}</td><td>${fmt(s.max)}</td><td>${diff(s, ref)}</td></tr>`;
+    });
   });
-  document.getElementById('stats').innerHTML = h + (u ? `<caption style="caption-side:bottom;text-align:left;color:var(--text-muted);padding-top:6px">단위: ${u} · 비교 기준은 표의 첫 번째 선(케이스 순서 → VM 순서). 다른 선을 기준으로 하려면 VM 선택을 바꾼다.</caption>` : '');
+  document.getElementById('stats').innerHTML = h + `<caption style="caption-side:bottom;text-align:left;color:var(--text-muted);padding-top:6px">비교 기준은 지표마다 표의 첫 번째 선(케이스 순서 → VM 순서). 다른 선을 기준으로 하려면 VM 선택을 바꾼다.</caption>`;
 }
 
 // ── 이벤트 연결 ────────────────────────────────────────────────────
@@ -473,15 +542,40 @@ document.getElementById('title').textContent = D.title;
 document.getElementById('subtitle').textContent = `작성일 ${D.date} · 케이스 ${D.cases.length}개 · 지표 ${D.metrics.length}개 · 선 하나 = 케이스 + VM (최대 8개)`;
 document.getElementById('tcFilter').oninput = renderTcList;
 document.getElementById('mFilter').oninput = renderMetrics;
-document.getElementById('mSel').onchange = e => { st.metric = e.target.value; draw(true); };   // 지표를 바꿔도 가로 구간은 유지
+document.getElementById('mNone').onclick = () => { st.metrics = []; renderMetrics(); draw(true); };
 seg('viewSeg', 'v', v => { st.view = v; draw(true); });
 seg('xSeg', 'x', v => { st.x = v; st.xr = null; draw(); });
 seg('binSeg', 'b', v => { st.bin = v; draw(true); });
 seg('dragSeg', 'd', v => { st.drag = v; plots.forEach(p => Plotly.relayout(p.div, {dragmode: v})); });
 document.getElementById('linkY').onchange = e => { st.linkY = e.target.checked; st.yr = {}; applyRanges(false); };
 document.getElementById('resetView').onclick = () => { st.xr = null; st.yr = {}; applyRanges(); };
+// 그래프 크기: 높이(px)와 폭(화면 폭 대비 %). 브라우저에 저장해 다른 리포트에도 쓴다.
+const VIEW_KEY = 'perfreport.view.v1';
+function viewPref(){ try { return JSON.parse(localStorage.getItem(VIEW_KEY) || '{}'); } catch (e) { return {}; } }
+function applySize(){
+  const v = viewPref(), h = +(v.h || 440), w = +(v.w || 100);
+  document.documentElement.style.setProperty('--ph', h + 'px');
+  document.getElementById('plots').style.maxWidth = w + '%';
+  document.getElementById('plotH').value = String(h); document.getElementById('plotW').value = String(w);
+}
+function setSize(k, val){ const v = viewPref(); v[k] = +val; try { localStorage.setItem(VIEW_KEY, JSON.stringify(v)); } catch (e) {} applySize(); draw(true); }
+document.getElementById('plotH').onchange = e => setSize('h', e.target.value);
+document.getElementById('plotW').onchange = e => setSize('w', e.target.value);
+applySize();
+// 선택 내보내기: 지금 고른 케이스 · VM(선) · 지표를 파일로 저장한다. 리포트 생성기가 이 파일로 그 항목만 담은 Word 를 만든다.
+document.getElementById('selExport').onclick = () => {
+  const lines = [...st.sel].map(k => lineInfo[k]).filter(Boolean).map(i => { const v = caseVms[i.cs][i.i]; return {case: i.cs, entity: v.entity, host: v.host}; });
+  const cases = st.tcs.filter(cs => lines.some(l => l.case === cs));
+  if (!cases.length || !st.metrics.length) { note('케이스 · VM · 지표를 하나 이상 고른 뒤 내보내십시오.'); return; }
+  const sel = {kind: 'perfreport-selection', version: 1, report: D.title, created: new Date().toISOString(), cases, lines, metrics: st.metrics.slice()};
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([JSON.stringify(sel, null, 1)], {type: 'application/json'}));
+  a.download = 'perfreport_selection.json'; a.click();
+  note(`선택 파일을 저장했습니다: 케이스 ${cases.length}개, 선 ${lines.length}개, 지표 ${sel.metrics.length}개. 리포트 생성기의 'HTML 선택 파일' 칸에 넣으십시오.`);
+};
 document.getElementById('colorReset').onclick = () => {
-  const u = userColors(); Object.keys(u).filter(k => k.startsWith('line:')).forEach(k => delete u[k]); saveColors(u); recolor();
+  const u = userColors(); Object.keys(u).filter(k => k.startsWith('line:') || k.startsWith('pal:')).forEach(k => delete u[k]); saveColors(u);
+  Object.keys(casePal).forEach(k => delete casePal[k]); st.tcs.forEach(assignPal); recolor(); renderTcList();
 };
 document.getElementById('colorExport').onclick = () => {
   const m = {}; [...st.sel].forEach(k => m['line:' + k] = lineColor(k));
@@ -501,8 +595,17 @@ document.getElementById('themeBtn').onclick = e => {
   e.target.setAttribute('aria-pressed', st.dark); e.target.textContent = st.dark ? '밝은 화면' : '어두운 화면';
   renderTcList(); renderVms(); draw(true);
 };
-if (D.cases.length) { st.tcs.push(D.cases[0].id); selectCaseAll(D.cases[0].id); }   // 처음에는 첫 케이스의 VM 을 8대까지
-const pref = D.metrics.find(m => /CPU\|Usage \(%\)/.test(m.name)); if (pref) st.metric = pref.name;
+if (D.cases.length) { st.tcs.push(D.cases[0].id); assignPal(D.cases[0].id); selectCaseAll(D.cases[0].id); }   // 처음에는 첫 케이스의 VM 을 8대까지
+(() => {
+  const withRole = D.metrics.filter(m => m.role);
+  if (withRole.length) {
+    const first = withRole.some(m => m.role === D.roleNames[0]) ? D.roleNames[0] : withRole[0].role;
+    st.metrics = withRole.filter(m => m.role === first).slice(0, MAX_METRICS).map(m => m.name);
+  } else {
+    const pref = D.metrics.find(m => /CPU\|Usage \(%\)/.test(m.name)) || D.metrics[0];
+    if (pref) st.metrics = [pref.name];
+  }
+})();
 document.getElementById('vmFilter').oninput = renderVms;
 document.getElementById('vmAll').onclick = () => { st.tcs.forEach(selectCaseAll); renderVms(); draw(true); };
 document.getElementById('vmNone').onclick = () => { [...st.sel].forEach(removeLine); renderVms(); draw(true); };

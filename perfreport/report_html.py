@@ -6,6 +6,8 @@ import re
 import numpy as np
 
 from . import metrics
+from . import palette as palette_mod
+from . import roles as roles_mod
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -19,6 +21,18 @@ def _num(v):
     if v is None or (isinstance(v, float) and np.isnan(v)):
         return None
     return float(f'{v:.4g}') if abs(v) < 1e6 else round(float(v))
+
+
+def _nums(a):
+    """_num 의 열 단위 판: 유효숫자 4자리(100만 이상은 정수), 빈 값은 None. 값마다 함수를 부르지 않는다."""
+    a = np.asarray(a, dtype=float)
+    out = np.char.mod('%.4g', a).astype(float)
+    big = np.abs(a) >= 1e6
+    out[big] = np.round(a[big])
+    lst = out.tolist()
+    for i in np.flatnonzero(np.isnan(a)):
+        lst[i] = None
+    return lst
 
 
 def _natural(t):
@@ -39,8 +53,9 @@ def build(path, ctx, df, stats):
         t0 = ctx['case_start'][case]
         series.append({'case': case, 'role': role, 'entity': entity, 'host': host, 'metric': metric,
                        't0': int(t0.value // 1_000_000),   # 현지 시각을 그대로 ms 로 (브라우저 시간대 변환 없음)
-                       'x': [round(float(v), 1) for v in g['sec']], 'y': [_num(v) for v in g['value']]})
+                       'x': np.round(g['sec'].to_numpy(dtype=float), 1).tolist(), 'y': _nums(g['value'])})
     units = {m['name']: m['unit'] for m in ctx['metrics']}
+    mroles = ctx.get('metric_roles') or {}
     data = {
         'title': ctx['title'], 'date': ctx['date'], 'baseline': ctx['baseline'],
         'cases': [{'id': c['id'], 'label': c.get('label', ''),
@@ -48,7 +63,12 @@ def build(path, ctx, df, stats):
         'roles': ctx['role_order'],
         'vms': _vms(df),
         'colors': ctx.get('colors', {}),
-        'metrics': [{'name': n, 'unit': units[n], 'category': c} for c, ns in metrics.ordered([m['name'] for m in ctx['metrics']]) for n in ns],
+        # 지표 목록: 역할 지정 지표(역할 순서 → 역할 안 순서) 다음에 역할 미지정 지표(분류 순서)
+        'metrics': [{'name': n, 'unit': units[n], 'category': metrics.category(n),
+                     'role': mroles.get(n, ('', 0))[0], 'order': mroles.get(n, ('', 0))[1]}
+                    for n in roles_mod.display_order([m['name'] for m in ctx['metrics']], mroles)],
+        'roleNames': metrics.ROLES,
+        'palettes': [{'name': n, 'c': c, 'auto': i not in palette_mod.NO_AUTO} for i, (n, c) in enumerate(palette_mod.PALETTES)],
         'series': series,
         'stats': [{k: (_num(r[k]) if k in ('mean', 'p95', 'max', 'min', 'diff', 'diff_pct') else r[k])
                    for k in ('metric', 'role', 'case', 'entity', 'host', 'n', 'mean', 'p95', 'max', 'min', 'diff', 'diff_pct')}

@@ -1,12 +1,12 @@
 """docx 리포트. 문장은 명사형 종결, 그림·표 제목은 번호 없이 '그림. 대상' · '표. 대상'."""
 import os
 
-from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 from docx.shared import Inches, Pt
 
 from .analyze import fmt
+from .docx_base import new_document
 
 FONT = 'Malgun Gothic'
 
@@ -34,26 +34,25 @@ def _caption(doc, text):
 def _table(doc, header, rows):
     t = doc.add_table(rows=1, cols=len(header))
     t.style = 'Table Grid'
-    for i, h in enumerate(header):
-        c = t.rows[0].cells[i]
-        c.text = h
-        c.paragraphs[0].runs[0].bold = True
+
+    def put(cell, text, bold=False):
+        r = cell.paragraphs[0].add_run(str(text))
+        r.font.size = Pt(8.5)
+        if bold:
+            r.bold = True
+
+    for c, h in zip(t.rows[0].cells, header):
+        put(c, h, bold=True)
     for row in rows:
-        cells = t.add_row().cells
-        for i, v in enumerate(row):
-            cells[i].text = str(v)
-    for row in t.rows:
-        for c in row.cells:
-            for p in c.paragraphs:
-                for r in p.runs:
-                    r.font.size = Pt(8.5)
+        for c, v in zip(t.add_row().cells, row):
+            put(c, v)
     return t
 
 
 def build(path, ctx):
     """ctx: title, baseline, cases[{id,label,host,start,end,entities}], metrics[{name, unit, charts, sentences,
     stat_rows, source_system}], sources[{case, system, file, n}], note"""
-    doc = Document()
+    doc = new_document()
     _style(doc)
     doc.add_heading(ctx['title'], level=0)
     doc.add_paragraph(f'작성일: {ctx["date"]} · 기준 케이스: {ctx["baseline"]}')

@@ -8,6 +8,7 @@
 import os
 import re
 import shutil
+import time
 
 import pandas as pd
 
@@ -72,33 +73,58 @@ def _safe_dir(name):
     return re.sub(r'[\\/:*?"<>|]+', '_', str(name)).strip() or 'case'
 
 
-def split_case(case, sources, profiles, ents, out_root, base_dir=None, log=print):
-    """원본 파일에서 이 케이스의 VM · 시각 구간(앞뒤 여유 포함) 행만 잘라 out_root/<케이스명>/ 에 저장한다.
+def _decider(hosts, ents_l):
+    """행 하나를 남길지 정하는 함수. s = 행의 대상 이름(VM 또는 ESX).
+    VM 은 리포트와 같은 규칙으로 고른 이름(ents_l)이다. 와일드카드로 고른 VM 중 다른 호스트에 있는 VM 은 그 단계에서 이미 빠져 있다."""
+    memo = {}
+
+    def keep(s):
+        s = str(s or '').strip()
+        if s not in memo:
+            if not hosts:                                  # 케이스에 호스트 이름이 없으면 VM 으로만 고른다
+                memo[s] = not s or s.lower() in ents_l
+            else:                                          # 이 케이스의 VM, 또는 ESX 호스트 자신의 기록
+                memo[s] = s.lower() in ents_l or any(ingest.same_host(s, h) for h in hosts)
+        return memo[s]
+    return keep
+
+
+def split_case(case, sources, profiles, ents, out_root, base_dir=None, log=print, date=None):
+    """원본 파일에서 이 케이스의 ESX 호스트 · VM 기록 중 시각 구간(앞뒤 여유 포함) 행만 잘라 out_root/<케이스명>/ 에 저장한다.
+
+    남기는 행. 행의 대상 이름은 입력 프로파일의 대상 열 · 키다(VCF Operations 의 Name, Key:Value 로그의 Hostname, CSV 의 VM).
+      1. 대상 이름이 케이스의 호스트 이름과 같은 행: ESX 호스트 자신의 기록. 도메인을 붙인 이름도 같은 호스트로 본다.
+      2. 대상 이름이 이 케이스의 VM 인 행. VM 은 리포트와 같은 규칙(ingest.load_case)으로 고른다.
+    파일 이름: <케이스명>_<생성 날짜 YYYYMMDD>_<번호><원본 확장자>. 번호는 원본 파일마다 01 부터 붙이고, 구간 안 첫 시각 순서다.
     잘라낸 파일은 원본과 같은 형식(열 · 표기)을 유지한다. 폴더는 매번 새로 만든다(덮어쓰기)."""
     lo = case['start'] - pd.Timedelta(seconds=case.get('margin_s', 0))
     hi = case['end'] + pd.Timedelta(seconds=case.get('margin_s', 0))
+    date = date or time.strftime('%Y%m%d')
     dest = os.path.join(out_root, _safe_dir(case['id']))
     if os.path.isdir(dest):
         shutil.rmtree(dest)
     os.makedirs(dest)
-    ents_l = {e.lower() for e in ents}
-    manifest = []
+    hosts = [h.strip() for h in re.split(r'[;,]', str(case.get('host') or '')) if h.strip()]
+    keep_row = _decider(hosts, {e.lower() for e in ents})
+    parts, dropped, kept = [], 0, set()
     for src in sources:
         prof = profiles[src['profile']]
         rel = os.path.relpath(src['path'], base_dir) if base_dir else os.path.basename(src['path'])
-        name = rel.replace(os.sep, '__')
         if prof['type'] == 'csv_wide':
             df = pd.read_csv(src['path'], dtype=str, keep_default_na=False, encoding=prof.get('encoding', 'utf-8-sig'))
             t = ingest.parse_time(df[prof['time_column']], prof.get('time_format'), prof.get('timezone'))
+            in_t = (t >= lo) & (t <= hi)
+            df, t = df[in_t], t[in_t]
             ec = prof.get('entity_column')
-            keep = (t >= lo) & (t <= hi)
-            if ec:
-                keep &= df[ec].str.lower().isin(ents_l)
-            part = df[keep]
-            if part.empty:
-                continue
-            part.to_csv(os.path.join(dest, name), index=False, encoding='utf-8-sig')
-            tt = t[keep]
+            if ec in df.columns:
+                subj = df[ec].astype(str).str.strip()
+                keep = subj.map(keep_row).astype(bool)
+                kept |= set(subj[keep])
+            else:
+                keep = pd.Series(True, index=df.index)       # 대상 열이 없는 파일은 구간만 자른다
+            dropped += int(len(df) - keep.sum())
+            if keep.any():
+                parts.append((t[keep].min(), rel, prof, t[keep], df[keep], None))
         else:   # kv_text: 줄 단위로 거른다. 머리 줄(시각 키가 없는 첫 줄)은 그대로 둔다
             tkey, ekey = prof['time_key'], prof.get('entity_key')
             tre = re.compile(re.escape(tkey) + r':\s*([0-9T:\-\./ ]+?)(?=,|$)')
@@ -111,27 +137,45 @@ def split_case(case, sources, profiles, ents, out_root, base_dir=None, log=print
                         if k == 0:
                             lines.append(line)
                         continue
+                    tv = pd.to_datetime(mt.group(1).strip(), format=prof.get('time_format'), errors='coerce')
+                    if pd.isna(tv) or not lo <= tv <= hi:
+                        continue
                     if ere:
                         me = ere.search(line)
-                        if not me or me.group(1).lower() not in ents_l:
+                        who = me.group(1) if me else ''
+                        if not keep_row(who):
+                            dropped += 1
                             continue
-                    tv = pd.to_datetime(mt.group(1).strip(), format=prof.get('time_format'), errors='coerce')
-                    if pd.notna(tv) and lo <= tv <= hi:
-                        lines.append(line)
-                        times.append(tv)
+                        kept.add(who)
+                    lines.append(line)
+                    times.append(tv)
             if not times:
                 continue
+            tt = pd.Series(times)
+            parts.append((tt.min(), rel, prof, tt, None, lines))
+    manifest = []
+    for k, (_, rel, prof, tt, part, lines) in enumerate(sorted(parts, key=lambda x: (x[0], x[1])), start=1):
+        name = f'{_safe_dir(case["id"])}_{date}_{k:02d}{os.path.splitext(rel)[1]}'
+        if part is not None:
+            part.to_csv(os.path.join(dest, name), index=False, encoding='utf-8-sig')
+        else:
             with open(os.path.join(dest, name), 'w', encoding='utf-8') as f:
                 f.writelines(lines)
-            tt = pd.Series(times)
-        manifest.append({'파일': name, '원본': rel, '형식': prof.get('source_system', src['profile']),
+        manifest.append({'파일': name, '원본': rel, '형식': prof.get('source_system', ''),
                          '행 수': int(len(tt)), '첫 시각': str(tt.min()), '마지막 시각': str(tt.max())})
-    pd.DataFrame(manifest).to_csv(os.path.join(dest, 'manifest.csv'), index=False, encoding='utf-8-sig')
+    pd.DataFrame(manifest, columns=['파일', '원본', '형식', '행 수', '첫 시각', '마지막 시각']).to_csv(
+        os.path.join(dest, 'manifest.csv'), index=False, encoding='utf-8-sig')
+    own = {n for n in kept if n and any(ingest.same_host(n, h) for h in hosts)}
+    vms = sorted(n for n in kept if n and n not in own)
     with open(os.path.join(dest, 'case.txt'), 'w', encoding='utf-8') as f:
         f.write(f'케이스명: {case["id"]}\n테스트 그룹: {case.get("group", "")}\n호스트: {case.get("host", "")}\n'
-                f'VM: {", ".join(sorted(ents))}\n잡 시작 시각: {case["start"]}\n잡 종료 시각: {case["end"]}'
-                + (' (자동 감지)' if case.get('end_auto') else '') + f'\n저장 구간: {lo} ~ {hi} (앞뒤 {case.get("margin_s", 0) // 60}분 포함)\n')
-    log(f'[정리] {case["id"]}: 파일 {len(manifest)}개 → {dest}')
+                f'VM: {", ".join(vms) or "-"}\n'
+                f'호스트 자신의 기록: {", ".join(sorted(own)) or "-"}\n잡 시작 시각: {case["start"]}\n잡 종료 시각: {case["end"]}'
+                + (' (자동 감지)' if case.get('end_auto') else '') + f'\n저장 구간: {lo} ~ {hi} (앞뒤 {case.get("margin_s", 0) // 60}분 포함)\n'
+                f'정리한 날짜: {date}\n'
+                f'남긴 기록: 위 VM 과 호스트 자신의 기록 (VM 은 리포트와 같은 규칙으로 고름)\n'
+                f'구간 안에서 뺀 다른 호스트 · VM 의 행: {dropped:,}개\n')
+    log(f'[정리] {case["id"]}: 파일 {len(manifest)}개 → {dest}' + (f' (구간 안 다른 호스트 · VM 행 {dropped:,}개 제외)' if dropped else ''))
     return dest, manifest
 
 

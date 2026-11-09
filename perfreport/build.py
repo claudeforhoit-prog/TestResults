@@ -13,6 +13,9 @@ import pandas as pd
 import yaml
 
 from . import analyze, charts, ingest, report_case, report_docx, report_html, runwin
+from . import metrics as metrics_mod
+from . import palette as palette_mod
+from . import roles as roles_mod
 from . import palette as P
 
 # 프로그램 폴더 (profiles/ · rules/ 기본 위치). exe 로 묶였으면 exe 가 있는 폴더.
@@ -43,10 +46,8 @@ def _safe(name):
     return re.sub(r'[^A-Za-z0-9._-]+', '_', name).strip('_')[:60] or 'metric'
 
 
-def _scan_terms(docx_path, terms):
-    from docx import Document
-    d = Document(docx_path)
-    txt = '\n'.join([p.text for p in d.paragraphs] + [c.text for t in d.tables for r in t.rows for c in r.cells])
+def _scan_terms(txt, terms):
+    """문서 글자에서 통제 용어를 찾는다. 글자는 저장 전 메모리의 문서에서 받는다(저장한 docx 는 DRM 이 암호화할 수 있다)."""
     return [f'"{m.group(0)}" → {t["use"]}' for t in terms for m in [re.search(t['ban'], txt)] if m]
 
 
@@ -76,7 +77,11 @@ SHEET_NAMES = ['케이스', '테스트케이스', '테스트 케이스', 'cases'
 def _read_table(path):
     if path.lower().endswith(('.xlsx', '.xlsm')):          # 엑셀 시트: '케이스' 시트가 있으면 그 시트, 없으면 첫 시트
         import openpyxl  # noqa: F401  (pandas 가 엑셀을 읽을 때 쓴다 · 실행 파일 묶음에 포함되게 명시)
-        xl = pd.ExcelFile(path)
+        try:
+            xl = pd.ExcelFile(path)
+        except Exception as e:    # DRM 으로 암호화된 엑셀은 zip 형식이 아니어서 열리지 않는다
+            raise SystemExit(f'케이스 정보 엑셀 파일을 열지 못함: {path} ({type(e).__name__}: {e}). '
+                             'DRM 등으로 암호화된 파일이면 엑셀에서 "CSV UTF-8" 형식으로 저장하고 그 CSV 파일을 고른다.')
         sheet = next((s for s in SHEET_NAMES if s in xl.sheet_names), xl.sheet_names[0])
         t = xl.parse(sheet, dtype=str, keep_default_na=False)
         t = t.loc[:, [c for c in t.columns if not str(c).startswith('Unnamed')]]
@@ -151,9 +156,10 @@ def file_index(srcs, profiles, log=print):
     for s in srcs:
         st = os.stat(s['path'])
         key = f'{os.path.abspath(s["path"])}|{st.st_size}|{int(st.st_mtime)}|{s["profile"]}'
-        if key not in cache:
+        if key not in cache or 'metrics' not in cache[key]:     # 지표 이름이 없는 예전 색인은 다시 만든다
             df = ingest.load_source(s, profiles[s['profile']])
             cache[key] = {'entities': sorted(df['entity'].astype(str).unique().tolist()),
+                          'metrics': list(dict.fromkeys(df['metric'].astype(str))),
                           'hosts': sorted(df['host'].astype(str).unique().tolist()),
                           'tmin': str(df['t'].min()) if len(df) else '', 'tmax': str(df['t'].max()) if len(df) else ''}
             new += 1
@@ -174,18 +180,19 @@ def _file_matches(ix, case):
     if pd.Timestamp(ix['tmax']) < pd.Timestamp(case['start']) - m or pd.Timestamp(ix['tmin']) > pd.Timestamp(case['end']) + m:
         return False
     ents = [e.lower() for e in ix['entities']]
+    hosts = [h.strip().lower() for h in re.split(r'[;,]', case.get('host') or '') if h.strip()]
     if case.get('vms'):
         pats = [p.strip().lower() for p in re.split(r'[;,]', case['vms']) if p.strip()]
-        return any(fnmatch.fnmatchcase(e, p) for e in ents for p in pats)
-    if case.get('host'):
-        hosts = [h.strip().lower() for h in re.split(r'[;,]', case['host']) if h.strip()]
-        return any(h in [x.lower() for x in ix['hosts']] or any(e.startswith(h) for e in ents) for h in hosts)
+        return (any(fnmatch.fnmatchcase(e, p) for e in ents for p in pats)
+                or any(ingest.same_host(e, h) for e in ents for h in hosts))     # ESX 호스트 자신의 기록만 든 파일 (TC 정리용)
+    if hosts:
+        return any(any(ingest.same_host(x, h) for x in ix['hosts']) or any(ingest.named_after_host(e, h) for e in ents)
+                   for h in hosts)
     return True
 
 
-def run_csv(cases_csv, data_dir, out_dir=None, title=None, baseline=None, analysis=None, log=print,
-            split_dir=None, report=True, margin_s=None):
-    """케이스 정보 CSV + 데이터 폴더 방식. 데이터 폴더의 모든 파일을 읽어 케이스마다 호스트·잡 실행 구간으로 잘라 쓴다."""
+def scan_sources(cases_csv, data_dir, log=print):
+    """케이스 정보와 데이터 폴더를 읽어 (케이스 목록, 입력 프로파일, 읽을 수 있는 파일, 파일 색인) 을 돌려준다."""
     cases = cases_from_csv(cases_csv)
     profiles = load_profiles(os.path.join(APP_DIR, 'profiles', 'inputs'))
     files = []
@@ -203,7 +210,89 @@ def run_csv(cases_csv, data_dir, out_dir=None, title=None, baseline=None, analys
             log(f'[건너뜀] {os.path.relpath(f, data_dir)}: 아는 형식이 아님')
     if not srcs:
         raise SystemExit(f'데이터 폴더에서 읽을 수 있는 파일이 없음: {data_dir}')
-    index = file_index(srcs, profiles, log)
+    return cases, profiles, srcs, file_index(srcs, profiles, log)
+
+
+def list_metrics(cases_csv, data_dir, log=print, analysis=None):
+    """창 화면의 지표 역할 지정용 지표 목록: 케이스에 쓰일 데이터 파일에 든 지표 이름(분류 순서). 데이터를 다 읽지 않고 색인을 쓴다."""
+    cases, profiles, srcs, index = scan_sources(cases_csv, data_dir, log)
+    names = []
+    for c in cases:
+        probe = dict(c, margin_s=runwin.MARGIN_S)
+        if c.get('end_auto'):
+            probe['end'] = c['start'] + pd.Timedelta(hours=runwin.AUTO_MAX_H)
+        for s in srcs:
+            if _file_matches(index[s['path']], probe):
+                names += index[s['path']].get('metrics', [])
+    names = list(dict.fromkeys(names))
+    if analysis:
+        ana = yaml.safe_load(open(_resolve(analysis, APP_DIR), encoding='utf-8'))
+        want = ana.get('metrics', 'all')
+        if want != 'all':
+            names = [m for m in want if m in set(names)]
+    return metrics_mod.flat(names)
+
+
+def load_selection(path):
+    """HTML 의 '선택 내보내기' 파일 → {'cases': [케이스], 'vms': {케이스: {VM}}, 'metrics': [지표], 'name': 파일 이름}."""
+    try:
+        sel = json.load(open(path, encoding='utf-8-sig'))
+    except Exception as e:
+        raise SystemExit(f'HTML 선택 파일을 읽지 못함: {path} ({type(e).__name__}: {e})')
+    if not isinstance(sel, dict) or sel.get('kind') != 'perfreport-selection':
+        raise SystemExit(f'HTML 선택 파일이 아님: {path} (HTML 의 "선택 내보내기" 로 저장한 파일을 고른다)')
+    vms = {}
+    for line in sel.get('lines') or []:
+        if line.get('case') and line.get('entity'):
+            vms.setdefault(str(line['case']), set()).add(str(line['entity']))
+    cases = [str(c) for c in sel.get('cases') or [] if str(c) in vms]
+    metrics = list(dict.fromkeys(str(m) for m in sel.get('metrics') or []))
+    if not cases or not metrics:
+        raise SystemExit(f'HTML 선택 파일에 케이스 · VM · 지표가 없음: {path}')
+    return {'cases': cases, 'vms': vms, 'metrics': metrics, 'name': os.path.basename(path)}
+
+
+def _load(c, profiles):
+    """케이스 데이터 읽기. HTML 선택 파일로 VM 을 골랐으면 그 VM 만 남긴다."""
+    df, start, end = ingest.load_case(c, profiles)
+    if c.get('_only_vms'):
+        df = df[df['entity'].isin(c['_only_vms'])]
+    return df, start, end
+
+
+def default_workers():
+    """그래프를 나눠 그릴 프로세스 수. 환경 변수 PERFREPORT_WORKERS 가 있으면 그 값, 없으면 CPU 수 - 1 (최대 6)."""
+    import multiprocessing
+    if multiprocessing.parent_process() is not None:     # 병렬 처리용 프로세스 안에서는 다시 나누지 않는다
+        return 1
+    v = os.environ.get('PERFREPORT_WORKERS', '').strip()
+    if v.isdigit():
+        return max(1, int(v))
+    return max(1, min(6, (os.cpu_count() or 2) - 1))
+
+
+def run_csv(cases_csv, data_dir, out_dir=None, title=None, baseline=None, analysis=None, log=print,
+            split_dir=None, report=True, margin_s=None, roles=None, include_unassigned=True,
+            palette=None, chart_width_cm=None, workers=None, selection=None):
+    """케이스 정보 CSV + 데이터 폴더 방식. 데이터 폴더의 모든 파일을 읽어 케이스마다 호스트·잡 실행 구간으로 잘라 쓴다.
+    roles: 지표 역할 {지표: (역할, 순서)} 또는 역할 파일 경로. 없으면 기본 리포트 양식.
+    palette: 케이스 문서 그래프의 색상 팔레트(1부터 센 번호 또는 이름, 기본 1 파랑 계열).
+    chart_width_cm: 케이스 문서 안 그래프 폭(cm, 기본 16.5). workers: 그래프를 나눠 그릴 프로세스 수(기본 자동).
+    selection: HTML '선택 내보내기' 파일. 주면 그 파일의 케이스 · VM · 지표만으로 만든다."""
+    cases, profiles, srcs, index = scan_sources(cases_csv, data_dir, log)
+    sel = load_selection(selection) if selection else None
+    if sel:
+        known = {c['id'] for c in cases}
+        gone = [c for c in sel['cases'] if c not in known]
+        cases = [c for c in cases if c['id'] in set(sel['cases'])]
+        if not cases:
+            raise SystemExit(f'HTML 선택 파일의 케이스가 케이스 정보 파일에 없음: {", ".join(sel["cases"])}')
+        for c in cases:
+            c['_only_vms'] = sel['vms'][c['id']]
+        log(f'[HTML 선택] {sel["name"]}: 케이스 {len(cases)}개, VM {sum(len(c["_only_vms"]) for c in cases)}대, 지표 {len(sel["metrics"])}개'
+            + (f' · 케이스 정보 파일에 없어 뺀 케이스: {", ".join(gone)}' if gone else ''))
+    if isinstance(roles, str) and roles:
+        roles = roles_mod.load(roles)
     margin_s = runwin.MARGIN_S if margin_s is None else margin_s
     for c in cases:
         c['margin_s'] = margin_s
@@ -228,7 +317,8 @@ def run_csv(cases_csv, data_dir, out_dir=None, title=None, baseline=None, analys
                              + f'과 실행 구간({c["start"]} ~ {c["end"]})에 해당하는 데이터 파일이 없다.')
     checks = {}
     for c in cases:              # 수집 끊김 점검 (실행 구간 안): 리포트 · TC 정리 모두 실행
-        cdf, _, _ = ingest.load_case(c, profiles)
+        c['_loaded'] = _load(c, profiles)                 # 리포트 생성에서 다시 쓴다 (같은 케이스를 두 번 읽지 않는다)
+        cdf = c['_loaded'][0]
         c['collection_issues'], checks[c['id']] = runwin.check_collection(cdf, c)
         c['collection_check'] = checks[c['id']]
         log(f'[수집 점검] {c["id"]}: ' + checks[c['id']].replace('\n', ' / '))
@@ -238,11 +328,35 @@ def run_csv(cases_csv, data_dir, out_dir=None, title=None, baseline=None, analys
         return {'cases': [c['id'] for c in cases], 'checks': checks,
                 'windows': {c['id']: [str(c['start']), str(c['end']), bool(c.get('end_auto'))] for c in cases}}
     name = os.path.splitext(os.path.basename(cases_csv))[0]
-    job = {'name': name, 'title': title or f'성능 비교 리포트 ({", ".join(c["id"] for c in cases[:4])}{" 외" if len(cases) > 4 else ""})',
+    job = {'name': name, 'title': title,       # 비우면 HTML 마다 그 그룹의 케이스 이름으로 만든다
            'cases': cases, 'baseline': baseline or cases[0]['id'],
            'analysis': analysis or 'profiles/analysis/default.yaml',
+           'roles': roles or {}, 'include_unassigned': include_unassigned,
+           'palette': palette_mod.palette_index(palette), 'chart_width_cm': chart_width_cm, 'workers': workers,
+           'selection': sel,
            'output': out_dir or os.path.join(os.path.dirname(os.path.abspath(cases_csv)), 'out_' + name)}
     return run_job(job, os.path.dirname(os.path.abspath(cases_csv)), log)
+
+
+def _build_docs(cases, meta, df, outdir, date, log, roles, include_unassigned, pal, width_cm, pool):
+    """케이스마다 docx 1개. 반환: [(저장한 경로, 그래프 수, 문서 글자)]."""
+    out = []
+    for c in cases:
+        cm = meta[c['id']]
+        cm['group'] = c.get('group', '')
+        dpath = os.path.join(outdir, f'{_safe(c["id"])}_performance_report.docx')
+        dpath, k, text = report_case.build_case(dpath, {'id': c['id'], 'label': c.get('label', ''), 'host': c.get('host', ''),
+                                              'start': cm['start'], 'end': cm['end'], 'group': c.get('group', ''),
+                                              'end_auto': c.get('end_auto'), 'end_reason': c.get('end_reason', ''),
+                                              'margin_s': c.get('margin_s', 0),
+                                              'collection_issues': c.get('collection_issues', []),
+                                              'collection_check': c.get('collection_check', '')},
+                                      df[df['case'] == c['id']], os.path.join(outdir, 'charts', _safe(c['id'])), date, log,
+                                      roles=roles, include_unassigned=include_unassigned,
+                                      palette=pal, chart_width_cm=width_cm, pool=pool)
+        out.append((dpath, k, text))
+        log(f'[문서] {c["id"]}: 그래프 {k}장')
+    return out
 
 
 def run_job(job, base, log=print):
@@ -259,7 +373,7 @@ def run_job(job, base, log=print):
             s['path'] = _resolve(s['path'], base)
             if s['profile'] not in profiles:
                 raise SystemExit(f'입력 프로파일 없음: {s["profile"]} (TC {c["id"]})')
-        df, start, end = ingest.load_case(c, profiles)
+        df, start, end = c.pop('_loaded', None) or _load(c, profiles)
         if df.empty:
             raise SystemExit(f'{c["id"]}: 데이터 없음: 호스트 이름({c.get("host", "-")})'
                              + (f'·VM({c["vms"]})' if c.get('vms') else '')
@@ -284,10 +398,26 @@ def run_job(job, base, log=print):
     want = ana.get('metrics', 'all')
     present = list(dict.fromkeys(df['metric']))
     metrics = present if want == 'all' else [m for m in want if m in set(present)]
+    sel = job.get('selection')
+    if sel:                                                   # HTML 선택 파일의 지표만
+        lost = [m for m in sel['metrics'] if m not in set(metrics)]
+        metrics = [m for m in metrics if m in set(sel['metrics'])]
+        if lost:
+            log(f'[HTML 선택] 데이터에 없어 뺀 지표 {len(lost)}개: ' + ', '.join(lost[:10]))
+        if not metrics:
+            raise SystemExit('HTML 선택 파일의 지표가 이번 데이터에 없음')
     missing = [] if want == 'all' else [m for m in want if m not in set(present)]
     for m in missing:
         log(f'[주의] 분석 프로파일의 지표가 데이터에 없음: {m}')
     df = df[df['metric'].isin(metrics)]
+
+    # 지표 역할: 데이터에 있는 지표만 남긴다. 하나도 없으면 기본 리포트 양식
+    roles, gone = roles_mod.restrict(job.get('roles') or {}, metrics)
+    include_unassigned = job.get('include_unassigned', True)
+    if gone:
+        log(f'[역할] 데이터에 없어 뺀 지표 {len(gone)}개: ' + ', '.join(gone[:10]) + (' 외' if len(gone) > 10 else ''))
+    log('[역할] ' + roles_mod.summary(roles) + ('' if not roles else
+        (', 역할 미지정 지표는 Appendix A 에 수록' if include_unassigned else ', 역할 미지정 지표는 넣지 않음')))
 
     case_order = [c['id'] for c in cases]
     role_order = ana.get('role_order') or []
@@ -309,23 +439,24 @@ def run_job(job, base, log=print):
     date = dt.date.today().isoformat()
     docs, n_charts = [], 0
     meta = {c['id']: c for c in case_meta}
-    for c in cases:
-        cm = meta[c['id']]
-        cm['group'] = c.get('group', '')
-        dpath = os.path.join(outdir, f'{_safe(c["id"])}_performance_report.docx')
-        _, k = report_case.build_case(dpath, {'id': c['id'], 'label': c.get('label', ''), 'host': c.get('host', ''),
-                                              'start': cm['start'], 'end': cm['end'], 'group': c.get('group', ''),
-                                              'end_auto': c.get('end_auto'), 'end_reason': c.get('end_reason', ''),
-                                              'margin_s': c.get('margin_s', 0),
-                                              'collection_issues': c.get('collection_issues', []),
-                                              'collection_check': c.get('collection_check', '')},
-                                      df[df['case'] == c['id']], os.path.join(outdir, 'charts', _safe(c['id'])), date, log)
+    texts = {}
+    pal = job.get('palette', palette_mod.DEFAULT_PALETTE)
+    width_cm = job.get('chart_width_cm') or report_case.DEFAULT_WIDTH_CM
+    workers = int(job.get('workers') or default_workers()) if default_workers() > 1 else 1
+    pool = report_case.ChartPool(workers, log)     # 그래프를 여러 프로세스가 나눠 그린다 (못 쓰면 순서대로)
+    log(f'[문서] 그래프 색 계열 {palette_mod.PALETTES[pal][0]} · 그래프 폭 {float(width_cm):g} cm'
+        + (f' · 그래프를 {workers}개 프로세스로 나눠 그림' if pool.active else ''))
+    try:
+        built = _build_docs(cases, meta, df, outdir, date, log, roles, include_unassigned, pal, width_cm, pool)
+    finally:
+        pool.close()
+    for dpath, k, text in built:
         docs.append(dpath)
+        texts[dpath] = text
         n_charts += k
-        log(f'[문서] {c["id"]}: 그래프 {k}장')
     term_hits = []
     for dpath in docs:
-        term_hits += [f'{os.path.basename(dpath)}: {h}' for h in _scan_terms(dpath, terms)]
+        term_hits += [f'{os.path.basename(dpath)}: {h}' for h in _scan_terms(texts[dpath], terms)]
     for h in term_hits:
         log(f'[검사] 통제 용어 검출: {h}')
 
@@ -336,12 +467,20 @@ def run_job(job, base, log=print):
         ids = [c['id'] for c in cases if (c.get('group') or '') == g]
         sub = df[df['case'].isin(ids)]
         gbase = baseline if baseline in ids else ids[0]
+        have = set(sub['metric'].unique())
+        gmetrics = [m for m in metrics if m in have]
+        if roles and not include_unassigned:                    # 역할 미지정 지표를 넣지 않는 옵션이면 HTML 에서도 뺀다
+            gmetrics = [m for m in gmetrics if m in roles]
+            sub = sub[sub['metric'].isin(gmetrics)]
+        gset = set(gmetrics)
         gcmp = analyze.compare(analyze.stats_table(sub), gbase, stat)
-        gmetrics = [m for m in metrics if m in set(sub['metric'])]
-        ctx = {'title': (f'{g}: ' if g else '') + job.get('title', '성능 비교 리포트'), 'date': date, 'baseline': gbase,
+        gunits = sub.drop_duplicates('metric').set_index('metric')['unit'].to_dict()
+        gtitle = job.get('title') or f'성능 비교 리포트 ({", ".join(ids[:4])}{" 외" if len(ids) > 4 else ""})'   # 그 그룹의 케이스만
+        ctx = {'title': (f'{g}: ' if g else '') + gtitle, 'date': date, 'baseline': gbase,
                'cases': [m for m in case_meta if m['id'] in ids],
-               'metrics': [{'name': m, 'unit': sub[sub['metric'] == m]['unit'].iloc[0]} for m in gmetrics],
-               'role_order': role_order, 'case_start': case_start, 'colors': colors}
+               'metrics': [{'name': m, 'unit': gunits.get(m, '')} for m in gmetrics],
+               'role_order': role_order, 'case_start': case_start, 'colors': colors,
+               'metric_roles': {m: v for m, v in roles.items() if m in gset}}
         fname = re.sub(r'[\\/:*?"<>|]+', '_', g).strip() if g else _safe(job.get('name', 'report'))
         htmls.append(report_html.build(os.path.join(outdir, f'{fname}.html'), ctx, sub, gcmp))
         if g:
@@ -352,7 +491,12 @@ def run_job(job, base, log=print):
            'charts': n_charts, 'term_violations': term_hits, 'outputs': docs + htmls,
            'windows': {c['id']: [str(meta[c['id']]['start']), str(meta[c['id']]['end']), bool(c.get('end_auto'))] for c in cases},
            'checks': {c['id']: c.get('collection_check', '') for c in cases},
-           'groups': {g or '-': [c['id'] for c in cases if (c.get('group') or '') == g] for g in groups}}
+           'groups': {g or '-': [c['id'] for c in cases if (c.get('group') or '') == g] for g in groups},
+           'roles': roles_mod.summary(roles), 'include_unassigned': include_unassigned,
+           'palette': palette_mod.PALETTES[pal][0], 'chart_width_cm': float(width_cm),
+           'selection': (job.get('selection') or {}).get('name', '')}
+    if roles:                                                   # 어떤 역할 지정으로 만들었는지 결과 폴더에 남긴다
+        roles_mod.save(os.path.join(outdir, 'metric_roles.csv'), roles)
     json.dump(rec, open(os.path.join(outdir, 'BUILD.json'), 'w', encoding='utf-8'), ensure_ascii=False, indent=1)
     # 수집 끊김 점검 결과: 케이스 정보 엑셀의 비고 열에 옮겨 적을 수 있게 표로도 남긴다
     pd.DataFrame([{'케이스명': k, '수집 점검': v} for k, v in rec['checks'].items()]) \

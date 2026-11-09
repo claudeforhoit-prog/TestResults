@@ -8,10 +8,11 @@ STAT_LABEL = {'n': '표본 수', 'mean': '평균', 'p95': 'p95', 'max': '최댓�
 def stats_table(df):
     if 'in_run' in df:
         df = df[df['in_run']]                       # 통계는 잡 실행 구간만 (앞뒤 여유 구간 제외)
-    g = df.groupby(['metric', 'unit', 'role', 'case', 'host', 'entity'])['value']
-    out = g.agg(n='count', mean='mean', max='max', min='min',
-                p95=lambda s: s.quantile(0.95)).reset_index()
-    return out
+    keys = ['metric', 'unit', 'role', 'case', 'host', 'entity']
+    g = df.groupby(keys)['value']
+    out = g.agg(n='count', mean='mean', max='max', min='min')
+    out['p95'] = g.quantile(0.95)                   # 그룹마다 함수를 부르지 않는 묶음 계산 (결과는 같다)
+    return out.reset_index()
 
 
 def compare(stats, baseline, stat='mean'):
