@@ -1,0 +1,13 @@
+# user settings and outputs (kept on each PC, not in Git)
+settings.json
+run_commands.csv
+monitor_commands.csv
+testcases/
+backup/
+# build outputs
+.venv/
+build/
+dist/
+*.spec
+__pycache__/
+*.tmp
