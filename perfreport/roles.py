@@ -8,6 +8,7 @@ import csv
 import io
 
 from . import metrics as M
+from . import units as U
 
 ROLES = M.ROLES
 COLUMNS = ('지표', '역할', '순서')
@@ -71,10 +72,17 @@ def normalize(roles):
 
 
 def restrict(roles, names):
-    """데이터에 있는 지표만 남긴다. 반환: (남긴 역할, 데이터에 없어 뺀 지표 목록)."""
-    names = set(names)
-    kept = {m: v for m, v in roles.items() if m in names}
-    return normalize(kept), sorted(set(roles) - names)
+    """데이터에 있는 지표만 남긴다. 반환: (남긴 역할, 데이터에 없어 뺀 지표 목록).
+    단위 표기만 다른 이름(AnonHugePages_MB 와 AnonHugePages_GB)은 같은 지표로 보고 데이터 쪽 이름으로 바꾼다."""
+    pick = U.same_metric(list(names))
+    kept, gone = {}, []
+    for m, v in roles.items():
+        got = pick(m)
+        if got is None:
+            gone.append(m)
+        elif got not in kept:
+            kept[got] = v
+    return normalize(kept), sorted(gone)
 
 
 def summary(roles):

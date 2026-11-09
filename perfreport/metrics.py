@@ -43,7 +43,7 @@ PRIORITY = {   # 분류 안 표시 순서: 정규식, 위에서부터
     'CPU': [r'^cpu\|usage \(%\)', r'resource-utilization', r'co-?stop \(%\)', r'^cpu\|ready', r'peak.*co-?stop', r'peak.*ready',
             r'^cpu\|usage \(ghz\)', r'dtlb', r'itlb', r'cache[ _]*miss[ _]*rate|llc.*miss', r'l1d', r'ipc', r'^instructions',
             r'cache[ _]*miss', r'cache[ _]*ref'],
-    'Memory': [r'^memory\|usage', r'mem_used|memory\|.*(used|consumed)', r'thp_?coverage', r'anonhugepages', r'anonpages',
+    'Memory': [r'^memory\|usage', r'mem_used|memory\|.*(used|consumed)', r'thp[ _]?coverage', r'anonhugepages', r'anonpages',
                r'thp.*fault.*alloc', r'thp.*colla?pa?se?.*alloc', r'thp.*(fallback|fail)', r'swap'],
     'Guest': [r'context switch', r'used memory', r'free memory', r'swap', r'page in', r'page out', r'peak.*page'],
     'Disk': [r'read latency', r'write latency', r'read iops', r'write iops', r'read throughput', r'write throughput'],

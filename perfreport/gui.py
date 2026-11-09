@@ -194,13 +194,15 @@ def role_editor(root, names, roles, on_ok):
 def build(root):
     """기본 창을 구성한다. 반환: 입력 값과 동작 함수(창 없이 시험할 때 쓴다)."""
     root.title('성능 리포트 생성기')
-    root.geometry('860x790')
+    root.geometry('860x820')
     v = {k: tk.StringVar() for k in ('cases', 'data', 'out', 'split', 'title', 'baseline', 'selection')}
     core = tk.BooleanVar(value=False)
     include_un = tk.BooleanVar(value=True)
     role_sum = tk.StringVar(value=R.summary({}))
     pal_var = tk.StringVar(value=P.PALETTES[P.DEFAULT_PALETTE][0])
     width_var = tk.StringVar(value='16.5')
+    to_gb = tk.BooleanVar(value=False)      # 단위 변환: 기본은 원래 단위 그대로
+    to_gbps = tk.BooleanVar(value=False)
     q = queue.Queue()
     last = {}
     state = {'roles': {}}   # 확인을 누른 지표 역할 {지표: (역할, 순서)}
@@ -241,8 +243,9 @@ def build(root):
     tk.Label(frm, text='그래프 폭 (cm)', anchor='w', width=16).grid(row=12, column=0, sticky='w', pady=3)
     wf = tk.Frame(frm)
     wf.grid(row=12, column=1, sticky='w')
-    tk.Spinbox(wf, from_=10, to=25, increment=0.5, textvariable=width_var, width=6).pack(side='left')
-    tk.Label(wf, text='기본 16.5 (세로 페이지 본문 폭). 넓히면 가로 방향 페이지로 만든다. 최대 25', fg='#77766f').pack(side='left', padx=8)
+    tk.Spinbox(wf, from_=10, to=31.5, increment=0.5, textvariable=width_var, width=6).pack(side='left')
+    tk.Label(wf, text='기본 16.5 (세로 페이지 본문 폭). 넓히면 가로 방향 페이지. 컨플루언스로 가져올 문서는 31.5 (최대)',
+             fg='#77766f').pack(side='left', padx=8)
 
     tk.Label(frm, text='지표 역할 (선택)', anchor='w', width=16).grid(row=13, column=0, sticky='w', pady=(8, 3))
     rf = tk.Frame(frm)
@@ -255,6 +258,11 @@ def build(root):
     row(15, 'HTML 선택 파일 (선택)', 'selection',
         lambda: v['selection'].set(filedialog.askopenfilename(title='HTML 선택 파일', filetypes=[('HTML 선택 파일 (JSON)', '*.json'), ('모든 파일', '*.*')]) or v['selection'].get()),
         "HTML 의 '선택 내보내기' 로 저장한 파일. 지정하면 그 케이스 · VM · 지표만으로 만든다")
+    tk.Label(frm, text='단위 변환 (선택)', anchor='w', width=16).grid(row=17, column=0, sticky='w', pady=3)
+    uf = tk.Frame(frm)
+    uf.grid(row=17, column=1, sticky='w')
+    tk.Checkbutton(uf, text='크기를 GB 로 (KB · MB · Bytes → GB)', variable=to_gb).pack(side='left')
+    tk.Checkbutton(uf, text='네트워크 속도를 Gbps 로 (KBps · Mbps → Gbps)', variable=to_gbps).pack(side='left', padx=12)
 
     btns = tk.Frame(root, padx=12)
     btns.pack(fill='x')
@@ -271,10 +279,10 @@ def build(root):
         role_sum.set(R.summary(r))
         un_chk.config(state='normal' if r else 'disabled')
 
-    def list_worker(cases, data, analysis):
+    def list_worker(cases, data, analysis, gb=False, gbps=False):
         from .build import list_metrics
         try:
-            q.put(('metrics', list_metrics(cases, data, log=lambda m: q.put(('log', m)), analysis=analysis)))
+            q.put(('metrics', list_metrics(cases, data, log=lambda m: q.put(('log', m)), analysis=analysis, to_gb=gb, to_gbps=gbps)))
         except SystemExit as e:
             q.put(('merr', str(e)))
         except Exception as e:  # 화면에 원인을 그대로 보인다
@@ -286,7 +294,8 @@ def build(root):
             return
         role_btn.config(state='disabled')
         log.insert('end', '── 지표 목록 읽기 시작\n')
-        threading.Thread(target=list_worker, args=(v['cases'].get(), v['data'].get(), CORE_PROFILE if core.get() else None),
+        threading.Thread(target=list_worker, args=(v['cases'].get(), v['data'].get(), CORE_PROFILE if core.get() else None,
+                                                   to_gb.get(), to_gbps.get()),
                          daemon=True).start()
 
     def worker(kw):
@@ -315,7 +324,8 @@ def build(root):
                   title=v['title'].get() or None, baseline=v['baseline'].get() or None,
                   analysis=CORE_PROFILE if core.get() else None, split_dir=v['split'].get() or None,
                   roles=dict(state['roles']) or None, include_unassigned=include_un.get(),
-                  palette=pal_var.get(), chart_width_cm=width, selection=v['selection'].get() or None)
+                  palette=pal_var.get(), chart_width_cm=width, selection=v['selection'].get() or None,
+                  to_gb=to_gb.get(), to_gbps=to_gbps.get())
         run_btn.config(state='disabled')
         log.insert('end', f'── 시작: {kw["cases_csv"]}\n── 지표 역할: {R.summary(state["roles"])}\n')
         threading.Thread(target=worker, args=(kw,), daemon=True).start()
@@ -364,7 +374,7 @@ def build(root):
     role_btn.config(command=open_roles)
     root.after(200, poll)
     return {'v': v, 'core': core, 'include_un': include_un, 'role_sum': role_sum, 'state': state, 'last': last,
-            'pal_var': pal_var, 'width_var': width_var,
+            'pal_var': pal_var, 'width_var': width_var, 'to_gb': to_gb, 'to_gbps': to_gbps,
             'set_roles': set_roles, 'open_roles': open_roles, 'start': start, 'log': log,
             'role_btn': role_btn, 'run_btn': run_btn, 'un_chk': un_chk}
 

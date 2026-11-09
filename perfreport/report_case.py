@@ -2,18 +2,20 @@
 
 구성 (기본 양식: 지표 역할 지정이 없을 때)
   §1 케이스 식별
-  §2 요약 표 (VM 별 주요 지표 평균 · 최대: 데이터에 있는 지표만)
+  §2 요약 표 (VM 별 주요 지표: 지표마다 평균 칸과 최대 칸, 데이터에 있는 지표만)
   §3~ 분류별 절 (CPU · Memory · Guest · Disk · Network · 기타: 데이터에 있는 분류만)
        지표마다 그래프 1장(선 = VM, 최대 8개, 넘으면 나눔) + 한 줄 설명, 절 끝에 통계 표
   Appendix A 데이터 출처 (분류별 수집 시스템 · 시간대)
-  Appendix B 데이터 가용성 (VM · 수집 시스템별 실행 구간 안 표본 수 · 최대 공백): 문서 끝
+  Appendix B 지표별 표본 수 (지표 × VM, 실행 구간 안)
+  Appendix C 데이터 가용성 (VM · 수집 시스템별 실행 구간 안 표본 시각 수 · 최대 공백): 문서 끝
 
 구성 (지표 역할 지정이 있을 때)
   §2 요약 표는 핵심 성능 지표, §3~ 는 역할별 절(핵심 성능 지표 → 원인 분석 지표 → 세부 분석 지표 → 상충 지표 →
   측정 조건 확인 항목, 지정된 역할만). 역할 미지정 지표는 옵션에 따라 Appendix A(분류별)에 수록하거나 뺀다.
-  그 뒤 데이터 출처, 데이터 가용성.
+  그 뒤 데이터 출처, 지표별 표본 수, 데이터 가용성.
 
 그림 안에는 축 · 범례 · 데이터만 둔다(축 라벨 영문). 제목과 설명은 본문 텍스트로 쓴다. 모든 선은 실선이고 색으로 구별한다.
+컨플루언스로 가져오기: 문서 글자의 '|' 는 ' > ' 로 바꾸고(docx_base.confluence_safe), 값이 없는 칸은 비우며, 병합 칸은 쓰지 않는다.
 """
 import multiprocessing
 import os
@@ -31,17 +33,19 @@ from docx.enum.section import WD_ORIENT
 from docx.shared import Cm
 
 from . import analyze, charts, docx_base, metrics, report_docx
+from . import units as units_mod
 from . import palette as P
 
 LINES_PER_CHART = 8
 CHART_DPI = 150          # 그래프 해상도: 14 x 7.5 in → 약 2,100 x 1,100 픽셀 (본문 폭 16.5 cm 에서 약 320 ppi)
 PNG_LEVEL = 3            # PNG 압축 수준: 기본값 6 보다 빠르고 파일은 조금 크다
 DEFAULT_WIDTH_CM = 16.5  # 문서 그래프 폭 기본값 = 세로 페이지 본문 폭 (6.5 in)
-MAX_WIDTH_CM = 25.0      # 가로 방향 페이지에서 좌우 여백을 줄여 넣을 수 있는 최대 폭
+MAX_WIDTH_CM = 31.5      # 컨플루언스 Word 가져오기의 기본 그림 크기 제한(Word 에 보이는 크기 1200 x 900 px) 안의 최대 폭
+A3_LANDSCAPE_CM = (42.0, 29.7)   # 가로 Letter 페이지(본문 최대 약 25.9 cm)보다 넓은 그래프는 A3 가로 페이지에 싣는다
 SUMMARY_PRIORITY = [   # 요약 표에 넣는 지표: 기존 성능 리포트의 서버별 요약 표 순서 (데이터에 있는 것만)
     'CPU|Usage (%)', 'Super Metrics|Resource-Utilization (%)', 'CPU|Co-stop (%)', 'CPU|Ready (%)',
     'CPU|Peak vCPU Co-Stop within collection cycle (%)', 'CPU|Peak vCPU Ready within collection cycle (%)',
-    'Memory|Usage (%)', 'Guest|Used Memory (GB)', 'Guest|Free Memory (GB)', 'Guest|Remaining Swap Space (GB)',
+    'Memory|Usage (%)', units_mod.THP_COVERAGE, 'Guest|Used Memory (GB)', 'Guest|Free Memory (GB)', 'Guest|Remaining Swap Space (GB)',
     'Virtual Disk:Aggregate of all instances|Read Latency (ms)',
     'Virtual Disk:Aggregate of all instances|Write Latency (ms)']
 
@@ -160,12 +164,14 @@ class ChartPool:
 
 def _page_for(doc, width_cm):
     """그래프 폭이 기본값(16.5 cm, 세로 페이지: 기존 리포트와 같음)보다 넓으면 가로 방향 페이지로 바꾸고,
-    그래도 본문 폭이 좁으면 좌우 여백을 줄인다."""
+    그래도 본문 폭이 좁으면 좌우 여백을 줄인다. 여백을 1 cm 로 줄여도 모자라면 A3 가로 페이지로 바꾼다."""
     sec = doc.sections[0]
     if width_cm <= DEFAULT_WIDTH_CM + 0.01:
         return
     sec.orientation = WD_ORIENT.LANDSCAPE
     sec.page_width, sec.page_height = sec.page_height, sec.page_width
+    if width_cm > sec.page_width / 360000 - 2.0:
+        sec.page_width, sec.page_height = Cm(A3_LANDSCAPE_CM[0]), Cm(A3_LANDSCAPE_CM[1])
     if width_cm > (sec.page_width - sec.left_margin - sec.right_margin) / 360000:
         sec.left_margin = sec.right_margin = Cm(max(1.0, (sec.page_width / 360000 - width_cm) / 2))
 
@@ -227,7 +233,7 @@ def build_case(path, case, df, chart_dir, date, log=print, roles=None, include_u
     in_doc = present if (not by_role or include_unassigned) else [m for m in present if m in roles]
     dur = (case['end'] - case['start']).total_seconds()
     mg = int(case.get('margin_s') or 0)
-    state = {'n': 0}
+    state = {'n': 0, 'order': []}      # order: 문서에 실은 지표 순서 (Appendix 표본 수 표에 쓴다)
 
     # 그래프는 문서를 만들기 전에 모두 맡겨 둔다 (pool 이 있으면 여러 프로세스가 나눠 그린다). 문서에는 아래 순서대로 넣는다.
     by_metric = {m: g for m, g in df.groupby('metric', sort=False)}
@@ -252,6 +258,7 @@ def build_case(path, case, df, chart_dir, date, log=print, roles=None, include_u
     def metric_block(m):
         """지표 1개: 그래프(선 = VM, 8대씩 나눔)와 한 줄 설명."""
         b, have, items = plan[m]
+        state['order'].append(m)
         for part, fut, args in items:
             state['n'] += 1
             who = f' ({part[0]} ~ {part[-1]})' if len(items) > 1 else ''
@@ -271,9 +278,9 @@ def build_case(path, case, df, chart_dir, date, log=print, roles=None, include_u
                 x = st[(st['entity'] == e) & (st['metric'] == m)]
                 if len(x):
                     x = x.iloc[0]
-                    rows.append([m, e, int(x['n']), analyze.fmt(x['mean']), analyze.fmt(x['p95']), analyze.fmt(x['max']),
-                                 units.get(m) or '-'])
-        report_docx._table(doc, ['지표', 'VM', '표본 수', '평균', 'p95', '최댓값', '단위'], rows)
+                    rows.append([m, e, analyze.fmt(x['mean']), analyze.fmt(x['p95']), analyze.fmt(x['max']),
+                                 units.get(m) or ''])
+        report_docx._table(doc, ['지표', 'VM', '평균', 'p95', '최댓값', '단위'], rows)     # 표본 수는 Appendix 의 지표별 표본 수 표
 
     doc.add_heading(f'{cid} 성능 리포트', level=0)
     doc.add_paragraph(f'작성일: {date}')
@@ -283,10 +290,10 @@ def build_case(path, case, df, chart_dir, date, log=print, roles=None, include_u
     report_docx._caption(doc, '표. 케이스 정보')
     end_txt = f'{case["end"]:%Y-%m-%d %H:%M:%S}' + (f' (자동 감지: {case.get("end_reason", "")})' if case.get('end_auto') else '')
     info = [
-        ['케이스명', cid], ['테스트 그룹', case.get('group') or '-'], ['설명', case.get('label') or '-'], ['호스트', case.get('host') or ', '.join(sorted(df['host'].unique()))],
+        ['케이스명', cid], ['테스트 그룹', case.get('group') or '없음'], ['설명', case.get('label') or '없음'], ['호스트', case.get('host') or ', '.join(sorted(df['host'].unique()))],
         ['잡 시작 시각', f'{case["start"]:%Y-%m-%d %H:%M:%S}'], ['잡 종료 시각', end_txt],
         ['실행 시간', f'{dur:,.0f} s'],
-        ['수집 점검', case.get('collection_check', '').split('] ', 1)[-1].split('\n')[0] or '-'],
+        ['수집 점검', case.get('collection_check', '').split('] ', 1)[-1].split('\n')[0] or '없음'],
         ['그래프 표시 구간', f'잡 시작 {mg // 60}분 전 ~ 종료 {mg // 60}분 후' if mg else '잡 실행 구간'], ['VM', ', '.join(ents)],
         ['수집 지표', ' · '.join(f'{c} {len(ms)}종' for c, ms in groups)],
     ]
@@ -301,19 +308,23 @@ def build_case(path, case, df, chart_dir, date, log=print, roles=None, include_u
     # §2 요약 표: 역할 지정이 있으면 핵심 성능 지표, 없으면 기존 서버별 요약 표 순서
     doc.add_heading('2. 요약', level=1)
     core = R.members(roles, R.ROLES[0])
-    keys = core or [m for m in SUMMARY_PRIORITY if m in present] or metrics.flat(present)[:6]
+    pick = units_mod.same_metric(present)          # 단위를 GB · Gbps 로 바꿨어도 같은 지표를 찾는다
+    keys = core or list(dict.fromkeys(filter(None, map(pick, SUMMARY_PRIORITY)))) or metrics.flat(present)[:6]
     head = '핵심 성능 지표' if core else '주요 지표'
-    report_docx._caption(doc, f'표. VM 별 {head} (평균 / 최대 · 남은 자원 지표는 평균 / 최소)')
+    report_docx._caption(doc, f'표. VM 별 {head} (지표마다 평균과 최대, 남은 자원 지표는 평균과 최소)')
     rows = []
     for e in ents:
         r = [e]
         for m in keys:
             x = st[(st['entity'] == e) & (st['metric'] == m)]
             edge = 'min' if metrics.is_remaining(m) else 'max'
-            r.append(f'{analyze.fmt(x["mean"].iloc[0])} / {analyze.fmt(x[edge].iloc[0])}' if len(x) else '-')
+            r += [analyze.fmt(x['mean'].iloc[0]), analyze.fmt(x[edge].iloc[0])] if len(x) else ['', '']
         rows.append(r)
-    report_docx._table(doc, ['VM'] + [f'{m} ({"평균/최소" if metrics.is_remaining(m) else "평균/최대"})' for m in keys], rows)
-    doc.add_paragraph('여유 메모리 · 잔여 swap 처럼 남은 자원을 재는 지표는 최솟값을 적는다. 값이 0 인 지표는 0 으로, 수집되지 않은 지표는 - 로 적는다.')
+    # 머리글 두 줄: 윗줄에 지표 이름을 한 번만(평균 칸 위), 아랫줄에 평균 · 최대. 병합 칸은 컨플루언스로 가져올 때 깨질 수 있어 쓰지 않는다
+    report_docx._table(doc, ['VM'] + [x for m in keys for x in (m, '')], rows,
+                       header2=[''] + [x for m in keys for x in ('평균', '최소' if metrics.is_remaining(m) else '최대')])
+    doc.add_paragraph('지표마다 평균과 최대를 각 칸에 적음. 여유 메모리 · 잔여 swap 처럼 남은 자원을 재는 지표는 최대 대신 최솟값. '
+                      '값이 0 인 지표는 0, 수집되지 않은 지표는 빈 칸.')
 
     # §3~ 본문: 역할별 절(역할 지정이 있을 때) 또는 분류별 절(기본 양식)
     body = role_groups if by_role else groups
@@ -345,6 +356,13 @@ def build_case(path, case, df, chart_dir, date, log=print, roles=None, include_u
             rows.append([cat, f'{k}종', sysname, '데이터 파일의 시각 그대로 (변환 없음)'])
     report_docx._table(doc, ['분류', '지표 수', '수집 시스템', '시간대'], rows)
 
+    doc.add_heading(f'Appendix {next(letters)}. 지표별 표본 수', level=1)
+    doc.add_paragraph('잡 실행 구간(시작~종료 시각) 안의 지표별 · VM 별 표본 수. 같은 지표에서 VM 끼리 수가 다르면 그 VM 의 수집이 빠졌거나 수집 간격이 다르다는 뜻. '
+                      '수집되지 않은 칸은 빈 칸.')
+    nmap = {(r.metric, r.entity): int(r.n) for r in st[['metric', 'entity', 'n']].itertuples()}
+    rows = [[m] + [f'{nmap[(m, e)]:,}' if (m, e) in nmap else '' for e in ents] for m in dict.fromkeys(state['order'])]
+    report_docx._table(doc, ['지표'] + ents, rows)
+
     doc.add_heading(f'Appendix {next(letters)}. 데이터 가용성', level=1)
     rows = []
     run_df = df[df['in_run']] if 'in_run' in df else df
@@ -358,10 +376,11 @@ def build_case(path, case, df, chart_dir, date, log=print, roles=None, include_u
     if iss:
         report_docx._table(doc, ['VM', '수집 시스템', '종류', '시작', '끝', '길이 (분)', '정상 간격 (s)'],
                            [[x['vm'], x['system'], x['kind'], f'{x["from"]:%Y-%m-%d %H:%M:%S}', f'{x["to"]:%Y-%m-%d %H:%M:%S}',
-                             f'{x["sec"] / 60:.1f}', f'{x["interval"]:g}' if x['interval'] else '-'] for x in iss])
+                             f'{x["sec"] / 60:.1f}', f'{x["interval"]:g}' if x['interval'] else ''] for x in iss])
     else:
         doc.add_paragraph('수집 끊김 없음.')
 
     os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+    docx_base.confluence_safe(doc)       # 컨플루언스 Word 가져오기에서 표가 깨지지 않게 '|' 등을 바꾼다
     text = docx_base.text_of(doc)        # 통제 용어 검사용: 저장한 파일을 다시 열지 않는다 (DRM 대책)
     return _save(doc, path, log), state['n'], text

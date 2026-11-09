@@ -12,7 +12,7 @@ import sys
 import pandas as pd
 import yaml
 
-from . import analyze, charts, ingest, report_case, report_docx, report_html, runwin
+from . import analyze, charts, ingest, report_case, report_docx, report_html, runwin, units
 from . import metrics as metrics_mod
 from . import palette as palette_mod
 from . import roles as roles_mod
@@ -213,8 +213,9 @@ def scan_sources(cases_csv, data_dir, log=print):
     return cases, profiles, srcs, file_index(srcs, profiles, log)
 
 
-def list_metrics(cases_csv, data_dir, log=print, analysis=None):
-    """창 화면의 지표 역할 지정용 지표 목록: 케이스에 쓰일 데이터 파일에 든 지표 이름(분류 순서). 데이터를 다 읽지 않고 색인을 쓴다."""
+def list_metrics(cases_csv, data_dir, log=print, analysis=None, to_gb=False, to_gbps=False):
+    """창 화면의 지표 역할 지정용 지표 목록: 케이스에 쓰일 데이터 파일에 든 지표 이름(분류 순서). 데이터를 다 읽지 않고 색인을 쓴다.
+    THP Coverage (%) 처럼 계산해 만드는 지표와 단위 변환(to_gb · to_gbps)을 리포트와 같게 반영한다."""
     cases, profiles, srcs, index = scan_sources(cases_csv, data_dir, log)
     names = []
     for c in cases:
@@ -224,12 +225,13 @@ def list_metrics(cases_csv, data_dir, log=print, analysis=None):
         for s in srcs:
             if _file_matches(index[s['path']], probe):
                 names += index[s['path']].get('metrics', [])
-    names = list(dict.fromkeys(names))
+    names = units.rename_names(units.thp_names(dict.fromkeys(names)), to_gb, to_gbps)
     if analysis:
         ana = yaml.safe_load(open(_resolve(analysis, APP_DIR), encoding='utf-8'))
         want = ana.get('metrics', 'all')
         if want != 'all':
-            names = [m for m in want if m in set(names)]
+            pick = units.same_metric(names)
+            names = list(dict.fromkeys(filter(None, map(pick, want))))
     return metrics_mod.flat(names)
 
 
@@ -273,12 +275,13 @@ def default_workers():
 
 def run_csv(cases_csv, data_dir, out_dir=None, title=None, baseline=None, analysis=None, log=print,
             split_dir=None, report=True, margin_s=None, roles=None, include_unassigned=True,
-            palette=None, chart_width_cm=None, workers=None, selection=None):
+            palette=None, chart_width_cm=None, workers=None, selection=None, to_gb=False, to_gbps=False):
     """케이스 정보 CSV + 데이터 폴더 방식. 데이터 폴더의 모든 파일을 읽어 케이스마다 호스트·잡 실행 구간으로 잘라 쓴다.
     roles: 지표 역할 {지표: (역할, 순서)} 또는 역할 파일 경로. 없으면 기본 리포트 양식.
     palette: 케이스 문서 그래프의 색상 팔레트(1부터 센 번호 또는 이름, 기본 1 파랑 계열).
     chart_width_cm: 케이스 문서 안 그래프 폭(cm, 기본 16.5). workers: 그래프를 나눠 그릴 프로세스 수(기본 자동).
-    selection: HTML '선택 내보내기' 파일. 주면 그 파일의 케이스 · VM · 지표만으로 만든다."""
+    selection: HTML '선택 내보내기' 파일. 주면 그 파일의 케이스 · VM · 지표만으로 만든다.
+    to_gb · to_gbps: 크기 단위를 GB 로, 네트워크 속도를 Gbps 로 바꾼다(기본은 원래 단위 그대로, units.py)."""
     cases, profiles, srcs, index = scan_sources(cases_csv, data_dir, log)
     sel = load_selection(selection) if selection else None
     if sel:
@@ -333,7 +336,7 @@ def run_csv(cases_csv, data_dir, out_dir=None, title=None, baseline=None, analys
            'analysis': analysis or 'profiles/analysis/default.yaml',
            'roles': roles or {}, 'include_unassigned': include_unassigned,
            'palette': palette_mod.palette_index(palette), 'chart_width_cm': chart_width_cm, 'workers': workers,
-           'selection': sel,
+           'selection': sel, 'to_gb': bool(to_gb), 'to_gbps': bool(to_gbps),
            'output': out_dir or os.path.join(os.path.dirname(os.path.abspath(cases_csv)), 'out_' + name)}
     return run_job(job, os.path.dirname(os.path.abspath(cases_csv)), log)
 
@@ -394,19 +397,31 @@ def run_job(job, base, log=print):
                             'file': os.path.basename(s['path']), 'n': n})
     df = pd.concat(frames, ignore_index=True)
 
-    # 지표 선택: 분석 프로파일의 metrics 목록 순서. 'all' 이면 데이터에 있는 전부.
+    # 계산 지표(THP Coverage)와 단위 변환(선택): 문서 · HTML 모두 이 표를 쓴다
+    n0 = df['metric'].nunique()
+    df = units.derive_thp(df)
+    if df['metric'].nunique() > n0:
+        log(f'[계산 지표] {units.THP_COVERAGE} = AnonHugePages ÷ AnonPages × 100')
+    df, renamed = units.convert(df, job.get('to_gb'), job.get('to_gbps'))
+    if renamed:
+        log(f'[단위] {len(renamed)}개 지표 변환: ' + ', '.join(f'{a} → {b}' for a, b in list(renamed.items())[:6])
+            + (' 외' if len(renamed) > 6 else ''))
+
+    # 지표 선택: 분석 프로파일의 metrics 목록 순서. 'all' 이면 데이터에 있는 전부. 단위 표기만 다른 이름은 같은 지표로 본다
     want = ana.get('metrics', 'all')
     present = list(dict.fromkeys(df['metric']))
-    metrics = present if want == 'all' else [m for m in want if m in set(present)]
+    pick = units.same_metric(present)
+    metrics = present if want == 'all' else list(dict.fromkeys(filter(None, map(pick, want))))
     sel = job.get('selection')
     if sel:                                                   # HTML 선택 파일의 지표만
-        lost = [m for m in sel['metrics'] if m not in set(metrics)]
-        metrics = [m for m in metrics if m in set(sel['metrics'])]
+        lost = [m for m in sel['metrics'] if pick(m) not in set(metrics)]
+        chosen = {pick(m) for m in sel['metrics']}
+        metrics = [m for m in metrics if m in chosen]
         if lost:
             log(f'[HTML 선택] 데이터에 없어 뺀 지표 {len(lost)}개: ' + ', '.join(lost[:10]))
         if not metrics:
             raise SystemExit('HTML 선택 파일의 지표가 이번 데이터에 없음')
-    missing = [] if want == 'all' else [m for m in want if m not in set(present)]
+    missing = [] if want == 'all' else [m for m in want if pick(m) is None]
     for m in missing:
         log(f'[주의] 분석 프로파일의 지표가 데이터에 없음: {m}')
     df = df[df['metric'].isin(metrics)]
@@ -494,6 +509,7 @@ def run_job(job, base, log=print):
            'groups': {g or '-': [c['id'] for c in cases if (c.get('group') or '') == g] for g in groups},
            'roles': roles_mod.summary(roles), 'include_unassigned': include_unassigned,
            'palette': palette_mod.PALETTES[pal][0], 'chart_width_cm': float(width_cm),
+           'unit_conversion': {'to_gb': bool(job.get('to_gb')), 'to_gbps': bool(job.get('to_gbps')), 'renamed': renamed},
            'selection': (job.get('selection') or {}).get('name', '')}
     if roles:                                                   # 어떤 역할 지정으로 만들었는지 결과 폴더에 남긴다
         roles_mod.save(os.path.join(outdir, 'metric_roles.csv'), roles)

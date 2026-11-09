@@ -26,7 +26,7 @@ def compare(stats, baseline, stat='mean'):
 
 def fmt(v, digits=2):
     if v is None or pd.isna(v):
-        return '-'
+        return ''          # 값이 없으면 빈 칸 ('-' 는 컨플루언스로 가져올 때 위키 마크업 기호로 읽힐 수 있다)
     if abs(v) >= 1000:
         return f'{v:,.0f}'
     if v != 0 and abs(v) < 1:

@@ -8,6 +8,7 @@ MIT 라이선스)을 바이트 값 목록으로 담아 두고 메모리에서 �
 """
 import hashlib
 import io
+import re
 from zipfile import ZIP_DEFLATED, ZIP_STORED
 
 from docx import Document
@@ -1000,3 +1001,23 @@ def new_document():
 def text_of(doc):
     """문서 본문 문단과 표 칸의 글자. 저장한 파일은 DRM 이 암호화할 수 있어 다시 열지 않고 메모리의 문서에서 읽는다."""
     return '\n'.join([p.text for p in doc.paragraphs] + [c.text for t in doc.tables for r in t.rows for c in r.cells])
+
+
+# 컨플루언스(Data Center)의 Word 가져오기는 문서를 위키 마크업으로 바꿀 때 위키 마크업 기호를 그대로 둔다(Atlassian CONFSERVER-53030).
+# 표 칸의 '|' 는 새 열로 나뉘고 '[ ]' 는 깨진 매크로가 된다. 문서 글자에서 이 기호들을 다른 표기로 바꾼다.
+_PIPE = re.compile(r'\s*\|\s*')
+_CF_MAP = str.maketrans({'[': '(', ']': ')', '{': '(', '}': ')', '\\': '/'})
+
+
+def confluence_text(s):
+    """'CPU|Usage (%)' → 'CPU > Usage (%)'. 대괄호 · 중괄호는 괄호로, 역슬래시는 '/' 로."""
+    return _PIPE.sub(' > ', s).translate(_CF_MAP) if s else s
+
+
+def confluence_safe(doc):
+    """문서의 모든 문단 · 표 칸 글자에 confluence_text 를 적용한다 (글자 서식은 그대로)."""
+    paras = list(doc.paragraphs) + [p for t in doc.tables for r in t.rows for c in r.cells for p in c.paragraphs]
+    for p in paras:
+        for r in p.runs:
+            if r.text and any(ch in r.text for ch in '|[]{}\\'):
+                r.text = confluence_text(r.text)

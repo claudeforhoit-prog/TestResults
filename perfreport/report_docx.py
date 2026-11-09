@@ -31,7 +31,8 @@ def _caption(doc, text):
     return p
 
 
-def _table(doc, header, rows):
+def _table(doc, header, rows, header2=None):
+    """표. header2 를 주면 머리글을 두 줄로 만든다 (병합 칸은 쓰지 않는다: 컨플루언스로 가져올 때 깨질 수 있어서)."""
     t = doc.add_table(rows=1, cols=len(header))
     t.style = 'Table Grid'
 
@@ -43,6 +44,9 @@ def _table(doc, header, rows):
 
     for c, h in zip(t.rows[0].cells, header):
         put(c, h, bold=True)
+    if header2:
+        for c, h in zip(t.add_row().cells, header2):
+            put(c, h, bold=True)
     for row in rows:
         for c, v in zip(t.add_row().cells, row):
             put(c, v)
