@@ -168,12 +168,9 @@ def _conc_chart(path, g, color, bands=None, load_end=None, phase_total=None):
     ax.plot([r[0] for r in g['set_rows']], [r[2] for r in g['set_rows']], '-', color=color, lw=2.0, zorder=4, label='Set mean (line)')
     ax.set_ylim(0, max(ys) * 1.22 if ys else 1)
     ax.set_xlim(min(0.0, min(xs, default=0.0)) - g['window_s'] * 0.035, max(g['window_s'], max(xs, default=0.0)) * 1.06)
-    for (x0, _n, mean, _lo, hi), js in zip(g['set_rows'], g['set_jobs']):     # 세트마다: 평균은 굵게 위에, 잡별 값은 오른쪽에
+    for x0, _n, mean, _lo, hi in g['set_rows']:      # 세트마다 평균만 굵게, 세트의 가장 높은 점 위에 (선과 겹치지 않게 흰 바탕)
         ax.annotate(f'{mean:,.0f}', (x0, hi), xytext=(0, 9), textcoords='offset points', ha='center', va='bottom',
-                    fontsize=12, fontweight='bold', color=color)
-        vals = sorted((e for *_r, e in js), reverse=True)
-        ax.annotate('\n'.join(f'{v:,.0f}' for v in vals), (x0, hi), xytext=(9, 0), textcoords='offset points',
-                    ha='left', va='top', fontsize=9.5, color=P.TEXT_SECONDARY, linespacing=1.1)
+                    fontsize=12, fontweight='bold', color=color, bbox=dict(fc='white', ec='none', alpha=0.85, pad=1.5))
     ax.grid(True, color=P.GRID, linewidth=0.8)
     ax.set_axisbelow(True)
     for side in ('top', 'right'):
@@ -521,7 +518,7 @@ def build_case(path, case, df, chart_dir, date, log=print, roles=None, include_u
             gpath = os.path.join(chart_dir, f'jobs_{state["n"]:03d}.png')
             doc.add_picture(_conc_chart(gpath, g, jobs_mod.COLORS['dot'], *ph_args), width=Cm(width_cm))
             doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
-            doc.add_paragraph('점 하나는 잡 하나, 선은 세트 평균. 세트마다 굵은 숫자는 세트 평균, 그 오른쪽 숫자는 잡마다의 elapsed. '
+            doc.add_paragraph('점 하나는 잡 하나, 선은 세트 평균, 세트마다 적은 숫자는 세트 평균. 잡마다의 elapsed 는 아래 잡별 표. '
                               '가로축은 기준 구간 시작을 0초로 둔 세트 시작 경과 시간' + (', 배경은 phase 구간.' if phase else '.'))
             report_docx._caption(doc, f'표. {g["label"]} 세트별 실측')
             report_docx._table(doc, ['세트', '세트 시작 (s)', '잡 수', '잡 elapsed 평균 (s)', '최소 (s)', '최대 (s)'],

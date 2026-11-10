@@ -493,7 +493,7 @@ function drawSets(cfg){
   it.forEach((o, k) => {                  // 케이스 · 잡 종류마다 그래프 1개 (세트마다 값을 적고 phase 밴드를 케이스마다 그리려고 나눈다)
     const col = it.length === 1 ? D.jobColors.dot : seq[k % seq.length], name = `${o.c.id} · ${o.g.label}`;
     const t = document.createElement('div'); t.className = 'ptitle';
-    t.textContent = `그림. ${name} 세트별 elapsed (점 = 잡 · 선 = 세트 평균 · 굵은 숫자 = 세트 평균 · 오른쪽 숫자 = 잡마다의 elapsed`
+    t.textContent = `그림. ${name} 세트별 elapsed (점 = 잡 · 선 = 세트 평균 · 숫자 = 세트 평균 · 잡마다의 값은 아래 표와 점에 마우스를 올리면`
       + (st.phaseBand && PH[o.c.id] ? ' · 배경 = phase 구간)' : ')');
     const div = document.createElement('div'); div.style.height = '440px'; box.append(t, div);
     const mx = Math.max(1, ...o.g.points.map(p => p[1]));
@@ -503,12 +503,9 @@ function drawSets(cfg){
       {type: 'scatter', mode: 'lines+markers', name: '세트 평균', x: o.g.set_rows.map(r => r[0]), y: o.g.set_rows.map(r => r[2]),
        line: {color: col, width: 2}, marker: {color: col, size: 4}, hovertemplate: name + '<br>세트 시작 %{x:,.0f} s · 세트 평균 %{y:,.2f} s<extra></extra>'}];
     const ann = [];
-    o.g.set_rows.forEach((r, i) => {
-      const js = (o.g.set_jobs[i] || []).map(j => j[3]).sort((a, b) => b - a);
+    o.g.set_rows.forEach(r => {           // 세트마다 평균만, 세트의 가장 높은 점 위에 (선과 겹치지 않게 바탕색)
       ann.push({x: r[0], y: r[4], yshift: 8, yanchor: 'bottom', showarrow: false, text: `<b>${Math.round(r[2]).toLocaleString('ko-KR')}</b>`,
-                font: {size: 12, color: css('--text-primary')}});          // 옅은 케이스 색에서도 읽히도록 숫자는 글자색
-      ann.push({x: r[0], y: r[4], xshift: 8, xanchor: 'left', yanchor: 'top', align: 'left', showarrow: false,
-                text: js.map(v => Math.round(v).toLocaleString('ko-KR')).join('<br>'), font: {size: 10, color: muted}});
+                font: {size: 12, color: css('--text-primary')}, bgcolor: css('--surface-1'), opacity: 0.95});
     });
     const band = st.phaseBand && PH[o.c.id] ? phaseShapes(PH[o.c.id], v => v) : {shapes: [], annotations: []};
     const lay = jobLayout('Job elapsed (s)', mx * 1.06, {showlegend: true, shapes: band.shapes, annotations: band.annotations.concat(ann)});
