@@ -7,6 +7,7 @@
   samples/sample_data/esx01_vm_metrics.csv    VCF Operations VM 지표 export 형식 (호스트 esx01, VM 4대)
   samples/sample_data/node7_vm_metrics.csv    같은 형식 (호스트 hv-node7, VM 4대: VM 이름이 호스트 이름으로 시작하지 않는 예)
   samples/sample_data/logs/node7_guest.log    Key:Value 텍스트 로그 형식 (hv-node7 VM 의 게스트 메모리)
+  samples/sample_data/phase/sample_phase_times.csv   phase 소요 시간 CSV (CASE-A · CASE-B, 동시 실행 잡 4개씩)
 """
 import os
 
@@ -74,6 +75,40 @@ def make_log(host, rng):
                         f'Mem_Used_MB:{used:.0f}, Swap_Used_MB:0, PgFault_Delta:{max(0, ph * 50000 + rng.normal(2000, 800)):.0f}\n')
 
 
+# phase 소요 시간 CSV: 단계 추출 스크립트의 파일 출력 형식. 단계 순서 = 열 순서, -1 = 기록 없음
+PHASE_STAGES = ['netlist', 'parsing', 'license', 'elaboration', 'vsrcbegin', 'vsrcend', 'mosmodel', 'reduction', 'connectivity',
+                'dbbuild', 'init', 'outputprep', 'matrixbuild', 'dcinit', 'transient']
+PHASE_SELF = {   # 케이스별 단계 self 시간(초): 합성 값. CASE-B 는 튜닝으로 elaboration · dcinit · transient 가 짧아진 예
+    'CASE-A': dict(netlist=100, parsing=220, license=12, elaboration=1350, vsrcbegin=-1, vsrcend=-1, mosmodel=70, reduction=180,
+                   connectivity=120, dbbuild=40, init=60, outputprep=30, matrixbuild=60, dcinit=900, transient=11208),
+    'CASE-B': dict(netlist=100, parsing=220, license=12, elaboration=1215, vsrcbegin=-1, vsrcend=-1, mosmodel=70, reduction=180,
+                   connectivity=120, dbbuild=40, init=60, outputprep=30, matrixbuild=60, dcinit=765, transient=10311),
+}
+
+
+def make_phase():
+    os.makedirs(os.path.join(OUT, 'phase'), exist_ok=True)
+    rows = []
+    for cid, base in PHASE_SELF.items():
+        start = next(c[3] for c in CASES if c[0] == cid)
+        js = start.replace(' ', 'T').replace(':', '-')
+        for idx, f in enumerate((0.996, 1.004, 0.998, 1.002), start=1):
+            r = {'Hostname': VMS['esx01'][0], 'Workload': 'bench_sim', 'JobStart_KST': js, 'JobIdx': idx, 'JobTotal': 4,
+                 'Stage_Count': sum(1 for v in base.values() if v >= 0)}
+            acc = 0.0
+            for st in PHASE_STAGES:
+                v = base[st]
+                if v < 0:
+                    r[f'{st}_self'] = r[f'{st}_total'] = -1
+                    continue
+                acc += v * f
+                r[f'{st}_self'], r[f'{st}_total'] = round(v * f, 2), round(acc, 2)
+            r['TotalElapsed_Sec'] = round(acc + 2, 2)
+            r['SrcFile'] = f'{js}_bench_sim_{idx}_of_4'
+            rows.append(r)
+    pd.DataFrame(rows).to_csv(os.path.join(OUT, 'phase', 'sample_phase_times.csv'), index=False)
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     rng = np.random.default_rng(7)
@@ -83,6 +118,7 @@ def main():
     for h in ('esx01', 'hv-node7'):
         make_host(h, rng)
     make_log('hv-node7', rng)
+    make_phase()
     pd.DataFrame([{'테스트 그룹': GROUP[c[0]], '케이스명': c[0], '설명': c[1], '호스트 이름': c[2], '잡 시작 시각': c[3], '잡 종료 시각': c[4], 'VM': VM_PATTERN[c[2]]}
                   for c in CASES]).to_csv(os.path.join(HERE, 'sample_cases.csv'), index=False, encoding='utf-8-sig')
     print('완료:', OUT)

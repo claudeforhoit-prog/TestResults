@@ -13,6 +13,7 @@ import pandas as pd
 import yaml
 
 from . import analyze, charts, ingest, report_case, report_docx, report_html, runwin, units
+from . import phase as phase_mod
 from . import metrics as metrics_mod
 from . import palette as palette_mod
 from . import roles as roles_mod
@@ -191,8 +192,9 @@ def _file_matches(ix, case):
     return True
 
 
-def scan_sources(cases_csv, data_dir, log=print):
-    """케이스 정보와 데이터 폴더를 읽어 (케이스 목록, 입력 프로파일, 읽을 수 있는 파일, 파일 색인) 을 돌려준다."""
+def scan_sources(cases_csv, data_dir, log=print, phase_out=None):
+    """케이스 정보와 데이터 폴더를 읽어 (케이스 목록, 입력 프로파일, 읽을 수 있는 파일, 파일 색인) 을 돌려준다.
+    phase 소요 시간 CSV(phase.py)는 지표 파일이 아니라 phase_out 목록에 넣는다."""
     cases = cases_from_csv(cases_csv)
     profiles = load_profiles(os.path.join(APP_DIR, 'profiles', 'inputs'))
     files = []
@@ -202,6 +204,11 @@ def scan_sources(cases_csv, data_dir, log=print):
                 files.append(os.path.join(root, n))
     srcs = []
     for f in files:
+        if phase_mod.is_phase_csv(f):
+            if phase_out is not None:
+                phase_out.append(f)
+            log(f'[데이터] {os.path.relpath(f, data_dir)} → phase 소요 시간 CSV')
+            continue
         prof = ingest.detect_profile(f, profiles)
         if prof:
             srcs.append({'profile': prof, 'path': f})
@@ -282,7 +289,8 @@ def run_csv(cases_csv, data_dir, out_dir=None, title=None, baseline=None, analys
     chart_width_cm: 케이스 문서 안 그래프 폭(cm, 기본 16.5). workers: 그래프를 나눠 그릴 프로세스 수(기본 자동).
     selection: HTML '선택 내보내기' 파일. 주면 그 파일의 케이스 · VM · 지표만으로 만든다.
     to_gb · to_gbps: 크기 단위를 GB 로, 네트워크 속도를 Gbps 로 바꾼다(기본은 원래 단위 그대로, units.py)."""
-    cases, profiles, srcs, index = scan_sources(cases_csv, data_dir, log)
+    phase_files = []
+    cases, profiles, srcs, index = scan_sources(cases_csv, data_dir, log, phase_out=phase_files)
     sel = load_selection(selection) if selection else None
     if sel:
         known = {c['id'] for c in cases}
@@ -322,11 +330,14 @@ def run_csv(cases_csv, data_dir, out_dir=None, title=None, baseline=None, analys
     for c in cases:              # 수집 끊김 점검 (실행 구간 안): 리포트 · TC 정리 모두 실행
         c['_loaded'] = _load(c, profiles)                 # 리포트 생성에서 다시 쓴다 (같은 케이스를 두 번 읽지 않는다)
         cdf = c['_loaded'][0]
+        c['_entities'] = sorted(set(cdf['entity'].astype(str)))     # phase 잡을 Hostname 으로 케이스에 연결할 때 쓴다
         c['collection_issues'], checks[c['id']] = runwin.check_collection(cdf, c)
         c['collection_check'] = checks[c['id']]
         log(f'[수집 점검] {c["id"]}: ' + checks[c['id']].replace('\n', ' / '))
         if split_dir:            # TC 별 정리: 원본에서 이 TC 의 VM · 구간(앞뒤 여유 포함) 행만 잘라 저장
             runwin.split_case(c, c['sources'], profiles, set(cdf['entity']), split_dir, data_dir, log)
+    if report and phase_files:   # phase 소요 시간: 잡 시작 시각(과 Hostname)으로 케이스에 연결
+        phase_mod.assign(cases, phase_mod.read_all(phase_files), log)
     if not report:
         return {'cases': [c['id'] for c in cases], 'checks': checks,
                 'windows': {c['id']: [str(c['start']), str(c['end']), bool(c.get('end_auto'))] for c in cases}}
@@ -356,7 +367,7 @@ def _build_docs(cases, meta, df, outdir, date, log, roles, include_unassigned, p
                                               'collection_check': c.get('collection_check', '')},
                                       df[df['case'] == c['id']], os.path.join(outdir, 'charts', _safe(c['id'])), date, log,
                                       roles=roles, include_unassigned=include_unassigned,
-                                      palette=pal, chart_width_cm=width_cm, pool=pool)
+                                      palette=pal, chart_width_cm=width_cm, pool=pool, phase=c.get('phase'))
         out.append((dpath, k, text))
         log(f'[문서] {c["id"]}: 그래프 {k}장')
     return out
@@ -495,7 +506,8 @@ def run_job(job, base, log=print):
                'cases': [m for m in case_meta if m['id'] in ids],
                'metrics': [{'name': m, 'unit': gunits.get(m, '')} for m in gmetrics],
                'role_order': role_order, 'case_start': case_start, 'colors': colors,
-               'metric_roles': {m: v for m, v in roles.items() if m in gset}}
+               'metric_roles': {m: v for m, v in roles.items() if m in gset},
+               'phases': {c['id']: c['phase'] for c in cases if c.get('phase') and c['id'] in ids}}
         fname = re.sub(r'[\\/:*?"<>|]+', '_', g).strip() if g else _safe(job.get('name', 'report'))
         htmls.append(report_html.build(os.path.join(outdir, f'{fname}.html'), ctx, sub, gcmp))
         if g:
@@ -509,6 +521,8 @@ def run_job(job, base, log=print):
            'groups': {g or '-': [c['id'] for c in cases if (c.get('group') or '') == g] for g in groups},
            'roles': roles_mod.summary(roles), 'include_unassigned': include_unassigned,
            'palette': palette_mod.PALETTES[pal][0], 'chart_width_cm': float(width_cm),
+           'phase': {c['id']: {'jobs': c['phase']['jobs'], 'stages': len(c['phase']['stages']), 'total_s': c['phase']['total']}
+                     for c in cases if c.get('phase')},
            'unit_conversion': {'to_gb': bool(job.get('to_gb')), 'to_gbps': bool(job.get('to_gbps')), 'renamed': renamed},
            'selection': (job.get('selection') or {}).get('name', '')}
     if roles:                                                   # 어떤 역할 지정으로 만들었는지 결과 폴더에 남긴다

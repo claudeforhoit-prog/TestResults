@@ -116,6 +116,7 @@ td:nth-child(-n+3),th:nth-child(-n+3){text-align:left}
     <button data-d="zoom" aria-pressed="true">영역 확대</button>
     <button data-d="pan" aria-pressed="false">이동</button></div>
   <label><input type="checkbox" id="linkY"> 세로축 범위도 연동</label>
+  <label id="phaseBandWrap" hidden title="phase 소요 시간 CSV 가 있는 케이스의 시계열 그래프 배경에 phase 구간을 그립니다. 케이스별 그래프에서 케이스마다 그리고, 한 그래프에 비교에서는 phase 가 있는 케이스가 하나일 때만 그립니다."><input type="checkbox" id="phaseBand"> phase 배경 밴드</label>
   <button class="btn small" id="resetView">전체 보기</button>
   <span>그래프 크기:</span>
   <select id="plotH" title="그래프 높이"><option value="300">높이 작게</option><option value="440">높이 보통</option><option value="600">높이 크게</option><option value="800">높이 아주 크게</option></select>
@@ -126,6 +127,7 @@ td:nth-child(-n+3),th:nth-child(-n+3){text-align:left}
 <div class="note" id="note"></div>
 <div class="legend" id="legend"></div>
 <main>
+  <div id="phasebox"></div>
   <div id="plots"></div>
   <div class="ptitle">표. 선택한 케이스·VM 의 통계 (원 데이터 전체 구간 기준)</div>
   <div class="tblwrap"><table id="stats"></table></div>
@@ -145,7 +147,8 @@ const vmKey = s => `${s.entity}|${s.host}`;
 const lineKey = (cs, s) => `${cs}|${s.entity}|${s.host}`;          // 선택 단위: 케이스 안의 VM
 const MAX_METRICS = 6;
 const st = {tcs: [], sel: new Set(), metrics: [], view: 'one', x: 'sec', dark: false, bin: 'auto',
-            drag: 'zoom', linkY: false, xr: null, yr: {}};
+            drag: 'zoom', linkY: false, xr: null, yr: {}, phaseBand: false};
+const PH = D.phases || {};      // 케이스별 phase 요약 (리포트 생성기 phase.py): stages · bands · total · load · jobs
 let plots = [];        // [{key, div, data: [{x:[], y:[]}], hs, vs}]
 let syncing = false;   // 연동 중 다른 그래프의 이벤트가 다시 연동을 부르지 않게 막는다
 
@@ -365,7 +368,58 @@ function layout(ytitle, p){
     xaxis: {...ax, range: xr.map(toAxis), type: st.x === 'sec' ? 'linear' : 'date',
             title: {...ax.title, text: st.x === 'sec' ? '경과 시간 (s, 잡 시작 기준)' : '시각'}},
     yaxis: {...ax, range: yOf(p), title: {...ax.title, text: ytitle}},
-    showlegend: false, uirevision: 'keep'};
+    showlegend: false, uirevision: 'keep', ...bandLayout(p && p.band)};
+}
+
+// phase 배경 밴드 (리포트 생성기 문서와 같은 규칙): 단계를 번갈아 음영, 단계 경계선, 전체의 3% 이상 단계만 이름, Load | Compute 주황 점선
+function phaseT0(cs){ const s = D.series.find(x => x.case === cs); return s ? s.t0 : 0; }
+function bandLayout(cs){
+  const ph = cs && st.phaseBand ? PH[cs] : null;
+  if (!ph) return {};
+  const t0 = phaseT0(cs), X = v => st.x === 'sec' ? v : toAxis(t0 + v * 1000);
+  const fill = st.dark ? 'rgba(255,255,255,0.06)' : '#F1F4F6', edge = st.dark ? 'rgba(255,255,255,0.20)' : '#C8D2D8';
+  const muted = st.dark ? '#AEB6BC' : '#6E7880', shapes = [], annotations = [];
+  ph.bands.forEach(([n, a, b], i) => {
+    if (b <= a) return;
+    if (i % 2 === 0) shapes.push({type: 'rect', xref: 'x', yref: 'paper', x0: X(a), x1: X(b), y0: 0, y1: 1, fillcolor: fill, line: {width: 0}, layer: 'below'});
+    shapes.push({type: 'line', xref: 'x', yref: 'paper', x0: X(a), x1: X(a), y0: 0, y1: 1, line: {color: edge, width: 0.6}, layer: 'below'});
+    if (ph.total && (b - a) / ph.total >= 0.03)
+      annotations.push({x: X((a + b) / 2), y: 1, xref: 'x', yref: 'paper', yanchor: 'bottom', text: n, showarrow: false, font: {size: 11, color: muted}});
+  });
+  if (ph.load) {
+    shapes.push({type: 'line', xref: 'x', yref: 'paper', x0: X(ph.load), x1: X(ph.load), y0: 0, y1: 1, line: {color: '#A05010', width: 1.6, dash: 'dash'}});
+    annotations.push({x: X(ph.load), y: 0.5, xref: 'x', yref: 'paper', text: 'Load | Compute', textangle: -90, showarrow: false,
+                      font: {size: 11, color: '#A05010'}, bgcolor: st.dark ? 'rgba(0,0,0,0.55)' : 'rgba(255,255,255,0.75)'});
+  }
+  return {shapes, annotations, margin: {l: 64, r: 10, t: 24, b: 46}};
+}
+
+// phase 별 self 시간 누적 막대: 체크한 케이스 가운데 phase 가 있는 케이스마다 막대 1개, 아래부터 실행 순서
+function drawPhase(cfg){
+  const box = document.getElementById('phasebox'); box.innerHTML = '';
+  const cs = D.cases.filter(c => st.tcs.includes(c.id) && PH[c.id]);
+  if (!cs.length) return;
+  const t = document.createElement('div'); t.className = 'ptitle';
+  t.textContent = '그림. phase 별 self 시간 누적 (케이스마다 잡 평균 · 아래부터 실행 순서 · 막대에 마우스를 올리면 단계별 값)';
+  const div = document.createElement('div'); div.style.height = '440px'; box.append(t, div);
+  const names = [];
+  cs.forEach(c => PH[c.id].stages.forEach(([n]) => { if (!names.includes(n)) names.push(n); }));
+  const mx = Math.max(...cs.map(c => PH[c.id].total)) || 1, x = cs.map(c => c.id);
+  const data = names.map(n => {
+    const y = cs.map(c => { const v = PH[c.id].stages.find(z => z[0] === n); return v ? v[1] : 0; });
+    return {type: 'bar', name: n, x, y, marker: {color: D.phaseColors[n], line: {color: css('--surface-1'), width: 0.6}},
+      text: y.map(v => v >= mx * 0.05 ? Math.round(v).toLocaleString('ko-KR') : ''), textposition: 'inside', insidetextanchor: 'middle',
+      textfont: {color: D.phaseText[n]}, hovertemplate: `%{x} · ${n}: %{y:,.0f} s<extra></extra>`};
+  });
+  const tot = cs.map(c => PH[c.id].total);
+  data.push({type: 'scatter', mode: 'text', x, y: tot, text: tot.map(v => `<b>Total ${Math.round(v).toLocaleString('ko-KR')}s</b>`),
+             textposition: 'top center', textfont: {color: css('--text-primary')}, showlegend: false, hoverinfo: 'skip'});
+  const ax = {gridcolor: css('--grid'), linecolor: css('--border'), zerolinecolor: css('--border'), tickfont: {color: css('--text-secondary'), size: 11},
+              title: {font: {color: css('--text-secondary'), size: 12}}};
+  Plotly.newPlot(div, data, {barmode: 'stack', bargap: 0.5, paper_bgcolor: css('--surface-1'), plot_bgcolor: css('--surface-1'),
+    font: {family: getComputedStyle(document.body).fontFamily, color: css('--text-primary')}, margin: {l: 64, r: 10, t: 10, b: 40},
+    xaxis: {...ax, type: 'category'}, yaxis: {...ax, tickformat: ',', range: [0, mx * 1.15], title: {...ax.title, text: 'Cumulative phase self time (s)'}},
+    legend: {traceorder: 'reversed', title: {text: 'Execution order (top = last)'}, font: {color: css('--text-secondary')}}}, cfg);
 }
 
 // 한 그래프의 범위가 바뀌면 상태에 기록하고 나머지 그래프에 같은 가로 범위를 적용한다.
@@ -448,7 +502,7 @@ function slider(track, vertical, getFull, getView, setView){
   return {update};
 }
 
-function makePlot(box, key, title, small, data, ytitle, cfg, metric){
+function makePlot(box, key, title, small, data, ytitle, cfg, metric, band){
   const cell = document.createElement('div'); box.appendChild(cell);      // 제목과 그래프를 한 칸으로 묶어 격자 배치가 어긋나지 않게
   if (title) { const t = document.createElement('div'); t.className = 'ptitle'; t.textContent = title; cell.appendChild(t); }
   const wrap = document.createElement('div'); wrap.className = 'pwrap' + (small ? ' small' : '');
@@ -456,7 +510,7 @@ function makePlot(box, key, title, small, data, ytitle, cfg, metric){
   const vt = document.createElement('div'); vt.className = 'track v'; vt.title = '세로축 범위';
   const ht = document.createElement('div'); ht.className = 'track h'; ht.title = '가로축 범위 (모든 그래프 연동)';
   wrap.append(div, vt, ht); cell.appendChild(wrap);
-  const p = {key, div, data, metric};
+  const p = {key, div, data, metric, band};
   plots.push(p);
   Plotly.newPlot(div, data, layout(ytitle, p), cfg);
   div.on('plotly_relayout', ev => onRelayout(p, ev));
@@ -469,6 +523,7 @@ function makePlot(box, key, title, small, data, ytitle, cfg, metric){
 function draw(keepRange){
   const box = document.getElementById('plots'); box.innerHTML = ''; box.classList.remove('grid'); plots = [];
   if (!keepRange) { st.yr = {}; }
+  drawPhase({responsive: true, displaylogo: false, showTips: false, modeBarButtonsToRemove: ['lasso2d', 'select2d', 'autoScale2d']});
   if (!st.tcs.length) { note('비교할 케이스를 목록에서 선택하십시오.'); document.getElementById('legend').innerHTML = ''; drawStats(); return; }
   if (!st.metrics.length) { note('지표를 하나 이상 선택하십시오.'); document.getElementById('legend').innerHTML = ''; drawStats(); return; }
   const warn = [];
@@ -480,15 +535,20 @@ function draw(keepRange){
   const b = binOf(all); st._bin = b;
   drawLegend(b);
   const multi = st.metrics.length > 1, empty = [];
+  // 한 그래프에 비교: phase 가 있는 케이스가 하나일 때만 그 케이스의 밴드를 그린다 (케이스마다 phase 구간이 달라서)
+  const phCases = [...new Set(all.map(s => s.case))].filter(c => PH[c]);
+  const oneBand = phCases.length === 1 ? phCases[0] : null;
+  if (st.phaseBand && st.view === 'one' && phCases.length > 1)
+    note([warn.join(' '), '여러 케이스를 한 그래프에 겹치면 케이스마다 phase 구간이 달라 배경 밴드를 그리지 않습니다. 케이스별 그래프에서 보십시오.'].filter(Boolean).join(' '));
   st.metrics.forEach(m => {
     if (st.view === 'one') {                         // 지표마다 그래프 1개, 선 = 케이스 + VM
       const t = picked(null, m).map(s => trace(s, b));
-      if (t.length) makePlot(box, 'm:' + m, m, multi, t, ytitleOf(m), cfg, m);
+      if (t.length) makePlot(box, 'm:' + m, m, multi, t, ytitleOf(m), cfg, m, oneBand);
       else empty.push(m);
     } else {                                         // 지표마다, 케이스마다 그래프
       D.cases.filter(c => st.tcs.includes(c.id)).forEach(c => {
         const t = picked(c.id, m).map(s => trace(s, b));   // 케이스별 그래프도 같은 선 색을 쓴다
-        if (t.length) makePlot(box, m + '|' + c.id, `${m} · ${c.id} · 호스트 ${c.host}${c.label ? ' · ' + c.label : ''}`, true, t, ytitleOf(m), cfg, m);
+        if (t.length) makePlot(box, m + '|' + c.id, `${m} · ${c.id} · 호스트 ${c.host}${c.label ? ' · ' + c.label : ''}`, true, t, ytitleOf(m), cfg, m, c.id);
         else empty.push(`${m} · ${c.id}`);
       });
     }
@@ -548,6 +608,8 @@ seg('xSeg', 'x', v => { st.x = v; st.xr = null; draw(); });
 seg('binSeg', 'b', v => { st.bin = v; draw(true); });
 seg('dragSeg', 'd', v => { st.drag = v; plots.forEach(p => Plotly.relayout(p.div, {dragmode: v})); });
 document.getElementById('linkY').onchange = e => { st.linkY = e.target.checked; st.yr = {}; applyRanges(false); };
+if (Object.keys(PH).length) document.getElementById('phaseBandWrap').hidden = false;
+document.getElementById('phaseBand').onchange = e => { st.phaseBand = e.target.checked; draw(true); };
 document.getElementById('resetView').onclick = () => { st.xr = null; st.yr = {}; applyRanges(); };
 // 그래프 크기: 높이(px)와 폭(화면 폭 대비 %). 브라우저에 저장해 다른 리포트에도 쓴다.
 const VIEW_KEY = 'perfreport.view.v1';

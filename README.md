@@ -114,6 +114,19 @@ perfreport.exe run <케이스정보.xlsx> <원본폴더> --split <정리폴더> 
 - `case.txt` 에 케이스 정보, 저장 구간, 남긴 VM과 호스트, 정리한 날짜, 구간 안에서 뺀 행 수를 적는다.
 - 같은 TC를 다시 정리하면 폴더를 새로 만든다(덮어쓰기).
 
+### 2.7 phase 소요 시간 CSV (선택)
+
+잡의 단계(phase)별 소요 시간을 리포트에 넣으려면, 단계 추출 스크립트가 만든 CSV 를 데이터 폴더에 함께 넣는다. 머리글을 보고 자동으로 찾는다.
+
+- 형식: 한 행 = 잡 1개. 열 `Hostname`, `Workload`, `JobStart_KST`(예: `2026-07-15T02-05-02`), `JobIdx`, `JobTotal`, `Stage_Count`,
+  단계마다 `<단계>_self`(그 단계만의 소요 초)와 `<단계>_total`(잡 시작부터 그 단계 끝까지 누적 초), `TotalElapsed_Sec`, `SrcFile`.
+  단계 순서는 열 순서다. 값 `-1` 은 그 단계가 기록되지 않았다는 뜻이다.
+- 케이스 연결: `JobStart_KST` 가 케이스의 잡 시작 시각 앞뒤 10분 안인 잡을 그 케이스의 잡으로 본다.
+  `Hostname` 이 케이스의 VM 이름과 맞는 잡이 있으면 그 잡만 쓴다. 같은 시각에 시작한 케이스가 여럿이고 `Hostname` 이 어느 VM 이름과도 맞지 않으면 쓰지 않고 로그에 알린다.
+- 계산: 단계 값은 연결된 잡들의 self 시간 평균(동시 실행 잡 평균)이다. 단계의 시작과 종료는 잡 시작 기준으로 self 시간을 차례로 더한 값이다.
+  Load 는 `init_total` 평균, Compute 는 전체에서 Load 를 뺀 값이다.
+- 견본: `samples\sample_data\phase\sample_phase_times.csv` (CASE-A · CASE-B, 잡 4개씩).
+
 ## 3. 실행
 
 ### 3.1 창 화면
@@ -200,6 +213,7 @@ perfreport.exe gui
 | :-- | :-- |
 | 1. 케이스 식별 | 케이스명, 설명, 호스트, 잡 시작·종료 시각, 실행 시간, VM, 분류별 수집 지표 수 |
 | 2. 요약 | VM별 주요 지표 (CPU 사용률·Ready·Co-stop, 메모리, THP Coverage, 디스크 지연 중 데이터에 있는 것). 지표마다 평균 칸과 최대 칸을 따로 둔다(남은 자원 지표는 평균과 최소). 머리글은 두 줄이고, 윗줄에 지표 이름을 한 번만(평균 칸 위) 적는다 |
+| 3. phase 소요 시간 | phase 소요 시간 CSV(2.7)가 연결된 케이스만. phase 별 시작·종료·self 시간·비율 표(Load · Compute · 전체 합계 포함)와 단계 누적 막대그래프. 이 케이스의 시계열 그래프 배경에 phase 구간(단계를 번갈아 음영, 경계선, 전체의 3% 이상 단계만 이름, Load / Compute 경계는 주황 점선)을 그린다. 이 절이 있으면 뒤 절 번호가 하나씩 밀린다 |
 | 3~. 분류별 절 | 지표 이름으로 나눈 분류(CPU, Memory, Guest, Disk, Network, 기타)마다 절 하나. 지표마다 그래프 1장(선 = VM, 최대 8개, 넘으면 나눔)과 한 줄 설명, 절 끝에 통계 표(지표, VM, 평균, p95, 최댓값, 단위). 선 색은 고른 팔레트의 색을 VM 순서대로 쓴다 |
 | Appendix A | 데이터 출처: 분류별 수집 시스템과 시간대 |
 | Appendix B | 지표별 표본 수: 행은 지표, 열은 VM, 값은 실행 구간 안 표본 수. 같은 지표에서 VM 끼리 수가 다르면 수집이 빠졌거나 수집 간격이 다르다 |
@@ -359,6 +373,13 @@ Confluence(Data Center)의 `Word 문서 가져오기` 를 쓸 때의 제약과 �
 2. `perfreport.exe inspect <파일> <프로파일 이름>` 으로 읽히는 지표, VM, 시각 범위를 확인한다.
 3. 리포트에 넣을 지표를 고르려면 `profiles\analysis\` 에 분석 프로파일을 추가한다(`vm_core.yaml` 참고).
 
+### 4.5 phase 소요 시간 (phase 소요 시간 CSV 가 있을 때)
+
+- 지표 그래프 위에 `phase 별 self 시간 누적` 그래프가 나온다. 체크한 케이스 가운데 phase 가 있는 케이스마다 막대 1개이고, 아래부터 실행 순서로 단계를 쌓는다.
+  막대 높이의 5% 이상인 단계는 막대 안에 값을, 막대 위에는 `Total` 을 적는다. 막대에 마우스를 올리면 단계별 값이 나온다.
+- 도구 막대의 `phase 배경 밴드` 를 체크하면 시계열 그래프 배경에 phase 구간을 그린다(기본은 끔).
+  `케이스별 그래프` 에서는 케이스마다 그리고, `한 그래프에 비교` 에서는 phase 가 있는 케이스가 하나일 때만 그린다(케이스마다 phase 구간이 달라서).
+
 ## 7. Windows 설치
 
 인터넷이 되는 Windows PC에서 한 번 빌드하고, 결과 폴더를 사용할 PC로 옮긴다. 사용할 PC에는 Python과 인터넷이 필요 없다.
@@ -370,7 +391,12 @@ Confluence(Data Center)의 `Word 문서 가져오기` 를 쓸 때의 제약과 �
 3. 생성된 `dist\perfreport\` 폴더를 사용할 PC로 옮긴다(예: `C:\perfreport\`).
 4. 옮긴 폴더의 `run_gui.bat` 을 실행한다.
 
-`No module named pandas` 가 나오면 빌드 전의 소스 폴더에서 실행한 경우다. `build_windows.bat` 을 먼저 실행하고, 끝난 뒤 `dist\perfreport\run_gui.bat` 을 실행한다. 빌드 중 `FAILED while installing packages` 가 나오면 인터넷 연결이나 회사망 프록시를 확인한다.
+`No module named pandas` 가 나오면 빌드 전의 소스 폴더에서 실행한 경우다. `build_windows.bat` 을 먼저 실행하고, 끝난 뒤 `dist\perfreport\run_gui.bat` 을 실행한다.
+
+패키지 설치 단계에서 내려받기가 실패하면, 빌드 스크립트가 pypi.org 와 files.pythonhosted.org 의 인증서 확인을 생략하는 옵션(`--trusted-host`)으로 한 번 더 시도한다.
+회사망 보안 장비가 HTTPS 를 검사하면 pip 가 인증서를 확인하지 못해 이렇게 실패한다. 이 옵션은 그 실행에만 적용되고 PC 설정에 남지 않는다.
+그래도 `FAILED while installing packages` 가 나오면 인터넷 연결이나 회사망 프록시를 확인한다.
+회사에 Python 패키지 저장소가 있으면 `py -3 -m pip config --user set global.index-url https://<저장소 주소>/simple` 로 한 번 지정한 뒤 빌드한다.
 
 빌드 없이 Python으로 바로 실행하려면 이 폴더에서 다음을 실행한다.
 ```

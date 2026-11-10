@@ -2,13 +2,19 @@
 rem Build dist\perfreport\perfreport.exe on Windows. Requires Python 3.11 or 3.12 (py launcher), internet access.
 cd /d %~dp0
 set PY=.venv\Scripts\python.exe
+rem Retry option for company networks whose proxy re-signs HTTPS (pip then fails the SSL certificate check)
+set TRUST=--trusted-host pypi.org --trusted-host files.pythonhosted.org
 if not exist %PY% (
   echo [1/6] Creating Python environment .venv
   py -3 -m venv .venv || goto :err
 )
 echo [2/6] Installing packages (pandas, matplotlib, python-docx, plotly, pyyaml, openpyxl, pyinstaller)
-%PY% -m pip install --upgrade pip
-%PY% -m pip install -r requirements.txt pyinstaller || goto :neterr
+%PY% -m pip install --upgrade pip >nul 2>&1 || %PY% -m pip install --upgrade pip %TRUST% >nul 2>&1
+%PY% -m pip install -r requirements.txt pyinstaller && goto :check
+echo NOTE: download failed. On company networks this is often the SSL certificate check.
+echo       Retrying without the certificate check for pypi.org and files.pythonhosted.org ...
+%PY% -m pip install -r requirements.txt pyinstaller %TRUST% || goto :neterr
+:check
 echo [3/6] Checking packages
 %PY% -c "import pandas, matplotlib, docx, plotly, yaml, openpyxl; print('packages OK')" || goto :neterr
 echo [4/6] Building executable
@@ -45,6 +51,8 @@ goto :eof
 :neterr
 echo.
 echo FAILED while installing packages. Check the internet connection or proxy, then run this file again.
+echo If your company has its own Python package repository, set it once and run this file again:
+echo   py -3 -m pip config --user set global.index-url https://YOUR-REPOSITORY/simple
 pause
 exit /b 1
 :exeerr

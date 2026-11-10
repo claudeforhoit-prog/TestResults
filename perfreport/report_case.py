@@ -3,6 +3,8 @@
 구성 (기본 양식: 지표 역할 지정이 없을 때)
   §1 케이스 식별
   §2 요약 표 (VM 별 주요 지표: 지표마다 평균 칸과 최대 칸, 데이터에 있는 지표만)
+  §3 phase 소요 시간 (phase 소요 시간 CSV 가 연결된 케이스만, phase.py): 표 + 단계 누적 막대그래프. 이 절이 있으면 뒤 절 번호가 하나씩 밀린다.
+     이 케이스의 시계열 그래프 배경에 phase 구간을 그린다 (번갈아 음영 · 경계선 · 3% 이상 단계만 이름 · Load | Compute 주황 점선)
   §3~ 분류별 절 (CPU · Memory · Guest · Disk · Network · 기타: 데이터에 있는 분류만)
        지표마다 그래프 1장(선 = VM, 최대 8개, 넘으면 나눔) + 한 줄 설명, 절 끝에 통계 표
   Appendix A 데이터 출처 (분류별 수집 시스템 · 시간대)
@@ -33,6 +35,7 @@ from docx.enum.section import WD_ORIENT
 from docx.shared import Cm
 
 from . import analyze, charts, docx_base, metrics, report_docx
+from . import phase as phase_mod
 from . import units as units_mod
 from . import palette as P
 
@@ -58,11 +61,32 @@ def safe_name(s):
     return re.sub(r'[^A-Za-z0-9._-]+', '_', str(s)).strip('_')[:60] or 'case'
 
 
-def _chart(d, ents, metric, unit, path, bin_s, colors=None, run=None):
-    """VM 선 그래프 1장. d: 한 케이스·한 지표의 행."""
+def _bands(ax, bands, load_end, total):
+    """phase 배경 밴드 (이전 케이스 리포트와 같은 규칙): 단계를 번갈아 음영, 단계 시작마다 경계선,
+    전체의 3% 이상인 단계만 그림 위쪽 바깥에 이름, Load | Compute 경계는 주황 점선."""
+    for i, (nm, s0, s1) in enumerate(bands):
+        if s1 <= s0:
+            continue
+        if i % 2 == 0:
+            ax.axvspan(s0, s1, color=phase_mod.BAND, zorder=0)
+        ax.axvline(s0, color=phase_mod.BAND_EDGE, lw=0.6, zorder=1)
+    if load_end:
+        ax.axvline(load_end, color=phase_mod.LOAD_COLOR, lw=1.6, ls='--', zorder=2)
+        ax.text(load_end, 0.5, ' Load | Compute ', transform=ax.get_xaxis_transform(), ha='center', va='center', fontsize=12,
+                color=phase_mod.LOAD_COLOR, fontweight='bold', rotation=90, bbox=dict(fc='white', ec='none', alpha=0.75, pad=1.5))
+    for nm, s0, s1 in bands:
+        if total and (s1 - s0) / total >= phase_mod.LABEL_MIN_SHARE:
+            ax.text((s0 + s1) / 2, 1.012, nm, transform=ax.get_xaxis_transform(), ha='center', va='bottom', fontsize=12,
+                    color=phase_mod.BAND_TEXT)
+
+
+def _chart(d, ents, metric, unit, path, bin_s, colors=None, run=None, bands=None, load_end=None, phase_total=None):
+    """VM 선 그래프 1장. d: 한 케이스·한 지표의 행. bands 를 주면 배경에 phase 구간을 그린다."""
     if bin_s:
         d = d.assign(sec=(d['sec'] // bin_s) * bin_s + bin_s / 2).groupby(['entity', 'sec'], as_index=False)['value'].mean()
     fig, ax = plt.subplots(figsize=(14, 7.5), dpi=CHART_DPI)
+    if bands:
+        _bands(ax, bands, load_end, phase_total)
     for i, e in enumerate(ents):
         s = d[d['entity'] == e].sort_values('sec')
         ax.plot(s['sec'], s['value'], color=(colors or {}).get(e, P.TC_COLORS_LIGHT[i % 8]), linewidth=2.0, label=e)
@@ -79,6 +103,52 @@ def _chart(d, ents, metric, unit, path, bin_s, colors=None, run=None):
     ax.set_ylabel(f'{metric}' + (f'' if f'({unit})' in metric or not unit else f' ({unit})'), fontsize=14, color=P.TEXT_SECONDARY)
     ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.12), ncol=min(4, len(ents)), frameon=False, fontsize=13)
     fig.tight_layout()
+    fig.savefig(path, facecolor='white', bbox_inches='tight', pil_kwargs={'compress_level': PNG_LEVEL})
+    plt.close(fig)
+    return path
+
+
+def _phase_stack(path, items):
+    """phase 누적 막대그래프 (이전 phase 누적 막대그래프와 같은 형식): 케이스마다 막대 1개, 아래부터 실행 순서로 단계 self 시간을 쌓는다.
+    items: [(막대 이름, phase 요약)]. 막대 높이의 5% 이상인 단계는 막대 안에 값, 막대 위에 Total."""
+    names = []
+    for _, ph in items:
+        for st_name, _ in ph['stages']:
+            if st_name not in names:
+                names.append(st_name)
+    tot_by = {n: sum(dict(ph['stages']).get(n, 0.0) for _, ph in items) for n in names}
+    cmap = phase_mod.colors(names, tot_by)
+    rest = set(phase_mod.REST)
+    mx = max(ph['total'] for _, ph in items) or 1.0
+    fig, ax = plt.subplots(figsize=(14, 7.5), dpi=CHART_DPI)
+    bottom = [0.0] * len(items)
+    for n in names:
+        vals = [dict(ph['stages']).get(n, 0.0) for _, ph in items]
+        if max(vals) <= 0:
+            continue
+        ax.bar(range(len(items)), vals, bottom=bottom, width=0.5, color=cmap[n], edgecolor='white', linewidth=0.6, label=n, zorder=3)
+        for i, v in enumerate(vals):
+            if v >= mx * 0.05:
+                ax.text(i, bottom[i] + v / 2, f'{v:,.0f}', ha='center', va='center', fontsize=12,
+                        color=P.TEXT_PRIMARY if cmap[n] in rest else 'white')
+        bottom = [b + v for b, v in zip(bottom, vals)]
+    for i, b in enumerate(bottom):
+        ax.text(i, b + mx * 0.015, f'Total {b:,.0f}s', ha='center', va='bottom', fontsize=13, fontweight='bold', color=P.TEXT_PRIMARY)
+    ax.set_xticks(range(len(items)))
+    ax.set_xticklabels([lbl for lbl, _ in items], fontsize=13)
+    if len(items) == 1:
+        ax.set_xlim(-1.0, 1.0)
+    ax.set_ylim(0, mx * 1.15)
+    ax.set_ylabel('Cumulative phase self time (s)', fontsize=14, color=P.TEXT_SECONDARY)
+    ax.yaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda v, _: f'{v:,.0f}'))
+    ax.tick_params(colors=P.TEXT_SECONDARY, labelsize=13)
+    ax.grid(axis='y', color=P.GRID, linewidth=0.8)
+    ax.set_axisbelow(True)
+    for side in ('top', 'right'):
+        ax.spines[side].set_visible(False)
+    h, l = ax.get_legend_handles_labels()
+    ax.legend(h[::-1], l[::-1], loc='upper left', bbox_to_anchor=(1.01, 1.0), frameon=False, fontsize=12,
+              title='Execution order (top = last)', title_fontsize=12)
     fig.savefig(path, facecolor='white', bbox_inches='tight', pil_kwargs={'compress_level': PNG_LEVEL})
     plt.close(fig)
     return path
@@ -203,13 +273,14 @@ def _gaps(t):
 
 
 def build_case(path, case, df, chart_dir, date, log=print, roles=None, include_unassigned=True,
-               palette=None, chart_width_cm=None, pool=None):
+               palette=None, chart_width_cm=None, pool=None, phase=None):
     """case: {id, label, host, start, end}. df: 이 케이스의 행만 (case 열 = case id).
     roles: {지표: (역할, 순서)}. 이 케이스 데이터에 있는 지표로 역할이 하나라도 있으면 역할 순서로 절을 나눈다.
     include_unassigned: 역할 미지정 지표를 Appendix A 에 넣을지. 역할이 없으면 기본 양식(분류별 절).
     palette: 그래프 색상 팔레트 번호(0부터, 기본 0 = 파랑 계열). VM 은 팔레트 색을 VM 순서대로 받는다.
     chart_width_cm: 문서 안 그래프 폭. 세로 페이지 본문 폭보다 넓으면 가로 방향 페이지로 만든다.
     pool: 그래프를 나눠 그릴 프로세스 풀 (없으면 순서대로 그린다).
+    phase: 이 케이스에 연결된 phase 요약(phase.summarize). 있으면 phase 소요 시간 절을 넣고 시계열 그래프 배경에 phase 구간을 그린다.
     반환: (저장한 경로, 그래프 수, 문서 글자)."""
     from . import roles as R
     os.makedirs(chart_dir, exist_ok=True)
@@ -238,6 +309,7 @@ def build_case(path, case, df, chart_dir, date, log=print, roles=None, include_u
     # 그래프는 문서를 만들기 전에 모두 맡겨 둔다 (pool 이 있으면 여러 프로세스가 나눠 그린다). 문서에는 아래 순서대로 넣는다.
     by_metric = {m: g for m, g in df.groupby('metric', sort=False)}
     run = (0, dur) if mg else None
+    ph_args = (phase['bands'], phase.get('load'), phase['total']) if phase else (None, None, None)
     plan, seq = {}, 0
     for m in in_doc:
         d = by_metric.get(m)
@@ -251,7 +323,7 @@ def build_case(path, case, df, chart_dir, date, log=print, roles=None, include_u
             part = have[i:i + LINES_PER_CHART]
             seq += 1
             args = (d.loc[d['entity'].isin(part), ['entity', 'sec', 'value']], part, m, units.get(m, ''),
-                    os.path.join(chart_dir, f'{seq:03d}.png'), b, {e: vm_color[e] for e in part}, run)
+                    os.path.join(chart_dir, f'{seq:03d}.png'), b, {e: vm_color[e] for e in part}, run) + ph_args
             items.append((part, pool.submit(args) if pool is not None else None, args))
         plan[m] = (b, have, items)
 
@@ -326,9 +398,30 @@ def build_case(path, case, df, chart_dir, date, log=print, roles=None, include_u
     doc.add_paragraph('지표마다 평균과 최대를 각 칸에 적음. 여유 메모리 · 잔여 swap 처럼 남은 자원을 재는 지표는 최대 대신 최솟값. '
                       '값이 0 인 지표는 0, 수집되지 않은 지표는 빈 칸.')
 
-    # §3~ 본문: 역할별 절(역할 지정이 있을 때) 또는 분류별 절(기본 양식)
+    # §3 phase 소요 시간 (phase 소요 시간 CSV 가 연결된 케이스만)
+    if phase:
+        doc.add_heading('3. phase 소요 시간', level=1)
+        exp = phase.get('expected')
+        doc.add_paragraph(f'잡 {phase["jobs"]}개의 단계별 self 시간 평균'
+                          + (f' (동시 실행 {exp}잡 중 {phase["jobs"]}잡분 기록)' if exp and exp > phase['jobs'] else '')
+                          + '. self 시간은 그 단계만의 소요 시간이고, 단계의 시작과 종료는 잡 시작 기준으로 self 시간을 차례로 더한 값.'
+                          + (f' Load 는 {phase_mod.LOAD_STAGE} 단계 끝까지의 누적 시간({phase_mod.LOAD_STAGE}_total) 평균, Compute 는 전체에서 Load 를 뺀 값.'
+                             if phase.get('load') else ''))
+        report_docx._caption(doc, '표. phase 별 소요 시간')
+        report_docx._table(doc, ['단계 (phase)', '시작 (s)', '종료 (s)', 'self 시간 (s)', '비율 (%)'],
+                           [[n, f'{a:,.0f}', f'{z:,.0f}', f'{v:,.0f}', f'{r:.1f}' if r is not None else '']
+                            for n, a, z, v, r in phase_mod.table_rows(phase)])
+        state['n'] += 1
+        report_docx._caption(doc, '그림. phase 별 self 시간 누적')
+        doc.add_picture(_phase_stack(os.path.join(chart_dir, 'phase_stack.png'), [(cid, phase)]), width=Cm(width_cm))
+        doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
+        doc.add_paragraph('막대 하나는 이 케이스의 잡 평균이고, 아래부터 실행 순서로 단계 self 시간을 쌓음. '
+                          '이 케이스의 시계열 그래프 배경에 phase 구간을 표시: 단계를 번갈아 음영, 단계 경계선, 전체의 3% 이상인 단계만 이름'
+                          + (', 주황 점선은 Load 와 Compute 의 경계.' if phase.get('load') else '.'))
+
+    # §3~ 본문: 역할별 절(역할 지정이 있을 때) 또는 분류별 절(기본 양식). phase 절이 있으면 §4 부터
     body = role_groups if by_role else groups
-    for sec_no, (title, ms) in enumerate(body, start=3):
+    for sec_no, (title, ms) in enumerate(body, start=4 if phase else 3):
         doc.add_heading(f'{sec_no}. {title}', level=1)
         if by_role:
             doc.add_paragraph(f'{title}: {metrics.ROLE_DESC[title]}.')

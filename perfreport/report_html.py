@@ -7,6 +7,7 @@ import numpy as np
 
 from . import metrics
 from . import palette as palette_mod
+from . import phase as phase_mod
 from . import roles as roles_mod
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -56,6 +57,13 @@ def build(path, ctx, df, stats):
                        'x': np.round(g['sec'].to_numpy(dtype=float), 1).tolist(), 'y': _nums(g['value'])})
     units = {m['name']: m['unit'] for m in ctx['metrics']}
     mroles = ctx.get('metric_roles') or {}
+    ph_names, ph_tot = [], {}
+    for ph in (ctx.get('phases') or {}).values():
+        for n, v in ph['stages']:
+            if n not in ph_names:
+                ph_names.append(n)
+            ph_tot[n] = ph_tot.get(n, 0.0) + v
+    phase_cols = phase_mod.colors(ph_names, ph_tot)
     data = {
         'title': ctx['title'], 'date': ctx['date'], 'baseline': ctx['baseline'],
         'cases': [{'id': c['id'], 'label': c.get('label', ''),
@@ -70,6 +78,10 @@ def build(path, ctx, df, stats):
         'roleNames': metrics.ROLES,
         'palettes': [{'name': n, 'c': c, 'auto': i not in palette_mod.NO_AUTO} for i, (n, c) in enumerate(palette_mod.PALETTES)],
         'series': series,
+        # phase 소요 시간 (phase.py): 케이스별 단계 self 평균 · 구간 · Load. 색은 문서의 누적 막대그래프와 같다
+        'phases': ctx.get('phases') or {},
+        'phaseColors': phase_cols,
+        'phaseText': {n: ('#2a2a2a' if c in phase_mod.REST else '#ffffff') for n, c in phase_cols.items()},
         'stats': [{k: (_num(r[k]) if k in ('mean', 'p95', 'max', 'min', 'diff', 'diff_pct') else r[k])
                    for k in ('metric', 'role', 'case', 'entity', 'host', 'n', 'mean', 'p95', 'max', 'min', 'diff', 'diff_pct')}
                   | {'n': int(r['n'])} for r in stats.to_dict('records')],
