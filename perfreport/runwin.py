@@ -89,13 +89,91 @@ def _decider(hosts, ents_l):
     return keep
 
 
-def split_case(case, sources, profiles, ents, out_root, base_dir=None, log=print, date=None):
+NAMED_KINDS = ('ops', 'tat', 'phase')    # TC 정리 파일 이름에 쓰는 로그 종류. 그 밖의 로그는 etc
+
+# 형식을 등록하지 않은 로그에서 줄마다 시각을 찾는 규칙 (줄의 첫 시각을 쓴다)
+_MON = {m: i for i, m in enumerate(('Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'), 1)}
+_TS_ISO = re.compile(rb'(\d{4})[-/](\d{2})[-/](\d{2})[T _](\d{2}):(\d{2}):(\d{2})(?:[.,]\d+)?(?:\s*(Z|[+-]\d{2}:?\d{2}))?')
+_TS_DMY = re.compile(rb'(\d{1,2}) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sept?|Oct|Nov|Dec) (\d{4}),? (\d{2}):(\d{2}):(\d{2})')
+_TS_SYS = re.compile(rb'\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) +(\d{1,2}) (\d{2}):(\d{2}):(\d{2})\b')
+
+
+def _line_time(b, year):
+    """줄(바이트) → (시각, 시간대 환산 여부) 또는 (None, False). 시간대 표기(Z, +09:00)가 있으면 이 PC 의 현지 시각으로 환산한다."""
+    m = _TS_ISO.search(b)
+    if m:
+        y, mo, d, hh, mi, ss, tz = m.groups()
+        try:
+            t = pd.Timestamp(int(y), int(mo), int(d), int(hh), int(mi), int(ss))
+        except ValueError:
+            return None, False
+        if tz:
+            z = tz.decode()
+            off = 0 if z == 'Z' else (1 if z[0] == '+' else -1) * (int(z[1:3]) * 60 + int(z[-2:]))
+            utc = t - pd.Timedelta(minutes=off)
+            local = pd.Timestamp(utc.tz_localize('UTC').tz_convert(_local_tz()).tz_localize(None))
+            return local, True
+        return t, False
+    m = _TS_DMY.search(b)
+    if m:
+        d, mon, y, hh, mi, ss = m.groups()
+        try:
+            return pd.Timestamp(int(y), _MON[mon.decode()[:3]], int(d), int(hh), int(mi), int(ss)), False
+        except (ValueError, KeyError):
+            return None, False
+    m = _TS_SYS.search(b)
+    if m:
+        mon, d, hh, mi, ss = m.groups()
+        try:
+            return pd.Timestamp(year, _MON[mon.decode()], int(d), int(hh), int(mi), int(ss)), False
+        except (ValueError, KeyError):
+            return None, False
+    return None, False
+
+
+def _local_tz():
+    import datetime as _dt
+    return _dt.datetime.now().astimezone().tzinfo
+
+
+def _slice_unknown(path, lo, hi, names_rx, year):
+    """형식을 등록하지 않은 로그: 시각이 [lo, hi] 안이고 케이스의 VM · 호스트 이름이 들어 있는 줄만 남긴다.
+    시각이 없는 줄(여러 줄짜리 기록의 다음 줄)은 바로 앞 시각 줄을 따른다. CSV 는 첫 줄(머리글)을 남긴다.
+    반환: (남긴 줄 목록, 첫 시각, 마지막 시각, 시간대 환산 여부) 또는 None."""
+    kept, times, conv, follow = [], [], False, False
+    is_csv = path.lower().endswith('.csv')
+    header = None
+    with open(path, 'rb') as f:
+        for k, b in enumerate(f):
+            if k == 0 and is_csv:
+                header = b
+                continue
+            t, c = _line_time(b, year)
+            if t is None:
+                if follow:
+                    kept.append(b)
+                continue
+            follow = lo <= t <= hi and bool(names_rx.search(b))
+            if follow:
+                kept.append(b)
+                times.append(t)
+                conv = conv or c
+    if not times:
+        return None
+    return ([header] if header is not None else []) + kept, min(times), max(times), conv
+
+
+def split_case(case, sources, profiles, ents, out_root, base_dir=None, log=print, date=None, extra=None, unknown=None):
     """원본 파일에서 이 케이스의 ESX 호스트 · VM 기록 중 시각 구간(앞뒤 여유 포함) 행만 잘라 out_root/<케이스명>/ 에 저장한다.
 
     남기는 행. 행의 대상 이름은 입력 프로파일의 대상 열 · 키다(VCF Operations 의 Name, Key:Value 로그의 Hostname, CSV 의 VM).
       1. 대상 이름이 케이스의 호스트 이름과 같은 행: ESX 호스트 자신의 기록. 도메인을 붙인 이름도 같은 호스트로 본다.
       2. 대상 이름이 이 케이스의 VM 인 행. VM 은 리포트와 같은 규칙(ingest.load_case)으로 고른다.
-    파일 이름: <케이스명>_<생성 날짜 YYYYMMDD>_<번호><원본 확장자>. 번호는 원본 파일마다 01 부터 붙이고, 구간 안 첫 시각 순서다.
+    extra: [(종류, 원본 행 목록)] — 이 케이스에 연결된 잡 TAT 원장 행(tat) · phase 소요 시간 행(phase). CSV 로 저장한다.
+    unknown: 형식을 등록하지 않은 로그 파일 경로. 줄마다 시각과 VM · 호스트 이름을 찾아 이 케이스의 줄만 etc 로 저장한다(_slice_unknown).
+    파일 이름: <케이스명>-<종류>-<정리 날짜 YYYYMMDD><원본 확장자>. 종류는 내용으로 정한다:
+      ops = VCF Operations 지표 export, tat = 잡 TAT 원장, phase = phase 소요 시간. 같은 종류가 여러 파일이면 <종류>-01, -02 …
+      그 밖의 로그는 <케이스명>-etc-<번호>-<날짜>. 번호는 종류 안에서 구간 안 첫 시각 순서다.
     잘라낸 파일은 원본과 같은 형식(열 · 표기)을 유지한다. 폴더는 매번 새로 만든다(덮어쓰기)."""
     lo = case['start'] - pd.Timedelta(seconds=case.get('margin_s', 0))
     hi = case['end'] + pd.Timedelta(seconds=case.get('margin_s', 0))
@@ -124,7 +202,7 @@ def split_case(case, sources, profiles, ents, out_root, base_dir=None, log=print
                 keep = pd.Series(True, index=df.index)       # 대상 열이 없는 파일은 구간만 자른다
             dropped += int(len(df) - keep.sum())
             if keep.any():
-                parts.append((t[keep].min(), rel, prof, t[keep], df[keep], None))
+                parts.append((t[keep].min(), rel, prof, t[keep], df[keep], None, prof.get('short_name') or 'etc'))
         else:   # kv_text: 줄 단위로 거른다. 머리 줄(시각 키가 없는 첫 줄)은 그대로 둔다
             tkey, ekey = prof['time_key'], prof.get('entity_key')
             tre = re.compile(re.escape(tkey) + r':\s*([0-9T:\-\./ ]+?)(?=,|$)')
@@ -152,18 +230,52 @@ def split_case(case, sources, profiles, ents, out_root, base_dir=None, log=print
             if not times:
                 continue
             tt = pd.Series(times)
-            parts.append((tt.min(), rel, prof, tt, None, lines))
+            parts.append((tt.min(), rel, prof, tt, None, lines, prof.get('short_name') or 'etc'))
+    for kind, rows in extra or []:          # 잡 TAT 원장 · phase 소요 시간: 이 케이스에 연결된 행만
+        if not rows:
+            continue
+        cols = list(dict.fromkeys(k for r in rows for k in r))
+        tcol = 'PSStartTime' if 'PSStartTime' in cols else ('JobStart_KST' if 'JobStart_KST' in cols else None)
+        tt = pd.Series([str(r.get(tcol, '')) for r in rows]) if tcol else pd.Series([''] * len(rows))
+        files = sorted({os.path.relpath(r['__file'], base_dir) if base_dir and r.get('__file') else '' for r in rows} - {''})
+        desc = {'tat': '잡 TAT 원장', 'phase': 'phase 소요 시간'}[kind]
+        parts.append((pd.Timestamp(case['start']), ', '.join(files) or kind, {'source_system': desc},
+                      tt, pd.DataFrame([{k: r.get(k, '') for k in cols if k != '__file'} for r in rows]), None, kind))
+    conv_any = False
+    if unknown:                           # 형식을 등록하지 않은 로그: 시각과 VM · 호스트 이름이 있는 줄만
+        names = sorted({str(e) for e in ents if str(e)} | set(hosts), key=len, reverse=True)
+        if names:
+            names_rx = re.compile(rb'(?<![A-Za-z0-9_\-])(' + b'|'.join(re.escape(n.encode()) for n in names) + rb')(?![A-Za-z0-9_\-])', re.I)
+            for path in unknown:
+                got = _slice_unknown(path, lo, hi, names_rx, pd.Timestamp(case['start']).year)
+                if not got:
+                    continue
+                lines_b, t0, t1, conv = got
+                conv_any = conv_any or conv
+                rel = os.path.relpath(path, base_dir) if base_dir else os.path.basename(path)
+                parts.append((t0, rel, {'source_system': '형식 미등록 (줄의 시각 · VM 이름으로 잘라냄)'},
+                              pd.Series([t0, t1]), None, lines_b, 'etc'))
     manifest = []
-    for k, (_, rel, prof, tt, part, lines) in enumerate(sorted(parts, key=lambda x: (x[0], x[1])), start=1):
-        name = f'{_safe_dir(case["id"])}_{date}_{k:02d}{os.path.splitext(rel)[1]}'
-        if part is not None:
-            part.to_csv(os.path.join(dest, name), index=False, encoding='utf-8-sig')
-        else:
-            with open(os.path.join(dest, name), 'w', encoding='utf-8') as f:
-                f.writelines(lines)
-        manifest.append({'파일': name, '원본': rel, '형식': prof.get('source_system', ''),
-                         '행 수': int(len(tt)), '첫 시각': str(tt.min()), '마지막 시각': str(tt.max())})
-    pd.DataFrame(manifest, columns=['파일', '원본', '형식', '행 수', '첫 시각', '마지막 시각']).to_csv(
+    by_kind = {}
+    for p in sorted(parts, key=lambda x: (x[0], x[1])):
+        by_kind.setdefault(p[6], []).append(p)
+    for kind in [k for k in NAMED_KINDS if k in by_kind] + (['etc'] if 'etc' in by_kind else []):
+        group = by_kind[kind]
+        for k, (_, rel, prof, tt, part, lines, _kind) in enumerate(group, start=1):
+            ext = '.csv' if kind in ('tat', 'phase') else os.path.splitext(rel)[1]
+            num = f'-{k:02d}' if (kind == 'etc' or len(group) > 1) else ''
+            name = f'{_safe_dir(case["id"])}-{kind}{num}-{date}{ext}'
+            if part is not None:
+                part.to_csv(os.path.join(dest, name), index=False, encoding='utf-8-sig')
+            elif lines and isinstance(lines[0], bytes):        # 형식 미등록 로그: 원본 바이트 그대로
+                with open(os.path.join(dest, name), 'wb') as f:
+                    f.writelines(lines)
+            else:
+                with open(os.path.join(dest, name), 'w', encoding='utf-8') as f:
+                    f.writelines(lines)
+            manifest.append({'파일': name, '종류': kind, '원본': rel, '형식': prof.get('source_system', ''),
+                             '행 수': int(len(tt)), '첫 시각': str(tt.min()) if len(tt) else '', '마지막 시각': str(tt.max()) if len(tt) else ''})
+    pd.DataFrame(manifest, columns=['파일', '종류', '원본', '형식', '행 수', '첫 시각', '마지막 시각']).to_csv(
         os.path.join(dest, 'manifest.csv'), index=False, encoding='utf-8-sig')
     own = {n for n in kept if n and any(ingest.same_host(n, h) for h in hosts)}
     vms = sorted(n for n in kept if n and n not in own)
@@ -174,7 +286,8 @@ def split_case(case, sources, profiles, ents, out_root, base_dir=None, log=print
                 + (' (자동 감지)' if case.get('end_auto') else '') + f'\n저장 구간: {lo} ~ {hi} (앞뒤 {case.get("margin_s", 0) // 60}분 포함)\n'
                 f'정리한 날짜: {date}\n'
                 f'남긴 기록: 위 VM 과 호스트 자신의 기록 (VM 은 리포트와 같은 규칙으로 고름)\n'
-                f'구간 안에서 뺀 다른 호스트 · VM 의 행: {dropped:,}개\n')
+                f'구간 안에서 뺀 다른 호스트 · VM 의 행: {dropped:,}개\n'
+                + ('형식 미등록 로그의 시각 중 시간대 표기(Z, +09:00 등)가 있는 시각은 이 PC 의 현지 시각으로 환산해 구간을 정함\n' if conv_any else ''))
     log(f'[정리] {case["id"]}: 파일 {len(manifest)}개 → {dest}' + (f' (구간 안 다른 호스트 · VM 행 {dropped:,}개 제외)' if dropped else ''))
     return dest, manifest
 

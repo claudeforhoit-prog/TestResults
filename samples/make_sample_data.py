@@ -8,6 +8,7 @@
   samples/sample_data/node7_vm_metrics.csv    같은 형식 (호스트 hv-node7, VM 4대: VM 이름이 호스트 이름으로 시작하지 않는 예)
   samples/sample_data/logs/node7_guest.log    Key:Value 텍스트 로그 형식 (hv-node7 VM 의 게스트 메모리)
   samples/sample_data/phase/sample_phase_times.csv   phase 소요 시간 CSV (CASE-A · CASE-B, 동시 실행 잡 4개씩)
+  samples/sample_data/tat/sample_job_tat.csv         잡 TAT 원장 CSV (CASE-A · CASE-B: TAT 측정 잡 4개 + 동시 실행 잡 세트)
 """
 import os
 
@@ -109,6 +110,35 @@ def make_phase():
     pd.DataFrame(rows).to_csv(os.path.join(OUT, 'phase', 'sample_phase_times.csv'), index=False)
 
 
+def make_tat():
+    """잡 TAT 원장: TAT 측정 잡(bench_sim, esx01-vm01, 잡 4개)과 동시 실행 잡(bench_load, esx01-vm02, 4잡 세트를 이어서 실행)."""
+    os.makedirs(os.path.join(OUT, 'tat'), exist_ok=True)
+    rows = []
+    for cid, base in PHASE_SELF.items():
+        t0 = pd.Timestamp(next(c[3] for c in CASES if c[0] == cid))
+        total = sum(v for v in base.values() if v > 0)
+        for idx, f in enumerate((0.996, 1.004, 0.998, 1.002), start=1):
+            el = round(total * f + 2, 2)
+            s = t0 + pd.Timedelta(seconds=idx - 1)
+            rows.append({'hostname': VMS['esx01'][0], 'Job_code': 'bench_sim', 'job_info': f'bench_sim_{idx}_of_4',
+                         'PSStartTime': f'{s:%Y-%m-%d_%H:%M:%S}', 'PSEndTime': f'{s + pd.Timedelta(seconds=el):%Y-%m-%d_%H:%M:%S}',
+                         'Job_elapse': el})
+        load = 2950 if cid == 'CASE-A' else 2780          # CASE-B 는 튜닝으로 동시 실행 잡도 짧아진 예
+        t, k = t0 + pd.Timedelta(seconds=5), 0
+        while t <= t0 + pd.Timedelta(seconds=total + 1500):  # 마지막 세트는 TAT 측정 잡이 끝난 뒤 시작해 기준 구간 밖이 된다
+            k += 1
+            longest = 0.0
+            for i in range(1, 5):
+                el = round(load + 23 * ((k * 7 + i * 3) % 5) - 46, 2)
+                s = t + pd.Timedelta(seconds=i - 1)
+                longest = max(longest, el)
+                rows.append({'hostname': VMS['esx01'][1], 'Job_code': 'bench_load', 'job_info': f'bench_load_{i}_of_4',
+                             'PSStartTime': f'{s:%Y-%m-%d_%H:%M:%S}', 'PSEndTime': f'{s + pd.Timedelta(seconds=el):%Y-%m-%d_%H:%M:%S}',
+                             'Job_elapse': el})
+            t = t + pd.Timedelta(seconds=longest + 30)
+    pd.DataFrame(rows).to_csv(os.path.join(OUT, 'tat', 'sample_job_tat.csv'), index=False)
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     rng = np.random.default_rng(7)
@@ -119,6 +149,7 @@ def main():
         make_host(h, rng)
     make_log('hv-node7', rng)
     make_phase()
+    make_tat()
     pd.DataFrame([{'테스트 그룹': GROUP[c[0]], '케이스명': c[0], '설명': c[1], '호스트 이름': c[2], '잡 시작 시각': c[3], '잡 종료 시각': c[4], 'VM': VM_PATTERN[c[2]]}
                   for c in CASES]).to_csv(os.path.join(HERE, 'sample_cases.csv'), index=False, encoding='utf-8-sig')
     print('완료:', OUT)

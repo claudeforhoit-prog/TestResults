@@ -124,10 +124,20 @@ td:nth-child(-n+3),th:nth-child(-n+3){text-align:left}
   <button class="btn small" id="selExport" title="지금 고른 케이스 · VM · 지표를 파일로 저장합니다. 리포트 생성기의 'HTML 선택 파일' 칸에 넣으면 그 항목만으로 Word 리포트를 만듭니다.">선택 내보내기</button>
   <span id="rangeText"></span>
 </div>
+<div class="toolbar" id="jobOpts" hidden title="지표 목록과 따로 고른다. 체크한 케이스 가운데 데이터가 있는 케이스만 나온다.">
+  <span>잡 결과 그래프:</span>
+  <label id="optPhaseWrap" hidden><input type="checkbox" id="optPhase" checked> phase 누적 막대</label>
+  <label id="optTatWrap" hidden><input type="checkbox" id="optTat"> TAT</label>
+  <label id="optConcWrap" hidden><input type="checkbox" id="optConc"> 동시 실행 잡 평균 elapsed</label>
+  <label id="optSetsWrap" hidden><input type="checkbox" id="optSets"> 동시 실행 잡 세트별 elapsed</label>
+</div>
 <div class="note" id="note"></div>
 <div class="legend" id="legend"></div>
 <main>
+  <div id="tatbox"></div>
   <div id="phasebox"></div>
+  <div id="concbox"></div>
+  <div id="setsbox"></div>
   <div id="plots"></div>
   <div class="ptitle">표. 선택한 케이스·VM 의 통계 (원 데이터 전체 구간 기준)</div>
   <div class="tblwrap"><table id="stats"></table></div>
@@ -147,8 +157,10 @@ const vmKey = s => `${s.entity}|${s.host}`;
 const lineKey = (cs, s) => `${cs}|${s.entity}|${s.host}`;          // 선택 단위: 케이스 안의 VM
 const MAX_METRICS = 6;
 const st = {tcs: [], sel: new Set(), metrics: [], view: 'one', x: 'sec', dark: false, bin: 'auto',
-            drag: 'zoom', linkY: false, xr: null, yr: {}, phaseBand: false};
+            drag: 'zoom', linkY: false, xr: null, yr: {}, phaseBand: false,
+            opt: {phase: true, tat: false, conc: false, sets: false}};
 const PH = D.phases || {};      // 케이스별 phase 요약 (리포트 생성기 phase.py): stages · bands · total · load · jobs
+const JB = D.jobs || {};        // 케이스별 잡 정리 (리포트 생성기 jobs.py): main (TAT 측정 잡) · conc (동시 실행 잡)
 let plots = [];        // [{key, div, data: [{x:[], y:[]}], hs, vs}]
 let syncing = false;   // 연동 중 다른 그래프의 이벤트가 다시 연동을 부르지 않게 막는다
 
@@ -394,11 +406,95 @@ function bandLayout(cs){
   return {shapes, annotations, margin: {l: 64, r: 10, t: 24, b: 46}};
 }
 
+// 잡 결과 그래프의 공통 배치
+function jobLayout(ytitle, ymax, extra){
+  const ax = {gridcolor: css('--grid'), linecolor: css('--border'), zerolinecolor: css('--border'), tickfont: {color: css('--text-secondary'), size: 11},
+              title: {font: {color: css('--text-secondary'), size: 12}}};
+  return {paper_bgcolor: css('--surface-1'), plot_bgcolor: css('--surface-1'), font: {family: getComputedStyle(document.body).fontFamily, color: css('--text-primary')},
+    margin: {l: 64, r: 10, t: 24, b: 40}, xaxis: {...ax, type: 'category'},
+    yaxis: {...ax, tickformat: ',', range: [0, ymax * 1.15], title: {...ax.title, text: ytitle}},
+    legend: {font: {color: css('--text-secondary')}}, ...(extra || {})};
+}
+function jobBox(id, title){
+  const box = document.getElementById(id); box.innerHTML = '';
+  const t = document.createElement('div'); t.className = 'ptitle'; t.textContent = title;
+  const div = document.createElement('div'); div.style.height = '440px'; box.append(t, div);
+  return div;
+}
+const n2 = v => Math.round(v * 100) / 100, f2 = v => n2(v).toLocaleString('ko-KR', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+
+// TAT: 체크한 케이스 가운데 TAT 측정 잡이 있는 케이스마다 막대 1개. 비교 기준값을 줬으면 점선과 저하율
+function drawTat(cfg){
+  document.getElementById('tatbox').innerHTML = '';
+  const cs = D.cases.filter(c => st.tcs.includes(c.id) && JB[c.id] && JB[c.id].main);
+  if (!cs.length || !st.opt.tat) return;
+  const base = D.tatBase && D.tatBase.value > 0 ? D.tatBase : null;
+  const div = jobBox('tatbox', '그림. TAT (케이스마다 TAT 측정 잡의 잡 elapsed 평균' + (base ? ' · 점선 = 비교 기준' : '') + ')');
+  const ys = cs.map(c => JB[c.id].main.tat), mx = Math.max(...ys, base ? base.value : 0) || 1;
+  const deg = y => base ? ` · 저하율 ${((y - base.value) / base.value * 100).toFixed(2)}%` : '';
+  const JC = D.jobColors;
+  const data = [{type: 'bar', x: cs.map(c => c.id), y: ys, marker: {color: JC.tat},
+    textfont: {color: st.dark ? css('--text-primary') : JC.ink},
+    text: ys.map(y => `<b>${f2(y)}</b>` + (base ? `<br>${((y - base.value) / base.value * 100 >= 0 ? '+' : '')}${((y - base.value) / base.value * 100).toFixed(2)}%` : '')),
+    textposition: 'outside', cliponaxis: false,
+    customdata: cs.map(c => { const m = JB[c.id].main; return [m.code, m.jobs.length, f2(m.min), f2(m.max), deg(m.tat)]; }),
+    hovertemplate: '%{x} · %{customdata[0]}<br>TAT %{y:,.2f} s (잡 %{customdata[1]}개 평균 · 최소 %{customdata[2]} · 최대 %{customdata[3]})%{customdata[4]}<extra></extra>'}];
+  const extra = base ? {shapes: [{type: 'line', xref: 'paper', x0: 0, x1: 1, y0: base.value, y1: base.value, line: {color: JC.base, width: 1.3, dash: 'dash'}}],
+    annotations: [{xref: 'paper', x: 1, y: base.value, xanchor: 'right', yanchor: 'bottom', showarrow: false, font: {size: 11, color: st.dark ? css('--text-secondary') : JC.ink2},
+                   text: `비교 기준 ${base.note ? base.note + ' ' : ''}${f2(base.value)} s`}]} : {};
+  Plotly.newPlot(div, data, jobLayout('TAT (s)', mx, {...extra, showlegend: false, bargap: 0.5}), cfg);
+}
+
+// 동시 실행 잡 평균 elapsed: 케이스 · 잡 종류마다 막대 1개, 막대 위에 기준 구간 중 시작한 세트 수
+function concItems(){
+  const out = [];
+  D.cases.filter(c => st.tcs.includes(c.id) && JB[c.id]).forEach(c => (JB[c.id].conc || []).forEach((g, gi) => out.push({c, g, gi})));
+  return out;
+}
+function drawConc(cfg){
+  document.getElementById('concbox').innerHTML = '';
+  const it = concItems();
+  if (!it.length || !st.opt.conc) return;
+  const div = jobBox('concbox', '그림. 동시 실행 잡 평균 elapsed (막대 위 = 기준 구간 중 시작한 세트 수)');
+  const multi = new Set(it.map(o => o.c.id)).size !== it.length;
+  const x = it.map(o => multi ? `${o.c.id} · ${o.g.label}` : o.c.id), ys = it.map(o => o.g.mean);
+  const data = [{type: 'bar', x, y: ys, marker: {color: D.jobColors.conc},
+    text: it.map(o => `<b>${f2(o.g.mean)}</b><br>세트 ${o.g.sets_in_window}회`), textposition: 'outside', cliponaxis: false,
+    textfont: {color: st.dark ? css('--text-primary') : D.jobColors.ink},
+    customdata: it.map(o => [o.g.label, o.g.sets, o.g.sets_in_window, o.g.jobs, f2(o.g.min), f2(o.g.max), o.g.coverage_pct]),
+    hovertemplate: '%{x} · %{customdata[0]}<br>잡 elapsed 평균 %{y:,.2f} s (최소 %{customdata[4]} · 최대 %{customdata[5]})<br>'
+      + '기준 구간 중 시작한 세트 %{customdata[2]}회 · 총 %{customdata[1]}세트 %{customdata[3]}잡 · 가동 구간 %{customdata[6]}%<extra></extra>'}];
+  Plotly.newPlot(div, data, jobLayout('Job elapsed (s)', Math.max(...ys) || 1, {showlegend: false, bargap: 0.5}), cfg);
+}
+
+// 동시 실행 잡 세트별 elapsed: 점 = 잡, 선 = 세트 평균, 케이스마다 색
+function drawSets(cfg){
+  document.getElementById('setsbox').innerHTML = '';
+  const it = concItems();
+  if (!it.length || !st.opt.sets) return;
+  const div = jobBox('setsbox', '그림. 동시 실행 잡 세트별 elapsed (점 = 잡 · 선 = 세트 평균 · 가로축 = 기준 구간 시작부터 세트 시작까지)');
+  const data = [];
+  let mx = 1;
+  const seq = D.jobColors.cases;          // 케이스 색: 이전 주간 보고서의 케이스 색 순서 (한 케이스만이면 이전 케이스 리포트의 주황)
+  it.forEach((o, k) => {
+    const col = it.length === 1 ? D.jobColors.dot : seq[k % seq.length], name = `${o.c.id} · ${o.g.label}`;
+    o.g.points.forEach(p => { mx = Math.max(mx, p[1]); });
+    data.push({type: 'scatter', mode: 'markers', name: name + ' 잡', x: o.g.points.map(p => p[0]), y: o.g.points.map(p => p[1]),
+               marker: {color: col, size: 7, opacity: 0.45}, legendgroup: name, hovertemplate: name + '<br>세트 시작 %{x:,.0f} s · 잡 elapsed %{y:,.2f} s<extra></extra>'});
+    data.push({type: 'scatter', mode: 'lines+markers', name: name + ' 세트 평균', x: o.g.set_rows.map(r => r[0]), y: o.g.set_rows.map(r => r[2]),
+               line: {color: col, width: 2}, marker: {color: col, size: 4}, legendgroup: name,
+               hovertemplate: name + '<br>세트 시작 %{x:,.0f} s · 세트 평균 %{y:,.2f} s<extra></extra>'});
+  });
+  const lay = jobLayout('Job elapsed (s)', mx);
+  lay.xaxis = {...lay.xaxis, type: 'linear', tickformat: ',', title: {text: 'Set start elapsed time (s)', font: {color: css('--text-secondary'), size: 12}}};
+  Plotly.newPlot(div, data, lay, cfg);
+}
+
 // phase 별 self 시간 누적 막대: 체크한 케이스 가운데 phase 가 있는 케이스마다 막대 1개, 아래부터 실행 순서
 function drawPhase(cfg){
   const box = document.getElementById('phasebox'); box.innerHTML = '';
   const cs = D.cases.filter(c => st.tcs.includes(c.id) && PH[c.id]);
-  if (!cs.length) return;
+  if (!cs.length || !st.opt.phase) return;
   const t = document.createElement('div'); t.className = 'ptitle';
   t.textContent = '그림. phase 별 self 시간 누적 (케이스마다 잡 평균 · 아래부터 실행 순서 · 막대에 마우스를 올리면 단계별 값)';
   const div = document.createElement('div'); div.style.height = '440px'; box.append(t, div);
@@ -523,7 +619,8 @@ function makePlot(box, key, title, small, data, ytitle, cfg, metric, band){
 function draw(keepRange){
   const box = document.getElementById('plots'); box.innerHTML = ''; box.classList.remove('grid'); plots = [];
   if (!keepRange) { st.yr = {}; }
-  drawPhase({responsive: true, displaylogo: false, showTips: false, modeBarButtonsToRemove: ['lasso2d', 'select2d', 'autoScale2d']});
+  const jcfg = {responsive: true, displaylogo: false, showTips: false, modeBarButtonsToRemove: ['lasso2d', 'select2d', 'autoScale2d']};
+  drawTat(jcfg); drawPhase(jcfg); drawConc(jcfg); drawSets(jcfg);      // 문서와 같은 순서: TAT → phase → 동시 실행 잡
   if (!st.tcs.length) { note('비교할 케이스를 목록에서 선택하십시오.'); document.getElementById('legend').innerHTML = ''; drawStats(); return; }
   if (!st.metrics.length) { note('지표를 하나 이상 선택하십시오.'); document.getElementById('legend').innerHTML = ''; drawStats(); return; }
   const warn = [];
@@ -609,6 +706,15 @@ seg('binSeg', 'b', v => { st.bin = v; draw(true); });
 seg('dragSeg', 'd', v => { st.drag = v; plots.forEach(p => Plotly.relayout(p.div, {dragmode: v})); });
 document.getElementById('linkY').onchange = e => { st.linkY = e.target.checked; st.yr = {}; applyRanges(false); };
 if (Object.keys(PH).length) document.getElementById('phaseBandWrap').hidden = false;
+{ // 잡 결과 그래프 선택: 데이터가 있는 항목만 보인다. phase 누적 막대는 기본 켬, 나머지는 켤 때만 그린다
+  const anyMain = Object.values(JB).some(j => j.main), anyConc = Object.values(JB).some(j => (j.conc || []).length);
+  const show = {optPhaseWrap: Object.keys(PH).length > 0, optTatWrap: anyMain, optConcWrap: anyConc, optSetsWrap: anyConc};
+  Object.entries(show).forEach(([id, on]) => { document.getElementById(id).hidden = !on; });
+  document.getElementById('jobOpts').hidden = !Object.values(show).some(Boolean);
+  [['optPhase', 'phase'], ['optTat', 'tat'], ['optConc', 'conc'], ['optSets', 'sets']].forEach(([id, k]) => {
+    document.getElementById(id).onchange = e => { st.opt[k] = e.target.checked; draw(true); };
+  });
+}
 document.getElementById('phaseBand').onchange = e => { st.phaseBand = e.target.checked; draw(true); };
 document.getElementById('resetView').onclick = () => { st.xr = null; st.yr = {}; applyRanges(); };
 // 그래프 크기: 높이(px)와 폭(화면 폭 대비 %). 브라우저에 저장해 다른 리포트에도 쓴다.

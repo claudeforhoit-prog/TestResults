@@ -89,7 +89,7 @@ def read_jobs(path):
     jobs = []
     for r in rows:
         r = {(k or '').strip(): v for k, v in r.items()}
-        jobs.append({'host': str(r.get('Hostname') or '').strip(), 'start': _when(r.get('JobStart_KST')),
+        jobs.append({'row': r, 'host': str(r.get('Hostname') or '').strip(), 'start': _when(r.get('JobStart_KST')),
                      'idx': str(r.get('JobIdx') or '').strip(), 'total_jobs': _num(r.get('JobTotal')),
                      'order': order, 'self': {s: _num(r.get(f'{s}_self')) for s in order},
                      'total': {s: _num(r.get(f'{s}_total')) for s in order}, 'file': path})
@@ -132,6 +132,8 @@ def assign(cases, jobs, log=print):
         if by_host:
             for c in by_host:
                 got[c['id']].append(j)
+        elif any(_host_match(j['host'], c) for c in cases):
+            continue                                  # 다른 케이스의 VM 잡: 시각만 겹치는 케이스에 붙이지 않는다
         elif len(win) == 1:
             got[win[0]['id']].append(j)
         else:
@@ -148,7 +150,7 @@ def assign(cases, jobs, log=print):
                 uniq.append(j)
         s = summarize(uniq)
         if s:
-            c['phase'] = s
+            c['phase'], c['_phase_rows'] = s, [dict(j['row'], __file=j['file']) for j in uniq]
             log(f'[phase] {c["id"]}: 잡 {s["jobs"]}개 평균 · 단계 {len(s["stages"])}개 · 전체 {s["total"]:,.0f} s'
                 + (f' · Load {s["load"]:,.0f} s' if s.get('load') else ''))
 

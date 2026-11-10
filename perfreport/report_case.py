@@ -3,8 +3,11 @@
 구성 (기본 양식: 지표 역할 지정이 없을 때)
   §1 케이스 식별
   §2 요약 표 (VM 별 주요 지표: 지표마다 평균 칸과 최대 칸, 데이터에 있는 지표만)
-  §3 phase 소요 시간 (phase 소요 시간 CSV 가 연결된 케이스만, phase.py): 표 + 단계 누적 막대그래프. 이 절이 있으면 뒤 절 번호가 하나씩 밀린다.
+  §3 TAT (잡 TAT 원장이 연결되고 TAT 측정 잡이 있는 케이스만, jobs.py): 잡별 elapsed 표 · 평균 · 최대 − 최소 · 저하율(비교 기준값을 줬을 때)
+  §4 phase 소요 시간 (phase 소요 시간 CSV 가 연결된 케이스만, phase.py): 표 + 단계 누적 막대그래프. TAT 가 있으면 둘의 차이를 적는다.
      이 케이스의 시계열 그래프 배경에 phase 구간을 그린다 (번갈아 음영 · 경계선 · 3% 이상 단계만 이름 · Load | Compute 주황 점선)
+  §5 동시 실행 잡 (잡 TAT 원장에 동시 실행 잡이 있을 때): 잡 종류 · 호스트마다 잡 요약 · 기준 구간 대비 가동 구간 · 잡별 elapsed 그림 · 세트별 표
+  없는 절은 빼고 번호를 당긴다. 그 뒤 지표 절.
   §3~ 분류별 절 (CPU · Memory · Guest · Disk · Network · 기타: 데이터에 있는 분류만)
        지표마다 그래프 1장(선 = VM, 최대 8개, 넘으면 나눔) + 한 줄 설명, 절 끝에 통계 표
   Appendix A 데이터 출처 (분류별 수집 시스템 · 시간대)
@@ -35,6 +38,7 @@ from docx.enum.section import WD_ORIENT
 from docx.shared import Cm
 
 from . import analyze, charts, docx_base, metrics, report_docx
+from . import jobs as jobs_mod
 from . import phase as phase_mod
 from . import units as units_mod
 from . import palette as P
@@ -149,6 +153,32 @@ def _phase_stack(path, items):
     h, l = ax.get_legend_handles_labels()
     ax.legend(h[::-1], l[::-1], loc='upper left', bbox_to_anchor=(1.01, 1.0), frameon=False, fontsize=12,
               title='Execution order (top = last)', title_fontsize=12)
+    fig.savefig(path, facecolor='white', bbox_inches='tight', pil_kwargs={'compress_level': PNG_LEVEL})
+    plt.close(fig)
+    return path
+
+
+def _conc_chart(path, g, color, bands=None, load_end=None, phase_total=None):
+    """동시 실행 잡의 잡별 elapsed (이전 리포트의 세트별 elapsed 그림과 같은 형식): 점 = 잡, 선 = 세트 평균, 가로축 = 세트 시작 경과 시간."""
+    fig, ax = plt.subplots(figsize=(14, 7.5), dpi=CHART_DPI)
+    if bands:
+        _bands(ax, bands, load_end, phase_total)
+    xs, ys = [p[0] for p in g['points']], [p[1] for p in g['points']]
+    ax.plot(xs, ys, 'o', color=color, ms=6, alpha=0.45, mew=0, zorder=3, label='Job (dot)')
+    ax.plot([r[0] for r in g['set_rows']], [r[2] for r in g['set_rows']], '-', color=color, lw=2.0, zorder=4, label='Set mean (line)')
+    ax.set_ylim(0, max(ys) * 1.15 if ys else 1)
+    ax.set_xlim(min(0.0, min(xs, default=0.0)) - g['window_s'] * 0.01, max(g['window_s'], max(xs, default=0.0)) * 1.01)
+    ax.grid(True, color=P.GRID, linewidth=0.8)
+    ax.set_axisbelow(True)
+    for side in ('top', 'right'):
+        ax.spines[side].set_visible(False)
+    ax.tick_params(colors=P.TEXT_SECONDARY, labelsize=13)
+    ax.xaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda v, _: f'{v:,.0f}'))
+    ax.yaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda v, _: f'{v:,.0f}'))
+    ax.set_xlabel('Set start elapsed time (s)', fontsize=14, color=P.TEXT_SECONDARY)
+    ax.set_ylabel('Job elapsed (s)', fontsize=14, color=P.TEXT_SECONDARY)
+    ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.12), ncol=2, frameon=False, fontsize=13)
+    fig.tight_layout()
     fig.savefig(path, facecolor='white', bbox_inches='tight', pil_kwargs={'compress_level': PNG_LEVEL})
     plt.close(fig)
     return path
@@ -273,7 +303,7 @@ def _gaps(t):
 
 
 def build_case(path, case, df, chart_dir, date, log=print, roles=None, include_unassigned=True,
-               palette=None, chart_width_cm=None, pool=None, phase=None):
+               palette=None, chart_width_cm=None, pool=None, phase=None, jobs=None, tat_base=None):
     """case: {id, label, host, start, end}. df: 이 케이스의 행만 (case 열 = case id).
     roles: {지표: (역할, 순서)}. 이 케이스 데이터에 있는 지표로 역할이 하나라도 있으면 역할 순서로 절을 나눈다.
     include_unassigned: 역할 미지정 지표를 Appendix A 에 넣을지. 역할이 없으면 기본 양식(분류별 절).
@@ -281,6 +311,7 @@ def build_case(path, case, df, chart_dir, date, log=print, roles=None, include_u
     chart_width_cm: 문서 안 그래프 폭. 세로 페이지 본문 폭보다 넓으면 가로 방향 페이지로 만든다.
     pool: 그래프를 나눠 그릴 프로세스 풀 (없으면 순서대로 그린다).
     phase: 이 케이스에 연결된 phase 요약(phase.summarize). 있으면 phase 소요 시간 절을 넣고 시계열 그래프 배경에 phase 구간을 그린다.
+    jobs: 이 케이스에 연결된 잡 정리(jobs.classify). tat_base: {'value': TAT 비교 기준값(초), 'note': 설명} 또는 None.
     반환: (저장한 경로, 그래프 수, 문서 글자)."""
     from . import roles as R
     os.makedirs(chart_dir, exist_ok=True)
@@ -398,9 +429,34 @@ def build_case(path, case, df, chart_dir, date, log=print, roles=None, include_u
     doc.add_paragraph('지표마다 평균과 최대를 각 칸에 적음. 여유 메모리 · 잔여 swap 처럼 남은 자원을 재는 지표는 최대 대신 최솟값. '
                       '값이 0 인 지표는 0, 수집되지 않은 지표는 빈 칸.')
 
-    # §3 phase 소요 시간 (phase 소요 시간 CSV 가 연결된 케이스만)
+    no = 3
+    main = (jobs or {}).get('main')
+    conc = (jobs or {}).get('conc') or []
+    # §3 TAT (TAT 측정 잡이 있을 때)
+    if main:
+        doc.add_heading(f'{no}. TAT', level=1)
+        no += 1
+        form = '개별형(1_of_1 잡을 동시에 실행)' if main['form'] == 'individual' else '일괄형(한 명령으로 여러 잡 실행)'
+        nj = len(main['jobs'])
+        doc.add_paragraph(f'TAT 측정 잡: {main["code"]} · 호스트 {", ".join(main["hosts"]) or "기록 없음"} · {form} 잡 {nj}개. '
+                          f'TAT 는 잡 {nj}개 elapsed 평균. 잡 TAT 원장에서 케이스 잡 시작 시각에 시작해 실행 구간의 절반 이상 동안 실행된 세트를 TAT 측정 잡으로 판단.'
+                          + (f' 같은 종류의 다른 세트 {main["other_sets"]}개는 TAT 에 넣지 않음.' if main['other_sets'] else ''))
+        report_docx._caption(doc, '표. 잡별 elapsed')
+        sp = main['max'] - main['min']
+        report_docx._table(doc, ['잡', '호스트', '시작', '종료', 'elapsed (s)'],
+                           [[n, h, a, z, f'{e:,.2f}'] for n, h, a, z, e in main['jobs']]
+                           + [[f'잡 {nj}개 평균', '', '', '', f'{main["tat"]:,.2f}'],
+                              ['최대 − 최소', '', '', '', f'{sp:,.2f} (평균 대비 {sp / main["tat"] * 100:.2f}%)']])
+        deg = jobs_mod.degradation(main['tat'], (tat_base or {}).get('value'))
+        if deg is not None:
+            b = tat_base['value']
+            doc.add_paragraph(f'저하율: ({main["tat"]:,.2f} − {b:,.2f}) ÷ {b:,.2f} × 100 = {deg:+.2f}% (양수 = 비교 기준보다 긺). '
+                              f'비교 기준: {tat_base.get("note") or "설명 없음"} {b:,.2f} s.')
+
+    # phase 소요 시간 (phase 소요 시간 CSV 가 연결된 케이스만)
     if phase:
-        doc.add_heading('3. phase 소요 시간', level=1)
+        doc.add_heading(f'{no}. phase 소요 시간', level=1)
+        no += 1
         exp = phase.get('expected')
         doc.add_paragraph(f'잡 {phase["jobs"]}개의 단계별 self 시간 평균'
                           + (f' (동시 실행 {exp}잡 중 {phase["jobs"]}잡분 기록)' if exp and exp > phase['jobs'] else '')
@@ -418,10 +474,51 @@ def build_case(path, case, df, chart_dir, date, log=print, roles=None, include_u
         doc.add_paragraph('막대 하나는 이 케이스의 잡 평균이고, 아래부터 실행 순서로 단계 self 시간을 쌓음. '
                           '이 케이스의 시계열 그래프 배경에 phase 구간을 표시: 단계를 번갈아 음영, 단계 경계선, 전체의 3% 이상인 단계만 이름'
                           + (', 주황 점선은 Load 와 Compute 의 경계.' if phase.get('load') else '.'))
+        if main:
+            diff = phase['total'] - main['tat']
+            doc.add_paragraph(f'phase 합계와 TAT 비교: phase 합계 {phase["total"]:,.2f} s, TAT {main["tat"]:,.2f} s, 차이 {diff:+,.2f} s '
+                              f'(phase 소요 시간 CSV 의 단계 합계 잡 {phase["jobs"]}개 평균, 잡 TAT 원장의 elapsed 잡 {len(main["jobs"])}개 평균).'
+                              + (' 두 기록의 잡 수가 다름.' if phase['jobs'] != len(main['jobs']) else ''))
 
-    # §3~ 본문: 역할별 절(역할 지정이 있을 때) 또는 분류별 절(기본 양식). phase 절이 있으면 §4 부터
+    # 동시 실행 잡 (잡 TAT 원장에 TAT 측정 잡이 아닌 잡이 있을 때)
+    if conc:
+        doc.add_heading(f'{no}. 동시 실행 잡', level=1)
+        no += 1
+        ref = 'TAT 측정 잡 실행 구간' if main else '케이스 실행 구간'
+        doc.add_paragraph(f'세트는 같은 잡 종류 · 같은 호스트에서 시작 시각이 10초 안인 잡 묶음. 기준 구간은 {ref} '
+                          f'({jobs["window"][0]} ~ {jobs["window"][1]}). 기준 구간 중 시작한 세트는 기준 구간 시작 10초 전에 시작한 세트부터 '
+                          '기준 구간 끝까지 시작한 세트이고, 끝난 뒤 시작한 세트는 넣지 않음.')
+        for g in conc:
+            doc.add_heading(g['label'], level=2)
+            report_docx._caption(doc, f'표. {g["label"]} 잡 요약')
+            report_docx._table(doc, ['항목', '값'], [
+                [f'{ref} 중 시작한 세트', f'{g["sets_in_window"]}회'],
+                ['총 세트 / 총 잡', f'{g["sets"]}세트 / {g["jobs"]}잡 (세트당 {g["jobs_per_set"]:g}잡)'],
+                ['잡 elapsed 평균 / 최소 / 최대', f'{g["mean"]:,.2f} / {g["min"]:,.2f} / {g["max"]:,.2f} s'],
+                ['첫 세트 시작 / 마지막 세트 종료', f'{g["first_start"]} / {g["last_end"]}']])
+            report_docx._caption(doc, f'표. {g["label"]} 의 {ref} 대비 가동 구간')
+            report_docx._table(doc, ['항목', '값'], [
+                ['기준 구간', f'{g["window_s"]:,.0f} s'],
+                ['가동 구간 (기준 구간 안, 세트 간 겹침 제거)', f'{g["busy_s"]:,.0f} s (기준 구간의 {g["coverage_pct"]:.1f}%)'],
+                ['기준 구간 밖 가동 시간', f'{g["outside_s"]:,.0f} s'],
+                ['세트 간 겹침으로 중복 제거한 시간', f'{g["overlap_s"]:,.0f} s'],
+                ['최대 공백 (기준 구간 시작 전 · 끝난 뒤 포함)', f'{g["max_gap_s"]:,.0f} s'],
+                ['첫 세트 시작 전 / 마지막 세트 종료 후 공백', f'{g["head_gap_s"]:,.0f} s / {g["tail_gap_s"]:,.0f} s']])
+            state['n'] += 1
+            report_docx._caption(doc, f'그림. {g["label"]} 잡별 elapsed (세트 시작 시각 기준)')
+            gpath = os.path.join(chart_dir, f'jobs_{state["n"]:03d}.png')
+            doc.add_picture(_conc_chart(gpath, g, jobs_mod.COLORS['dot'], *ph_args), width=Cm(width_cm))
+            doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
+            doc.add_paragraph('점 하나는 잡 하나, 선은 세트 평균. 가로축은 기준 구간 시작을 0초로 둔 세트 시작 경과 시간'
+                              + (', 배경은 phase 구간.' if phase else '.'))
+            report_docx._caption(doc, f'표. {g["label"]} 세트별 실측')
+            report_docx._table(doc, ['세트', '세트 시작 (s)', '잡 수', '잡 elapsed 평균 (s)', '최소 (s)', '최대 (s)'],
+                               [[i, f'{a:,.0f}', n, f'{m:,.2f}', f'{lo:,.2f}', f'{hi:,.2f}']
+                                for i, (a, n, m, lo, hi) in enumerate(g['set_rows'], 1)])
+
+    # 본문: 역할별 절(역할 지정이 있을 때) 또는 분류별 절(기본 양식). 번호는 TAT · phase · 동시 실행 잡 절 다음부터
     body = role_groups if by_role else groups
-    for sec_no, (title, ms) in enumerate(body, start=4 if phase else 3):
+    for sec_no, (title, ms) in enumerate(body, start=no):
         doc.add_heading(f'{sec_no}. {title}', level=1)
         if by_role:
             doc.add_paragraph(f'{title}: {metrics.ROLE_DESC[title]}.')

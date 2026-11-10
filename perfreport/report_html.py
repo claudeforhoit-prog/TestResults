@@ -7,6 +7,7 @@ import numpy as np
 
 from . import metrics
 from . import palette as palette_mod
+from . import jobs as jobs_mod
 from . import phase as phase_mod
 from . import roles as roles_mod
 
@@ -80,6 +81,9 @@ def build(path, ctx, df, stats):
         'series': series,
         # phase 소요 시간 (phase.py): 케이스별 단계 self 평균 · 구간 · Load. 색은 문서의 누적 막대그래프와 같다
         'phases': ctx.get('phases') or {},
+        'jobs': ctx.get('jobs') or {},          # 잡 TAT 원장 (jobs.py): 케이스별 TAT 측정 잡 · 동시 실행 잡
+        'tatBase': ctx.get('tat_base'),         # TAT 비교 기준값과 설명 (없으면 null)
+        'jobColors': jobs_mod.COLORS,           # 잡 결과 그래프 색: 이전 리포트와 같은 색
         'phaseColors': phase_cols,
         'phaseText': {n: ('#2a2a2a' if c in phase_mod.REST else '#ffffff') for n, c in phase_cols.items()},
         'stats': [{k: (_num(r[k]) if k in ('mean', 'p95', 'max', 'min', 'diff', 'diff_pct') else r[k])

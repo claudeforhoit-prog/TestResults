@@ -3,7 +3,7 @@
   perfreport run <케이스정보.csv> <데이터폴더> [--out 폴더] [--title 제목] [--baseline 케이스명] [--core]
                  [--roles 지표역할.csv] [--no-unassigned] [--split 정리폴더]
                  [--palette 1~7] [--chart-width cm] [--workers N] [--selection HTML선택파일.json]
-                 [--to-gb] [--to-gbps]
+                 [--to-gb] [--to-gbps] [--tat-baseline 초] [--tat-baseline-note 설명]
                                         케이스 정보 CSV 로 리포트 생성 (기본 방식)
   perfreport split <케이스정보.csv> <원본폴더> <정리폴더>
                                         원본에서 TC 별 구간만 잘라 정리폴더/<케이스명>/ 에 저장 (리포트 없이)
@@ -31,6 +31,8 @@ def main(argv=None):
     r.add_argument('--selection', help="HTML 의 '선택 내보내기' 파일. 그 케이스 · VM · 지표만으로 만든다")
     r.add_argument('--to-gb', action='store_true', help='크기 단위(Bytes · KB · MB 등)를 GB 로 변환 (1 GB = 1024 MB)')
     r.add_argument('--to-gbps', action='store_true', help='네트워크 속도(KBps · Mbps 등)를 Gbps 로 변환 (1 Gbps = 1000 Mbps)')
+    r.add_argument('--tat-baseline', type=float, help='TAT 비교 기준값(초). 주면 문서 · HTML 에 저하율을 적는다')
+    r.add_argument('--tat-baseline-note', default='', help='TAT 비교 기준 설명 (예: BM 기준선)')
     sp = sub.add_parser('split'); sp.add_argument('cases'); sp.add_argument('data'); sp.add_argument('out')
     r.add_argument('--core', action='store_true', help='VM 핵심 지표만 (profiles/analysis/vm_core.yaml)')
     b = sub.add_parser('build'); b.add_argument('job')
@@ -43,7 +45,7 @@ def main(argv=None):
                 'profiles/analysis/vm_core.yaml' if a.core else None, split_dir=a.split,
                 roles=a.roles, include_unassigned=not a.no_unassigned,
                 palette=a.palette, chart_width_cm=a.chart_width, workers=a.workers, selection=a.selection,
-                to_gb=a.to_gb, to_gbps=a.to_gbps)
+                to_gb=a.to_gb, to_gbps=a.to_gbps, tat_baseline=a.tat_baseline, tat_baseline_note=a.tat_baseline_note)
     elif a.cmd == 'split':
         from .build import run_csv
         run_csv(a.cases, a.data, split_dir=a.out, report=False)

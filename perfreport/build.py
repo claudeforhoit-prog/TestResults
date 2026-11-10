@@ -13,6 +13,7 @@ import pandas as pd
 import yaml
 
 from . import analyze, charts, ingest, report_case, report_docx, report_html, runwin, units
+from . import jobs as jobs_mod
 from . import phase as phase_mod
 from . import metrics as metrics_mod
 from . import palette as palette_mod
@@ -192,9 +193,10 @@ def _file_matches(ix, case):
     return True
 
 
-def scan_sources(cases_csv, data_dir, log=print, phase_out=None):
+def scan_sources(cases_csv, data_dir, log=print, phase_out=None, tat_out=None, unknown_out=None):
     """케이스 정보와 데이터 폴더를 읽어 (케이스 목록, 입력 프로파일, 읽을 수 있는 파일, 파일 색인) 을 돌려준다.
-    phase 소요 시간 CSV(phase.py)는 지표 파일이 아니라 phase_out 목록에 넣는다."""
+    phase 소요 시간 CSV(phase.py)와 잡 TAT 원장 CSV(jobs.py)는 지표 파일이 아니라 phase_out · tat_out 목록에 넣는다.
+    형식을 알 수 없는 파일은 리포트에 쓰지 않고 unknown_out 목록에 넣는다(TC 정리에서 시각 · VM 이름으로 잘라 etc 로 저장)."""
     cases = cases_from_csv(cases_csv)
     profiles = load_profiles(os.path.join(APP_DIR, 'profiles', 'inputs'))
     files = []
@@ -209,12 +211,19 @@ def scan_sources(cases_csv, data_dir, log=print, phase_out=None):
                 phase_out.append(f)
             log(f'[데이터] {os.path.relpath(f, data_dir)} → phase 소요 시간 CSV')
             continue
+        if jobs_mod.is_tat_csv(f):
+            if tat_out is not None:
+                tat_out.append(f)
+            log(f'[데이터] {os.path.relpath(f, data_dir)} → 잡 TAT 원장 CSV')
+            continue
         prof = ingest.detect_profile(f, profiles)
         if prof:
             srcs.append({'profile': prof, 'path': f})
             log(f'[데이터] {os.path.relpath(f, data_dir)} → {profiles[prof].get("source_system", prof)}')
         else:
-            log(f'[건너뜀] {os.path.relpath(f, data_dir)}: 아는 형식이 아님')
+            if unknown_out is not None:
+                unknown_out.append(f)
+            log(f'[건너뜀] {os.path.relpath(f, data_dir)}: 아는 형식이 아님 (리포트에 쓰지 않음, TC 정리에서는 시각 · VM 이름이 있는 줄을 etc 로 저장)')
     if not srcs:
         raise SystemExit(f'데이터 폴더에서 읽을 수 있는 파일이 없음: {data_dir}')
     return cases, profiles, srcs, file_index(srcs, profiles, log)
@@ -282,15 +291,18 @@ def default_workers():
 
 def run_csv(cases_csv, data_dir, out_dir=None, title=None, baseline=None, analysis=None, log=print,
             split_dir=None, report=True, margin_s=None, roles=None, include_unassigned=True,
-            palette=None, chart_width_cm=None, workers=None, selection=None, to_gb=False, to_gbps=False):
+            palette=None, chart_width_cm=None, workers=None, selection=None, to_gb=False, to_gbps=False,
+            tat_baseline=None, tat_baseline_note=''):
     """케이스 정보 CSV + 데이터 폴더 방식. 데이터 폴더의 모든 파일을 읽어 케이스마다 호스트·잡 실행 구간으로 잘라 쓴다.
     roles: 지표 역할 {지표: (역할, 순서)} 또는 역할 파일 경로. 없으면 기본 리포트 양식.
     palette: 케이스 문서 그래프의 색상 팔레트(1부터 센 번호 또는 이름, 기본 1 파랑 계열).
     chart_width_cm: 케이스 문서 안 그래프 폭(cm, 기본 16.5). workers: 그래프를 나눠 그릴 프로세스 수(기본 자동).
     selection: HTML '선택 내보내기' 파일. 주면 그 파일의 케이스 · VM · 지표만으로 만든다.
-    to_gb · to_gbps: 크기 단위를 GB 로, 네트워크 속도를 Gbps 로 바꾼다(기본은 원래 단위 그대로, units.py)."""
-    phase_files = []
-    cases, profiles, srcs, index = scan_sources(cases_csv, data_dir, log, phase_out=phase_files)
+    to_gb · to_gbps: 크기 단위를 GB 로, 네트워크 속도를 Gbps 로 바꾼다(기본은 원래 단위 그대로, units.py).
+    tat_baseline · tat_baseline_note: TAT 비교 기준값(초)과 그 설명. 주면 문서 · HTML 에 저하율을 적는다."""
+    phase_files, tat_files, unknown_files = [], [], []
+    cases, profiles, srcs, index = scan_sources(cases_csv, data_dir, log, phase_out=phase_files, tat_out=tat_files,
+                                                unknown_out=unknown_files)
     sel = load_selection(selection) if selection else None
     if sel:
         known = {c['id'] for c in cases}
@@ -334,10 +346,14 @@ def run_csv(cases_csv, data_dir, out_dir=None, title=None, baseline=None, analys
         c['collection_issues'], checks[c['id']] = runwin.check_collection(cdf, c)
         c['collection_check'] = checks[c['id']]
         log(f'[수집 점검] {c["id"]}: ' + checks[c['id']].replace('\n', ' / '))
-        if split_dir:            # TC 별 정리: 원본에서 이 TC 의 VM · 구간(앞뒤 여유 포함) 행만 잘라 저장
-            runwin.split_case(c, c['sources'], profiles, set(cdf['entity']), split_dir, data_dir, log)
-    if report and phase_files:   # phase 소요 시간: 잡 시작 시각(과 Hostname)으로 케이스에 연결
+    if phase_files:              # phase 소요 시간: 잡 시작 시각(과 Hostname)으로 케이스에 연결
         phase_mod.assign(cases, phase_mod.read_all(phase_files), log)
+    if tat_files:                # 잡 TAT 원장: TAT 측정 잡 · 동시 실행 잡을 기록 내용으로 구분해 케이스에 연결
+        jobs_mod.assign(cases, jobs_mod.read_all(tat_files), log)
+    if split_dir:                # TC 별 정리: 원본에서 이 TC 의 VM · 구간(앞뒤 여유 포함) 행만 잘라 종류별 이름으로 저장
+        for c in cases:
+            runwin.split_case(c, c['sources'], profiles, set(c['_loaded'][0]['entity']), split_dir, data_dir, log,
+                              extra=[('tat', c.get('_job_rows')), ('phase', c.get('_phase_rows'))], unknown=unknown_files)
     if not report:
         return {'cases': [c['id'] for c in cases], 'checks': checks,
                 'windows': {c['id']: [str(c['start']), str(c['end']), bool(c.get('end_auto'))] for c in cases}}
@@ -348,11 +364,13 @@ def run_csv(cases_csv, data_dir, out_dir=None, title=None, baseline=None, analys
            'roles': roles or {}, 'include_unassigned': include_unassigned,
            'palette': palette_mod.palette_index(palette), 'chart_width_cm': chart_width_cm, 'workers': workers,
            'selection': sel, 'to_gb': bool(to_gb), 'to_gbps': bool(to_gbps),
+           'tat_base': ({'value': float(tat_baseline), 'note': (tat_baseline_note or '').strip()}
+                        if tat_baseline not in (None, '') and float(tat_baseline) > 0 else None),
            'output': out_dir or os.path.join(os.path.dirname(os.path.abspath(cases_csv)), 'out_' + name)}
     return run_job(job, os.path.dirname(os.path.abspath(cases_csv)), log)
 
 
-def _build_docs(cases, meta, df, outdir, date, log, roles, include_unassigned, pal, width_cm, pool):
+def _build_docs(cases, meta, df, outdir, date, log, roles, include_unassigned, pal, width_cm, pool, tat_base=None):
     """케이스마다 docx 1개. 반환: [(저장한 경로, 그래프 수, 문서 글자)]."""
     out = []
     for c in cases:
@@ -367,7 +385,8 @@ def _build_docs(cases, meta, df, outdir, date, log, roles, include_unassigned, p
                                               'collection_check': c.get('collection_check', '')},
                                       df[df['case'] == c['id']], os.path.join(outdir, 'charts', _safe(c['id'])), date, log,
                                       roles=roles, include_unassigned=include_unassigned,
-                                      palette=pal, chart_width_cm=width_cm, pool=pool, phase=c.get('phase'))
+                                      palette=pal, chart_width_cm=width_cm, pool=pool, phase=c.get('phase'),
+                                      jobs=c.get('jobs'), tat_base=tat_base)
         out.append((dpath, k, text))
         log(f'[문서] {c["id"]}: 그래프 {k}장')
     return out
@@ -473,7 +492,7 @@ def run_job(job, base, log=print):
     log(f'[문서] 그래프 색 계열 {palette_mod.PALETTES[pal][0]} · 그래프 폭 {float(width_cm):g} cm'
         + (f' · 그래프를 {workers}개 프로세스로 나눠 그림' if pool.active else ''))
     try:
-        built = _build_docs(cases, meta, df, outdir, date, log, roles, include_unassigned, pal, width_cm, pool)
+        built = _build_docs(cases, meta, df, outdir, date, log, roles, include_unassigned, pal, width_cm, pool, job.get('tat_base'))
     finally:
         pool.close()
     for dpath, k, text in built:
@@ -507,7 +526,9 @@ def run_job(job, base, log=print):
                'metrics': [{'name': m, 'unit': gunits.get(m, '')} for m in gmetrics],
                'role_order': role_order, 'case_start': case_start, 'colors': colors,
                'metric_roles': {m: v for m, v in roles.items() if m in gset},
-               'phases': {c['id']: c['phase'] for c in cases if c.get('phase') and c['id'] in ids}}
+               'phases': {c['id']: c['phase'] for c in cases if c.get('phase') and c['id'] in ids},
+               'jobs': {c['id']: c['jobs'] for c in cases if c.get('jobs') and c['id'] in ids},
+               'tat_base': job.get('tat_base')}
         fname = re.sub(r'[\\/:*?"<>|]+', '_', g).strip() if g else _safe(job.get('name', 'report'))
         htmls.append(report_html.build(os.path.join(outdir, f'{fname}.html'), ctx, sub, gcmp))
         if g:
@@ -523,6 +544,10 @@ def run_job(job, base, log=print):
            'palette': palette_mod.PALETTES[pal][0], 'chart_width_cm': float(width_cm),
            'phase': {c['id']: {'jobs': c['phase']['jobs'], 'stages': len(c['phase']['stages']), 'total_s': c['phase']['total']}
                      for c in cases if c.get('phase')},
+           'jobs': {c['id']: {'tat_job': (c['jobs']['main'] or {}).get('code'), 'tat_s': (c['jobs']['main'] or {}).get('tat'),
+                              'concurrent': [[g['label'], g['sets'], g['sets_in_window']] for g in c['jobs']['conc']]}
+                    for c in cases if c.get('jobs')},
+           'tat_baseline': job.get('tat_base'),
            'unit_conversion': {'to_gb': bool(job.get('to_gb')), 'to_gbps': bool(job.get('to_gbps')), 'renamed': renamed},
            'selection': (job.get('selection') or {}).get('name', '')}
     if roles:                                                   # 어떤 역할 지정으로 만들었는지 결과 폴더에 남긴다

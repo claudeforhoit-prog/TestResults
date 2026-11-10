@@ -8,6 +8,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
 from . import palette as P
+from . import settings as settings_mod
 from . import roles as R
 from .metrics import ROLE_DESC
 
@@ -194,7 +195,7 @@ def role_editor(root, names, roles, on_ok):
 def build(root):
     """기본 창을 구성한다. 반환: 입력 값과 동작 함수(창 없이 시험할 때 쓴다)."""
     root.title('성능 리포트 생성기')
-    root.geometry('860x820')
+    root.geometry('860x850')
     v = {k: tk.StringVar() for k in ('cases', 'data', 'out', 'split', 'title', 'baseline', 'selection')}
     core = tk.BooleanVar(value=False)
     include_un = tk.BooleanVar(value=True)
@@ -203,6 +204,9 @@ def build(root):
     width_var = tk.StringVar(value='16.5')
     to_gb = tk.BooleanVar(value=False)      # 단위 변환: 기본은 원래 단위 그대로
     to_gbps = tk.BooleanVar(value=False)
+    saved = settings_mod.load()             # TAT 비교 기준값과 설명: 바꿀 때까지 저장해 둔다
+    tat_base = tk.StringVar(value=str(saved.get('tat_baseline', '')))
+    tat_note = tk.StringVar(value=str(saved.get('tat_baseline_note', '')))
     q = queue.Queue()
     last = {}
     state = {'roles': {}}   # 확인을 누른 지표 역할 {지표: (역할, 순서)}
@@ -263,6 +267,14 @@ def build(root):
     uf.grid(row=17, column=1, sticky='w')
     tk.Checkbutton(uf, text='크기를 GB 로 (KB · MB · Bytes → GB)', variable=to_gb).pack(side='left')
     tk.Checkbutton(uf, text='네트워크 속도를 Gbps 로 (KBps · Mbps → Gbps)', variable=to_gbps).pack(side='left', padx=12)
+    tk.Label(frm, text='TAT 비교 기준 (선택)', anchor='w', width=16).grid(row=18, column=0, sticky='w', pady=3)
+    bf = tk.Frame(frm)
+    bf.grid(row=18, column=1, sticky='we')
+    tk.Entry(bf, textvariable=tat_base, width=12).pack(side='left')
+    tk.Label(bf, text='초 · 설명').pack(side='left', padx=(4, 4))
+    tk.Entry(bf, textvariable=tat_note, width=42).pack(side='left', fill='x', expand=True)
+    tk.Label(frm, text='잡 TAT 원장이 있을 때 문서 · HTML 에 저하율을 적는다. 비우면 넣지 않는다. 값과 설명은 바꿀 때까지 저장된다',
+             fg='#77766f', anchor='w').grid(row=19, column=1, sticky='w')
 
     btns = tk.Frame(root, padx=12)
     btns.pack(fill='x')
@@ -320,12 +332,21 @@ def build(root):
         except ValueError:
             messagebox.showwarning('입력', '그래프 폭은 숫자(cm)로 적으십시오. 예: 16.5')
             return
+        base_txt = tat_base.get().strip().replace(',', '')
+        try:
+            base = float(base_txt) if base_txt else None
+            if base is not None and base <= 0:
+                raise ValueError
+        except ValueError:
+            messagebox.showwarning('입력', 'TAT 비교 기준은 0 보다 큰 숫자(초)로 적으십시오. 쓰지 않으려면 비웁니다. 예: 21721.65')
+            return
+        settings_mod.save({'tat_baseline': base_txt, 'tat_baseline_note': tat_note.get().strip()})
         kw = dict(cases_csv=v['cases'].get(), data_dir=v['data'].get(), out_dir=v['out'].get() or None,
                   title=v['title'].get() or None, baseline=v['baseline'].get() or None,
                   analysis=CORE_PROFILE if core.get() else None, split_dir=v['split'].get() or None,
                   roles=dict(state['roles']) or None, include_unassigned=include_un.get(),
                   palette=pal_var.get(), chart_width_cm=width, selection=v['selection'].get() or None,
-                  to_gb=to_gb.get(), to_gbps=to_gbps.get())
+                  to_gb=to_gb.get(), to_gbps=to_gbps.get(), tat_baseline=base, tat_baseline_note=tat_note.get().strip())
         run_btn.config(state='disabled')
         log.insert('end', f'── 시작: {kw["cases_csv"]}\n── 지표 역할: {R.summary(state["roles"])}\n')
         threading.Thread(target=worker, args=(kw,), daemon=True).start()
@@ -374,7 +395,7 @@ def build(root):
     role_btn.config(command=open_roles)
     root.after(200, poll)
     return {'v': v, 'core': core, 'include_un': include_un, 'role_sum': role_sum, 'state': state, 'last': last,
-            'pal_var': pal_var, 'width_var': width_var, 'to_gb': to_gb, 'to_gbps': to_gbps,
+            'pal_var': pal_var, 'width_var': width_var, 'to_gb': to_gb, 'to_gbps': to_gbps, 'tat_base': tat_base, 'tat_note': tat_note,
             'set_roles': set_roles, 'open_roles': open_roles, 'start': start, 'log': log,
             'role_btn': role_btn, 'run_btn': run_btn, 'un_chk': un_chk}
 
