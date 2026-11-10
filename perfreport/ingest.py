@@ -106,6 +106,8 @@ def named_after_host(entity, host):
     """VM 이름이 호스트 이름으로 시작하는지(예: 호스트 esx01 → esx01-vm01, node7 → node7app01).
     호스트 이름 뒤에 같은 종류의 글자가 이어지면 다른 호스트로 본다: esx1 과 esx10-vm01 처럼 숫자 뒤에 숫자가 이어지는 경우."""
     e, h = str(entity).strip().lower(), str(host).strip().lower()
+    if h and not e.startswith(h) and '.' in h:     # 호스트 이름을 도메인까지 적었으면(esx01.corp.local) 짧은 이름(esx01)으로 본다
+        h = h.split('.', 1)[0]
     if not h or not e.startswith(h):
         return False
     if len(e) == len(h):
