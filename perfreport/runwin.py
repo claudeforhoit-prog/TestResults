@@ -5,6 +5,7 @@
   시작한 시각을 종료 시각으로 쓴다. CPU 사용률은 그 케이스 VM 들의 같은 분 값 중 최댓값을 5분 이동 중앙값으로 고른다.
   기준값은 IDLE_PCT 와 실행 중 p95 의 IDLE_REL 중 큰 값이다. 잡 시작 직후 MIN_RUN_S 동안은 판정하지 않는다.
 """
+import fnmatch
 import os
 import re
 import shutil
@@ -34,9 +35,54 @@ def cpu_metric(df):
     return None
 
 
-def detect_end(df, start):
-    """반환: (종료 시각 또는 None, 설명).
-    신호 = 케이스 VM 들의 같은 분(minute) CPU 사용률 최댓값을 5분 이동 중앙값으로 고른 값.
+def ref_patterns(text):
+    """종료 기준 VM 이름 · 패턴 목록 (; 또는 , 로 구분, 대소문자 무시)."""
+    return [p.strip().lower() for p in re.split(r'[;,]', str(text or '')) if p.strip()]
+
+
+def detect_end(df, start, refs=None, tat_jobs=None):
+    """종료 시각 자동 감지. 반환: (종료 시각 또는 None, 설명).
+    refs: 종료 기준 VM 이름 · 패턴. 주면 그 VM 들만 본다(여러 대면 가장 늦게 끝난 VM 기준). 없으면 케이스의 모든 VM.
+    tat_jobs: 잡 TAT 원장의 잡(jobs.read_all). 기준 VM 에서 잡 시작 앞뒤 10분 안에 시작한 세트의 마지막 잡 종료 시각 가운데
+      가장 늦은 시각을 종료 시각으로 쓴다. TAT 원장에 기준 VM 의 잡이 없으면 CPU 사용률로 정한다(_cpu_end).
+    CPU 판단도 기준 VM 만 본다: 기준 VM 들의 같은 분 CPU 사용률 최댓값이 기준값 아래로 10분 이상 이어지기 시작한 분
+      (= 기준 VM 가운데 가장 늦게 끝난 VM 이 유휴가 된 시각)."""
+    notes, who = [], '케이스 VM'
+    if refs:
+        ents = sorted(set(df['entity'].astype(str)))
+        pick = [e for e in ents if any(fnmatch.fnmatchcase(e.lower(), p) for p in refs)]
+        if pick:
+            df = df[df['entity'].isin(pick)]
+            who = '기준 VM ' + ', '.join(pick)
+        else:
+            notes.append(f'종료 기준 VM({"; ".join(refs)})이 데이터에 없어 케이스의 모든 VM 으로 판단')
+    cpu_end, cpu_why = _cpu_end(df, start)
+    tat_end, tat_host = None, ''
+    if tat_jobs:
+        names = {str(e).lower().split('.')[0] for e in df['entity'].unique()}
+        near = [j for j in tat_jobs if j['host'].lower().split('.')[0] in names
+                and abs((j['start'] - pd.Timestamp(start)).total_seconds()) <= 600]
+        by_host = {}
+        for j in sorted(near, key=lambda j: j['start']):
+            first = by_host.setdefault(j['host'], [])
+            if not first or (j['start'] - first[0]['start']).total_seconds() <= 10:      # 그 VM 에서 처음 시작한 세트
+                first.append(j)
+        for h, js in by_host.items():
+            e = max(j['end'] for j in js)
+            if tat_end is None or e > tat_end:
+                tat_end, tat_host = e, h
+    tail = (' · ' + ' · '.join(notes)) if notes else ''
+    if tat_end is not None:
+        return tat_end, (f'잡 TAT 원장: {who} 에서 잡 시작 때 시작한 잡 가운데 가장 늦게 끝난 잡({tat_host})의 종료 시각'
+                         + (f' · CPU 사용률 기준 유휴 시작 {cpu_end:%Y-%m-%d %H:%M:%S}' if cpu_end is not None else '') + tail)
+    if cpu_end is not None:
+        return cpu_end, f'{who} 의 {cpu_why}' + tail
+    return None, cpu_why + tail
+
+
+def _cpu_end(df, start):
+    """CPU 사용률로 종료 시각 판단. 반환: (종료 시각 또는 None, 설명).
+    신호 = VM 들의 같은 분(minute) CPU 사용률 최댓값을 5분 이동 중앙값으로 고른 값.
     기준값 = max(IDLE_PCT, 신호 p95 의 IDLE_REL). 신호가 기준값 미만으로 IDLE_MIN_S 이상 이어지기 시작한 분을 종료 시각으로 쓴다."""
     m = cpu_metric(df)
     if not m:

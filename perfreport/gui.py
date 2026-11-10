@@ -195,7 +195,7 @@ def role_editor(root, names, roles, on_ok):
 def build(root):
     """기본 창을 구성한다. 반환: 입력 값과 동작 함수(창 없이 시험할 때 쓴다)."""
     root.title('성능 리포트 생성기')
-    root.geometry('860x850')
+    root.geometry('860x890')
     v = {k: tk.StringVar() for k in ('cases', 'data', 'out', 'split', 'title', 'baseline', 'selection')}
     core = tk.BooleanVar(value=False)
     include_un = tk.BooleanVar(value=True)
@@ -207,6 +207,7 @@ def build(root):
     saved = settings_mod.load()             # TAT 비교 기준값과 설명: 바꿀 때까지 저장해 둔다
     tat_base = tk.StringVar(value=str(saved.get('tat_baseline', '')))
     tat_note = tk.StringVar(value=str(saved.get('tat_baseline_note', '')))
+    end_refs = tk.StringVar(value=str(saved.get('end_ref_vms', '')))      # 종료 기준 VM: 바꿀 때까지 저장
     q = queue.Queue()
     last = {}
     state = {'roles': {}}   # 확인을 누른 지표 역할 {지표: (역할, 순서)}
@@ -275,6 +276,11 @@ def build(root):
     tk.Entry(bf, textvariable=tat_note, width=42).pack(side='left', fill='x', expand=True)
     tk.Label(frm, text='잡 TAT 원장이 있을 때 문서 · HTML 에 저하율을 적는다. 비우면 넣지 않는다. 값과 설명은 바꿀 때까지 저장된다',
              fg='#77766f', anchor='w').grid(row=19, column=1, sticky='w')
+    tk.Label(frm, text='종료 기준 VM (선택)', anchor='w', width=16).grid(row=20, column=0, sticky='w', pady=3)
+    tk.Entry(frm, textvariable=end_refs).grid(row=20, column=1, sticky='we')
+    tk.Label(frm, text='잡 종료 시각을 비운 케이스에서 이 VM 들의 잡 종료(TAT 로그)와 CPU 사용률로 종료 시각을 정한다. 여러 대면 가장 늦게 끝난 VM 기준. '
+                       '이름 · 패턴을 ; 로 구분 (예: *app01;*app02). 비우면 케이스의 모든 VM',
+             fg='#77766f', anchor='w', justify='left', wraplength=640).grid(row=21, column=1, sticky='w')
 
     btns = tk.Frame(root, padx=12)
     btns.pack(fill='x')
@@ -340,13 +346,14 @@ def build(root):
         except ValueError:
             messagebox.showwarning('입력', 'TAT 비교 기준은 0 보다 큰 숫자(초)로 적으십시오. 쓰지 않으려면 비웁니다. 예: 21721.65')
             return
-        settings_mod.save({'tat_baseline': base_txt, 'tat_baseline_note': tat_note.get().strip()})
+        settings_mod.save({'tat_baseline': base_txt, 'tat_baseline_note': tat_note.get().strip(), 'end_ref_vms': end_refs.get().strip()})
         kw = dict(cases_csv=v['cases'].get(), data_dir=v['data'].get(), out_dir=v['out'].get() or None,
                   title=v['title'].get() or None, baseline=v['baseline'].get() or None,
                   analysis=CORE_PROFILE if core.get() else None, split_dir=v['split'].get() or None,
                   roles=dict(state['roles']) or None, include_unassigned=include_un.get(),
                   palette=pal_var.get(), chart_width_cm=width, selection=v['selection'].get() or None,
-                  to_gb=to_gb.get(), to_gbps=to_gbps.get(), tat_baseline=base, tat_baseline_note=tat_note.get().strip())
+                  to_gb=to_gb.get(), to_gbps=to_gbps.get(), tat_baseline=base, tat_baseline_note=tat_note.get().strip(),
+                  end_ref_vms=end_refs.get().strip())
         run_btn.config(state='disabled')
         log.insert('end', f'── 시작: {kw["cases_csv"]}\n── 지표 역할: {R.summary(state["roles"])}\n')
         threading.Thread(target=worker, args=(kw,), daemon=True).start()
@@ -396,6 +403,7 @@ def build(root):
     root.after(200, poll)
     return {'v': v, 'core': core, 'include_un': include_un, 'role_sum': role_sum, 'state': state, 'last': last,
             'pal_var': pal_var, 'width_var': width_var, 'to_gb': to_gb, 'to_gbps': to_gbps, 'tat_base': tat_base, 'tat_note': tat_note,
+            'end_refs': end_refs,
             'set_roles': set_roles, 'open_roles': open_roles, 'start': start, 'log': log,
             'role_btn': role_btn, 'run_btn': run_btn, 'un_chk': un_chk}
 

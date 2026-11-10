@@ -70,6 +70,7 @@ CASE_COLUMNS = {
     'end': ['잡 종료 시각', '종료 시각', '종료', 'end', 'job_end'],
     'vms': ['VM', 'VM 이름', '대상 VM', 'vms', 'vm'],          # 선택: VM 이름 또는 패턴 (; 로 구분)
     'group': ['테스트 그룹', '테스트그룹', '그룹', 'group', 'test group'],   # 선택: 그룹마다 HTML 1개
+    'end_refs': ['종료 기준 VM', '기준 VM', 'end_ref_vm', 'end ref vm'],     # 선택: 종료 시각을 비웠을 때 판단할 VM (; 로 구분)
 }
 
 
@@ -131,7 +132,8 @@ def cases_from_csv(path):
         cases.append({'id': cid, 'label': r[col['label']].strip() if col['label'] else '',
                       'host': r[col['host']].strip(), 'start': st, 'end': en, 'end_auto': auto,
                       'vms': r[col['vms']].strip() if col['vms'] else '',
-                      'group': r[col['group']].strip() if col['group'] else ''})
+                      'group': r[col['group']].strip() if col['group'] else '',
+                      'end_refs': r[col['end_refs']].strip() if col['end_refs'] else ''})
     if errs:
         raise SystemExit('케이스 정보 파일 오류\n  ' + '\n  '.join(errs))
     ids = [c['id'] for c in cases]
@@ -292,14 +294,15 @@ def default_workers():
 def run_csv(cases_csv, data_dir, out_dir=None, title=None, baseline=None, analysis=None, log=print,
             split_dir=None, report=True, margin_s=None, roles=None, include_unassigned=True,
             palette=None, chart_width_cm=None, workers=None, selection=None, to_gb=False, to_gbps=False,
-            tat_baseline=None, tat_baseline_note=''):
+            tat_baseline=None, tat_baseline_note='', end_ref_vms=''):
     """케이스 정보 CSV + 데이터 폴더 방식. 데이터 폴더의 모든 파일을 읽어 케이스마다 호스트·잡 실행 구간으로 잘라 쓴다.
     roles: 지표 역할 {지표: (역할, 순서)} 또는 역할 파일 경로. 없으면 기본 리포트 양식.
     palette: 케이스 문서 그래프의 색상 팔레트(1부터 센 번호 또는 이름, 기본 1 파랑 계열).
     chart_width_cm: 케이스 문서 안 그래프 폭(cm, 기본 16.5). workers: 그래프를 나눠 그릴 프로세스 수(기본 자동).
     selection: HTML '선택 내보내기' 파일. 주면 그 파일의 케이스 · VM · 지표만으로 만든다.
     to_gb · to_gbps: 크기 단위를 GB 로, 네트워크 속도를 Gbps 로 바꾼다(기본은 원래 단위 그대로, units.py).
-    tat_baseline · tat_baseline_note: TAT 비교 기준값(초)과 그 설명. 주면 문서 · HTML 에 저하율을 적는다."""
+    tat_baseline · tat_baseline_note: TAT 비교 기준값(초)과 그 설명. 주면 문서 · HTML 에 저하율을 적는다.
+    end_ref_vms: 종료 시각을 비운 케이스에서 종료를 판단할 VM 이름 · 패턴(; 로 구분). 케이스 정보의 '종료 기준 VM' 열이 있으면 그 값이 먼저다."""
     phase_files, tat_files, unknown_files = [], [], []
     cases, profiles, srcs, index = scan_sources(cases_csv, data_dir, log, phase_out=phase_files, tat_out=tat_files,
                                                 unknown_out=unknown_files)
@@ -317,6 +320,7 @@ def run_csv(cases_csv, data_dir, out_dir=None, title=None, baseline=None, analys
     if isinstance(roles, str) and roles:
         roles = roles_mod.load(roles)
     margin_s = runwin.MARGIN_S if margin_s is None else margin_s
+    tat_jobs = jobs_mod.read_all(tat_files) if tat_files else []
     for c in cases:
         c['margin_s'] = margin_s
         if c.get('end_auto'):    # 종료 시각 자동 감지: 잡 시작 후 72시간 또는 같은 호스트 다음 케이스 시작 전까지에서 찾는다
@@ -327,7 +331,8 @@ def run_csv(cases_csv, data_dir, out_dir=None, title=None, baseline=None, analys
             if not probe['sources']:
                 raise SystemExit(f'{c["id"]}: 잡 시작 이후 데이터 파일이 없어 종료 시각을 감지하지 못함')
             pdf, _, _ = ingest.load_case(probe, profiles)
-            end, why = runwin.detect_end(pdf, c['start'])
+            refs = runwin.ref_patterns(c.get('end_refs') or end_ref_vms)
+            end, why = runwin.detect_end(pdf, c['start'], refs=refs, tat_jobs=tat_jobs)
             if end is None:
                 raise SystemExit(f'{c["id"]}: 종료 시각 자동 감지 실패 ({why}). 케이스 정보에 잡 종료 시각을 적는다.')
             c['end'], c['end_reason'] = end, why
@@ -348,8 +353,8 @@ def run_csv(cases_csv, data_dir, out_dir=None, title=None, baseline=None, analys
         log(f'[수집 점검] {c["id"]}: ' + checks[c['id']].replace('\n', ' / '))
     if phase_files:              # phase 소요 시간: 잡 시작 시각(과 Hostname)으로 케이스에 연결
         phase_mod.assign(cases, phase_mod.read_all(phase_files), log)
-    if tat_files:                # 잡 TAT 원장: TAT 측정 잡 · 동시 실행 잡을 기록 내용으로 구분해 케이스에 연결
-        jobs_mod.assign(cases, jobs_mod.read_all(tat_files), log)
+    if tat_jobs:                 # 잡 TAT 원장: TAT 측정 잡 · 동시 실행 잡을 기록 내용으로 구분해 케이스에 연결
+        jobs_mod.assign(cases, tat_jobs, log)
     if split_dir:                # TC 별 정리: 원본에서 이 TC 의 VM · 구간(앞뒤 여유 포함) 행만 잘라 종류별 이름으로 저장
         for c in cases:
             runwin.split_case(c, c['sources'], profiles, set(c['_loaded'][0]['entity']), split_dir, data_dir, log,
