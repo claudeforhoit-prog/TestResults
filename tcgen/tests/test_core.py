@@ -212,6 +212,62 @@ class EntryTests(TmpDir):
         self.assertTrue(res["errors"])
 
 
+class AppliedTests(TmpDir):
+    """적용 체크: 체크한 케이스는 생성에서 빠지고, 저장 후 다시 불러와도 남는다."""
+
+    def test_applied_skipped(self):
+        cs = [case("A", "2026-11-20 00:00:00"), case("B", "2026-11-20 12:00:00"), case("C", "2026-11-21 00:00:00")]
+        cs[0]["applied"] = True
+        res = core.generate(cs, RUN, MON, self.settings, now=NOW)
+        self.assertEqual(res["errors"], [])
+        self.assertEqual(sorted(set(e["case"] for e in res["entries"])), ["B", "C"])
+        self.assertEqual(res["skipped"], 1)
+        self.assertNotIn(" # tcgen A ", core.hd_unescape(res["vm"]))
+        with open(self.settings["record_csv"], encoding="utf-8-sig") as f:
+            self.assertEqual([r[0] for r in list(csv.reader(f))[1:]], ["B", "C"])
+
+    def test_applied_row_still_sets_previous_stop(self):
+        cs = [case("A", "2026-11-20 00:00:00"), case("B", "2026-11-20 09:00:00")]
+        cs[1]["applied"] = True
+        res = core.generate(cs, RUN, MON, self.settings, now=NOW, write=False)
+        stops = [e for e in res["entries"] if e["case"] == "A" and e["kind"] == "모니터링 중지"]
+        self.assertTrue(stops)
+        self.assertTrue(all(e["when"] == dt.datetime(2026, 11, 20, 8, 50) for e in stops), "B 잡 시작 10분 전")
+
+    def test_duplicate_name_with_applied(self):
+        cs = [case("A", "2026-11-20 00:00:00"), case("A", "2026-11-20 12:00:00")]
+        cs[0]["applied"] = True
+        e = core.generate(cs, RUN, MON, self.settings, now=NOW, write=False)["errors"]
+        self.assertTrue(any("적용 체크한 행 포함" in x for x in e), e)
+
+    def test_all_applied(self):
+        cs = [case("A", "2026-11-20 00:00:00")]
+        cs[0]["applied"] = True
+        e = core.generate(cs, RUN, MON, self.settings, now=NOW, write=False)["errors"]
+        self.assertTrue(any("모든 케이스가 적용 체크" in x for x in e), e)
+
+    def test_cases_roundtrip_and_backup(self):
+        cs = [case("A", "2026-11-20 00:00:00"), case("B", "2026-11-20 12:00:00", stop_mode="none")]
+        cs[0]["applied"] = True
+        core.save_cases(self.base, cs)
+        got = core.load_cases(self.base)
+        self.assertEqual([c["name"] for c in got], ["A", "B"])
+        self.assertEqual([c["applied"] for c in got], [True, False])
+        self.assertEqual(got[1]["stop_mode"], "none")
+        self.assertEqual(got[0]["monitors"], cs[0]["monitors"])
+        with open(os.path.join(self.base, core.CASES_FILE), "w", encoding="utf-8") as f:
+            json.dump({"version": 1, "cases": [{"name": "X", "applied": 1, "monitors": [{"name": "m", "targets": ["PVM", "BAD"]}],
+                                                "stop_mode": "odd"}]}, f)
+        got = core.load_cases(self.base)
+        self.assertEqual(got[0]["applied"], True)
+        self.assertEqual(got[0]["monitors"], [{"name": "m", "targets": ["PVM"]}])
+        self.assertEqual(got[0]["stop_mode"], "auto")
+        self.assertEqual(got[0]["pvm_job"], "(없음)")
+        dest, copied = core.backup_settings(self.base, now=NOW)
+        self.assertIn(core.CASES_FILE, copied)
+        self.assertEqual(core.load_cases(os.path.join(self.base, "missing")), [])
+
+
 class RecordTests(TmpDir):
     def read(self, path, enc="utf-8-sig"):
         with open(path, encoding=enc, newline="") as f:

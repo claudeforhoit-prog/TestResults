@@ -200,6 +200,29 @@ def main():
     check(os.path.exists(rec) and os.path.exists(res["log"]), "테스트 기록 CSV, 로그 저장")
     shot(root, app, 3, "tcgen_tab4.png")
 
+    # 적용 체크: 적용 칸을 누르면 체크, 다시 누르면 해제. 체크한 케이스는 생성에서 빠지고 test_cases.json 에 저장
+    app.nb.select(2)
+    root.update()
+    tree = app.t_case.tree
+    x, y, w, h = tree.bbox("0", "#0")
+
+    def click_check():
+        tree.event_generate("<Button-1>", x=x + w // 2, y=y + h // 2)
+        root.update()
+
+    click_check()
+    check(app.cases[0]["applied"] is True, "적용 칸 클릭으로 체크")
+    check("applied" in tree.item("0", "tags"), "체크한 행은 회색 표시")
+    click_check()
+    check(app.cases[0]["applied"] is False, "다시 누르면 체크 해제")
+    click_check()
+    app.generate()
+    res2 = app.result
+    made = set(e["case"] for e in res2["entries"]) if res2 else set()
+    check(res2 is not None and res2["skipped"] == 1 and "TC-base-a" not in made and made, "체크한 케이스는 생성에서 빠짐 %s" % sorted(made))
+    check("적용 체크로 뺀 케이스 1개" in app.res_text.get("1.0", "end"), "생성 결과에 뺀 케이스 수 표시")
+    check([c["applied"] for c in core.load_cases(BASE)] == [True, False, False], "체크 상태가 test_cases.json 에 저장됨")
+
     # 오류가 있으면 만들지 않음
     app.commit_case(1, "pvm_job", "(없음)")
     app.cases[1]["svm_job"] = "nojob"
@@ -210,7 +233,8 @@ def main():
     # 백업, 폴더 열기
     app.backup()
     bdir = os.path.join(BASE, "backup")
-    check(os.path.isdir(bdir) and len(os.listdir(os.path.join(bdir, os.listdir(bdir)[0]))) == 3, "설정 백업 3개 파일")
+    check(os.path.isdir(bdir) and len(os.listdir(os.path.join(bdir, os.listdir(bdir)[0]))) == 4,
+          "설정 백업 4개 파일 (테스트 케이스 표 포함)")
     app.open_settings_dir()
     app.open_case_dir()
     opened = [x[1] for x in LOG if x[0] == "open"]
@@ -228,6 +252,9 @@ def main():
     app2 = appmod.App(root2)
     check([r["name"] for r in app2.run_cmds] == ["job_a", "job_b4"] and len(app2.mon_cmds) == 2, "다시 실행 시 명령 목록 불러옴")
     check(app2.v_user.get() == "tester", "다시 실행 시 설정 불러옴")
+    check([c["name"] for c in app2.cases] == ["TC-base-a", "TC-base-a-r3"] and [c["applied"] for c in app2.cases] == [True, False],
+          "다시 실행 시 테스트 케이스 표와 적용 체크 불러옴")
+    check("applied" in app2.t_case.tree.item("0", "tags"), "다시 실행 시 체크한 행 회색 표시")
     root2.destroy()
     print("GUI smoke OK  base=%s" % BASE)
 

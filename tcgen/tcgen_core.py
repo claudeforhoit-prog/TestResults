@@ -35,6 +35,13 @@ NONE_JOB = "(없음)"
 SETTINGS_FILE = "settings.json"
 RUN_FILE = "run_commands.csv"
 MON_FILE = "monitor_commands.csv"
+CASES_FILE = "test_cases.json"       # 탭 3 테스트 케이스 표와 적용 체크 상태
+
+CASE_DEFAULTS = {
+    "applied": False,      # 적용 체크: 이미 등록한 케이스. [명령어 생성] 에서 빠진다
+    "name": "", "esx": "", "pvm": "", "svm": "", "pvm_job": "(없음)", "svm_job": "(없음)",
+    "interval": "", "start": "", "monitors": [], "stop_mode": "auto", "stop_time": "",
+}
 DEFAULT_CASE_DIR = "testcases"
 DEFAULT_RECORD = "test_record.csv"
 
@@ -161,13 +168,43 @@ def save_rows(path, fields, headers, rows):
     _atomic_write(path, buf.getvalue(), "utf-8-sig")
 
 
+def _clean_case(c):
+    d = {k: c.get(k, v) for k, v in CASE_DEFAULTS.items()}
+    for k in ("name", "esx", "pvm", "svm", "pvm_job", "svm_job", "interval", "start", "stop_mode", "stop_time"):
+        d[k] = "" if d[k] is None else str(d[k])
+    d["stop_mode"] = d["stop_mode"] if d["stop_mode"] in ("auto", "manual", "none") else "auto"
+    d["applied"] = bool(d["applied"])
+    mons = []
+    for m in d.get("monitors") or []:
+        if isinstance(m, dict) and m.get("name"):
+            mons.append({"name": str(m["name"]), "targets": [t for t in (m.get("targets") or []) if t in ("PVM", "SVM", "ESX")]})
+    d["monitors"] = mons
+    return d
+
+
+def load_cases(base):
+    """탭 3 테스트 케이스 표(적용 체크 포함)를 불러온다. 파일이 없으면 빈 목록."""
+    p = os.path.join(base, CASES_FILE)
+    if not os.path.exists(p):
+        return []
+    with open(p, encoding="utf-8-sig") as f:
+        data = json.load(f)
+    rows = data.get("cases", []) if isinstance(data, dict) else data
+    return [_clean_case(c) for c in rows if isinstance(c, dict)]
+
+
+def save_cases(base, cases):
+    data = {"version": 1, "cases": [_clean_case(c) for c in cases]}
+    _atomic_write(os.path.join(base, CASES_FILE), json.dumps(data, ensure_ascii=False, indent=1) + "\n", "utf-8")
+
+
 def backup_settings(base, now=None):
-    """설정 파일과 명령 목록을 <생성기 폴더>/backup/<년월일시분초>/ 에 복사한다. (폴더, 복사한 파일 목록) 반환."""
+    """설정 파일, 명령 목록, 테스트 케이스 표를 <생성기 폴더>/backup/<년월일시분초>/ 에 복사한다. (폴더, 복사한 파일 목록) 반환."""
     ts = (now or dt.datetime.now()).strftime("%Y%m%d%H%M%S")
     dest = os.path.join(base, "backup", ts)
     os.makedirs(dest, exist_ok=True)
     copied = []
-    for fn in (SETTINGS_FILE, RUN_FILE, MON_FILE):
+    for fn in (SETTINGS_FILE, RUN_FILE, MON_FILE, CASES_FILE):
         src = os.path.join(base, fn)
         if os.path.exists(src):
             shutil.copy2(src, os.path.join(dest, fn))
@@ -374,8 +411,8 @@ def build_entries(cases, run_cmds, mon_cmds, settings, now=None):
         return entries, errors, warnings, case_schedule(cases, mon_lead, stop_lead)
     run_by = {r["name"].strip(): r for r in run_cmds if (r.get("name") or "").strip()}
     mon_by = {m["name"].strip(): m for m in mon_cmds if (m.get("name") or "").strip()}
-    sched = case_schedule(cases, mon_lead, stop_lead)
-    seen = set()
+    sched = case_schedule(cases, mon_lead, stop_lead)    # 적용 체크한 행도 넣어 계산(윗줄 자동 중지 시각의 기준)
+    names = [(c.get("name") or "").strip() for c in cases]
     order = {"모니터링 시작": 0, "잡": 1, "모니터링 중지": 2}
     checked = set()
 
@@ -395,15 +432,17 @@ def build_entries(cases, run_cmds, mon_cmds, settings, now=None):
                             % (c["name"].strip(), host, name, kind, fmt_dt(t)))
 
     for i, c in enumerate(cases):
+        if c.get("applied"):
+            continue
         row = "%d행" % (i + 1)
-        name = (c.get("name") or "").strip()
+        name = names[i]
         if not NAME_RE.match(name):
             errors.append("%s: 케이스 이름은 영문, 숫자, . _ - 만 사용 ('%s')" % (row, name))
             continue
-        if name in seen:
-            errors.append("%s: 케이스 이름 중복 '%s'" % (row, name))
+        if names.count(name) > 1:
+            errors.append("%s: 케이스 이름 중복 '%s' (적용 체크한 행 포함). 같은 이름으로 생성하면 먼저 등록한 케이스의 "
+                          "crontab 줄이 지워지고 바뀜" % (row, name))
             continue
-        seen.add(name)
         s = sched[i]
         sel = selected_monitors(c)
         jobs = [(role, (c.get(key) or "").strip()) for role, key in (("PVM", "pvm_job"), ("SVM", "svm_job"))]
@@ -714,9 +753,13 @@ def generate(cases, run_cmds, mon_cmds, settings, now=None, write=True):
     res = {"errors": errors, "warnings": warnings, "entries": entries, "sched": sched,
            "vm": "", "esx": {}, "setup": setup_block(), "record": "", "log": "", "record_rows": 0,
            "record_missing": [], "gen_time": now}
+    res["skipped"] = sum(1 for c in cases if c.get("applied"))
     if errors or not entries:
         if not entries and not errors:
-            res["errors"] = ["등록할 줄이 없음. 케이스마다 잡이나 모니터링을 하나 이상 지정할 것"]
+            if cases and all(c.get("applied") for c in cases):
+                res["errors"] = ["모든 케이스가 적용 체크되어 있어 생성할 케이스가 없음. 새로 등록할 케이스는 적용 체크를 끌 것"]
+            else:
+                res["errors"] = ["등록할 줄이 없음. 적용 체크를 끈 케이스마다 잡이나 모니터링을 하나 이상 지정할 것"]
         return res
     res["vm"], res["esx"] = build_blocks(entries, settings)
     if write:

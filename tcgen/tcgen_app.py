@@ -56,6 +56,25 @@ def unique_name(base, used):
             return cand
 
 
+def make_check_images(root, scale):
+    """체크 칸 그림(켜짐, 꺼짐). 글꼴에 없는 기호를 쓰지 않으려고 점으로 그린다."""
+    n = max(12, int(round(14 * scale)))
+    off = tk.PhotoImage(master=root, width=n, height=n)
+    on = tk.PhotoImage(master=root, width=n, height=n)
+    off.put("#6b7480", to=(0, 0, n, n))
+    off.put("#ffffff", to=(1, 1, n - 1, n - 1))
+    on.put("#2f6fd1", to=(0, 0, n, n))
+    t = max(2, n // 6)
+    pts = [(0.18, 0.50), (0.42, 0.74), (0.82, 0.26)]
+    for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
+        steps = n * 3
+        for k in range(steps + 1):
+            x = int(round((x0 + (x1 - x0) * k / steps) * (n - 1))) - t // 2
+            y = int(round((y0 + (y1 - y0) * k / steps) * (n - 1))) - t // 2
+            on.put("#ffffff", to=(max(0, x), max(0, y), min(n, x + t), min(n, y + t)))
+    return on, off
+
+
 def next_hour():
     t = dt.datetime.now().replace(minute=0, second=0, microsecond=0) + dt.timedelta(hours=1)
     return core.fmt_dt(t)
@@ -65,17 +84,24 @@ def next_hour():
 class EditableTable(ttk.Frame):
     """Treeview 표. 칸을 두 번 누르거나 F2, Enter 로 그 칸을 고친다. Tab 으로 다음 칸."""
 
-    def __init__(self, master, app, columns, height=8):
+    def __init__(self, master, app, columns, height=8, check=None):
         ttk.Frame.__init__(self, master)
         self.app = app
         self.columns = columns
+        self.check = check           # 맨 앞 체크 열: dict(key, title, width, on, off, toggle) 또는 None
         self.rows = []
         self.display = None          # (i, key) -> 표시 문자열 또는 None
         self.on_commit = None        # (i, key, text) -> None
         self.before_refresh = None
         self.editor = None
         keys = [c["key"] for c in columns]
-        self.tree = ttk.Treeview(self, columns=keys, show="headings", height=height, selectmode="browse")
+        self.tree = ttk.Treeview(self, columns=keys, show=("tree headings" if check else "headings"), height=height,
+                                 selectmode="browse")
+        if check:
+            self.tree.heading("#0", text=check["title"], anchor="center")
+            self.tree.column("#0", width=app.px(check["width"]), minwidth=app.px(check["width"]), stretch=False,
+                             anchor="center")
+        self.tree.tag_configure("applied", foreground="#8a8f98")
         for c in columns:
             self.tree.heading(c["key"], text=c["title"], anchor="w")
             self.tree.column(c["key"], width=app.px(c["width"]), minwidth=app.px(40),
@@ -94,6 +120,28 @@ class EditableTable(ttk.Frame):
         self.tree.bind("<F2>", self._key_edit)
         for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
             self.tree.bind(seq, lambda e: self.finish_edit(), add="+")
+        if check:
+            self.tree.bind("<Button-1>", self._click_check, add="+")
+            self.tree.bind("<space>", self._space_check)
+
+    # 체크 열
+    def _click_check(self, ev):
+        try:
+            region = self.tree.identify_region(ev.x, ev.y)
+        except tk.TclError:
+            return None
+        iid = self.tree.identify_row(ev.y)
+        if region != "tree" or not iid:
+            return None
+        self.tree.selection_set(iid)
+        self.check["toggle"](int(iid))
+        return "break"
+
+    def _space_check(self, ev):
+        i = self.selected()
+        if i is not None:
+            self.check["toggle"](i)
+        return "break"
 
     # 표시
     def cell_text(self, i, key):
@@ -110,7 +158,11 @@ class EditableTable(ttk.Frame):
             self.before_refresh()
         self.tree.delete(*self.tree.get_children())
         for i in range(len(self.rows)):
-            self.tree.insert("", "end", iid=str(i), values=[self.cell_text(i, c["key"]) for c in self.columns])
+            kw = {}
+            if self.check:
+                on = bool(self.rows[i].get(self.check["key"]))
+                kw = {"image": self.check["on"] if on else self.check["off"], "text": "", "tags": ("applied",) if on else ()}
+            self.tree.insert("", "end", iid=str(i), values=[self.cell_text(i, c["key"]) for c in self.columns], **kw)
         if select is not None and self.rows:
             select = max(0, min(select, len(self.rows) - 1))
             self.tree.selection_set(str(select))
@@ -128,6 +180,11 @@ class EditableTable(ttk.Frame):
         except tk.TclError:
             region = "cell"
         iid, col = self.tree.identify_row(ev.y), self.tree.identify_column(ev.x)
+        if self.check and region == "tree":
+            # 빠른 두 번째 클릭은 Tk 가 더블클릭으로 처리하므로 여기서도 체크를 바꾼다(누를 때마다 바뀜)
+            if iid:
+                self.check["toggle"](int(iid))
+            return "break"
         if region != "cell" or not iid or not col:
             return None
         self.start_edit(int(iid), int(col.lstrip("#")) - 1)
@@ -270,10 +327,20 @@ class App(object):
         paths = core.resolve_paths(self.base, self.settings)
         self.run_cmds = core.load_rows(os.path.join(self.base, core.RUN_FILE), core.RUN_FIELDS, core.RUN_HEADERS)
         self.mon_cmds = core.load_rows(os.path.join(self.base, core.MON_FILE), core.MON_FIELDS, core.MON_HEADERS)
-        self.cases = []
+        self.load_msg = ""
+        try:
+            self.cases = core.load_cases(self.base)
+        except (OSError, ValueError) as e:
+            self.cases = []
+            bad = os.path.join(self.base, core.CASES_FILE)
+            keep = bad + ".bad-" + dt.datetime.now().strftime("%Y%m%d%H%M%S")
+            try:
+                os.replace(bad, keep)
+            except OSError:
+                keep = bad
+            self.load_msg = "%s 를 읽지 못해 빈 표로 시작함 (원래 파일: %s) %s" % (core.CASES_FILE, keep, e)
         self.sched = []
         self.dirty = {"settings": False, "run": False, "mon": False}
-        self.cases_changed = False
         self.result = None
         self.setup_style()
         self.v_record = tk.StringVar(value=paths["record_csv"])
@@ -287,6 +354,9 @@ class App(object):
         for v in (self.v_record, self.v_log, self.v_user, self.v_mon, self.v_stop):
             v.trace_add("write", self._settings_changed) if hasattr(v, "trace_add") else v.trace("w", self._settings_changed)
         self.update_status()
+        if self.load_msg:
+            self.v_status.set(self.load_msg)
+            messagebox.showwarning(TITLE, self.load_msg, parent=root)
         root.protocol("WM_DELETE_WINDOW", self.on_close)
 
     # ------------------------------------------------------------ 모양
@@ -315,12 +385,18 @@ class App(object):
         style = ttk.Style(self.root)
         line = base.metrics("linespace")
         style.configure("Treeview", rowheight=int(line * 1.45))
+        try:   # 일부 Tk 8.6 버전에서 행 글자색(tag)이 적용되지 않는 문제 회피
+            style.map("Treeview", foreground=[e for e in style.map("Treeview", query_opt="foreground")
+                                              if e[:2] != ("!disabled", "!selected")])
+        except tk.TclError:
+            pass
+        self.img_on, self.img_off = make_check_images(self.root, self.scale)
         style.configure("Hint.TLabel", foreground="#5b6470", font=self.small)
         style.configure("Ok.TLabel", foreground="#1e7b34", font=self.bold)
         style.configure("Bold.TLabel", font=self.bold)
 
     def hint(self, parent, text):
-        lb = ttk.Label(parent, text=text, style="Hint.TLabel", justify="left")
+        lb = ttk.Label(parent, text=text, style="Hint.TLabel", justify="left", wraplength=self.px(280))
         lb.bind("<Configure>", lambda e: lb.configure(wraplength=max(200, e.width - 10)))
         return lb
 
@@ -436,7 +512,9 @@ class App(object):
                 dict(key="monitors", title="모니터링", width=220, kind="popup", popup=self.edit_monitors, stretch=True),
                 dict(key="mon_start", title="모니터링 시작", width=105, kind="readonly"),
                 dict(key="mon_stop", title="모니터링 중지", width=150, kind="popup", popup=self.edit_stop)]
-        self.t_case = EditableTable(f, self, cols, height=8)
+        self.t_case = EditableTable(f, self, cols, height=8,
+                                    check=dict(key="applied", title="적용", width=48, on=self.img_on, off=self.img_off,
+                                               toggle=self.toggle_applied))
         self.t_case.rows = self.cases
         self.t_case.on_commit = self.commit_case
         self.t_case.display = self.case_display
@@ -533,6 +611,8 @@ class App(object):
         ld = self.leads() or (self.settings["mon_lead_min"], self.settings["stop_lead_min"])
         s = self.settings
         self.case_hint.configure(text=(
+            "적용 칸을 누르면(또는 Space) 체크된다. 체크한 케이스는 이미 등록한 것으로 보고 [명령어 생성] 에서 뺀다. "
+            "탭 3 의 표와 체크 상태는 바뀔 때마다 test_cases.json 에 저장되고 다음 실행 때 불러온다.\n"
             "칸을 두 번 누르면 고친다. ESX 호스트를 입력하면 PVM = 호스트+%s, SVM = 호스트+%s 가 자동 입력된다 (직접 수정 가능). "
             "잡 칸은 탭 1 의 명령어 명 중에서 고르고, (없음) 이면 모니터링만 등록한다.\n"
             "+ 케이스 추가: 선택한 줄을 복사해 아래에 넣는다. 간격은 그 줄 간격을 가져오고 잡 시작 = 윗줄 잡 시작 + 간격 (행마다 수정 가능). "
@@ -819,7 +899,19 @@ class App(object):
         return None
 
     def mark_cases(self):
-        self.cases_changed = True
+        """탭 3 이 바뀔 때마다 test_cases.json 에 저장한다(적용 체크 포함)."""
+        try:
+            core.save_cases(self.base, self.cases)
+        except OSError as e:
+            self.v_status.set("%s 저장 실패: %s" % (core.CASES_FILE, e))
+
+    def toggle_applied(self, i):
+        self.t_case.finish_edit()
+        if i >= len(self.cases):
+            return
+        self.cases[i]["applied"] = not self.cases[i].get("applied")
+        self.mark_cases()
+        self.t_case.refresh(i)
 
     def commit_case(self, i, key, text):
         c = self.cases[i]
@@ -860,7 +952,7 @@ class App(object):
         self.t_case.finish_edit()
         i = self.t_case.selected()
         if not self.cases:
-            row = {"name": "", "esx": "", "pvm": "", "svm": "", "pvm_job": NONE_JOB, "svm_job": NONE_JOB,
+            row = {"applied": False, "name": "", "esx": "", "pvm": "", "svm": "", "pvm_job": NONE_JOB, "svm_job": NONE_JOB,
                    "interval": "", "start": next_hour(), "monitors": [], "stop_mode": "auto", "stop_time": ""}
             self.cases.append(row)
             new = 0
@@ -869,6 +961,7 @@ class App(object):
             new = (len(self.cases) - 1 if i is None else i) + 1
             row = copy.deepcopy(src)
             row["name"] = unique_name(src.get("name", ""), set(c.get("name", "") for c in self.cases))
+            row["applied"] = False          # 새로 만든 케이스는 아직 등록 전
             if row.get("stop_mode") == "manual":
                 row["stop_mode"], row["stop_time"] = "auto", ""
             self.cases.insert(new, row)
@@ -1038,7 +1131,10 @@ class App(object):
         paths = core.resolve_paths(self.base, s)
         entries, errors, warnings, _ = core.build_entries(self.cases, self.run_cmds, self.mon_cmds, paths)
         if not errors and not entries:
-            errors = ["등록할 줄이 없음. 케이스마다 잡이나 모니터링을 하나 이상 지정할 것"]
+            if all(c.get("applied") for c in self.cases):
+                errors = ["모든 케이스가 적용 체크되어 있어 생성할 케이스가 없음. 새로 등록할 케이스는 적용 체크를 끌 것"]
+            else:
+                errors = ["등록할 줄이 없음. 적용 체크를 끈 케이스마다 잡이나 모니터링을 하나 이상 지정할 것"]
         if errors:
             self.show_messages("오류 %d건. 블록과 기록을 만들지 않았음. 고친 뒤 다시 생성할 것." % len(errors), errors, warnings)
             self.nb.select(3)
@@ -1059,7 +1155,6 @@ class App(object):
             self.show_messages("오류", res["errors"], res["warnings"])
             return
         self.result = res
-        self.cases_changed = False
         self.show_result(res)
         self.nb.select(3)
 
@@ -1087,6 +1182,8 @@ class App(object):
         t.insert("end", "생성 %s.  테스트 기록 CSV 에 %d행 추가: %s\n" % (core.fmt_dt(res["gen_time"]), res["record_rows"],
                                                                  res["record"]), "ok")
         t.insert("end", "로그: %s\n" % res["log"], "ok")
+        made = len(set(e["case"] for e in res["entries"]))
+        t.insert("end", "생성한 케이스 %d개, 적용 체크로 뺀 케이스 %d개\n" % (made, res.get("skipped", 0)))
         t.insert("end", "VM %d대: %s\n" % (len(vm_cnt), ", ".join("%s %d줄" % kv for kv in vm_cnt.items()) or "없음"))
         t.insert("end", "ESX %d대: %s\n" % (len(esx_cnt), ", ".join("%s %d줄" % kv for kv in esx_cnt.items()) or "없음"))
         if res["record_missing"]:
@@ -1135,17 +1232,13 @@ class App(object):
         self.finish_all_edits()
         parts = [name for name, key in (("설정", "settings"), ("탭 1 실행 명령", "run"), ("탭 2 모니터링 명령", "mon"))
                  if self.dirty[key]]
-        note = "\n\n탭 3 의 테스트 케이스는 저장하지 않는다 (생성한 케이스는 테스트 기록 CSV 와 로그에 남음)." \
-            if (self.cases and self.cases_changed) else ""
         if parts:
-            ans = messagebox.askyesnocancel(TITLE, "저장하지 않은 변경이 있음: %s\n저장하고 끝낼까요?%s" % (", ".join(parts), note),
+            ans = messagebox.askyesnocancel(TITLE, "저장하지 않은 변경이 있음: %s\n저장하고 끝낼까요?" % ", ".join(parts),
                                             parent=self.root)
             if ans is None:
                 return
             if ans and not self.save_all():
                 return
-        elif note and not messagebox.askokcancel(TITLE, "끝낼까요?" + note, parent=self.root):
-            return
         self.root.destroy()
 
 

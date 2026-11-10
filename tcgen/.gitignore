@@ -2,6 +2,8 @@
 settings.json
 run_commands.csv
 monitor_commands.csv
+test_cases.json
+test_cases.json.bad-*
 testcases/
 backup/
 # build outputs
