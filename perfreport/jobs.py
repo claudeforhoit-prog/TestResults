@@ -11,10 +11,11 @@
 
 잡 구분 (VM 이름이 아니라 기록 내용으로 판단)
   - 세트 = 같은 Job_code · 같은 hostname 에서 시작 시각이 10초 안인 잡 묶음.
-  - TAT 측정 잡 = 케이스 잡 시작 시각 앞뒤 10분 안에 시작한 세트 가운데 잡 elapsed 평균이 가장 긴 세트.
+  - TAT 측정 잡 = VM(Job_code · hostname)마다, 케이스 잡 시작 시각 앞뒤 10분 안에 시작한 세트 가운데 잡 elapsed 평균이 가장 긴 세트.
     그 평균이 케이스 실행 구간의 절반 이상일 때만 TAT 측정 잡으로 본다. TAT = 그 세트 잡들의 elapsed 평균.
+    여러 VM 에서 돌렸으면(예: 같은 잡을 VM 두 대에서 실행) TAT 측정 잡이 VM 마다 하나씩 생기고 TAT 도 VM 마다 낸다.
   - 동시 실행 잡 = TAT 측정 잡이 아닌 나머지 잡. Job_code · hostname 마다 세트로 묶어 정리한다.
-    기준 구간 = TAT 측정 잡의 실행 구간(첫 잡 시작 ~ 마지막 잡 종료). TAT 측정 잡이 없으면 케이스 실행 구간.
+    기준 구간 = TAT 측정 잡 전체의 실행 구간(첫 잡 시작 ~ 마지막 잡 종료). TAT 측정 잡이 없으면 케이스 실행 구간.
     기준 구간 중 시작한 세트: 기준 구간 시작 10초 전에 시작한 세트(동시 시작)부터 기준 구간 끝까지 시작한 세트. 끝난 뒤 시작한 세트는 뺀다.
 """
 import csv
@@ -128,35 +129,40 @@ def classify(case, jobs):
     cs, ce = pd.Timestamp(case['start']), pd.Timestamp(case['end'])
     dur = max((ce - cs).total_seconds(), 1.0)
     by = _sets(jobs)
-    best = None
+    # TAT 측정 잡: VM(잡 종류 · hostname)마다 케이스 시작 ±10분에 시작해 실행 구간 절반 이상 실행된 세트 가운데 가장 긴 세트.
+    # 같은 잡을 VM 두 대에서 실행하면 TAT 측정 잡이 둘이 되고, TAT 도 VM 마다 따로 낸다.
+    picked = {}
     for k, sets in by.items():
+        best = None
         for i, st in enumerate(sets):
             if abs((st[0]['start'] - cs).total_seconds()) > MATCH_S:
                 continue
             m = statistics.mean(j['elapsed'] for j in st)
             if m >= dur * 0.5 and (best is None or m > best[0]):
-                best = (m, k, i)
-    main = None
-    if best:
-        m, k, i = best
-        st = by[k][i]
-        js = sorted(st, key=lambda j: j['info'])
+                best = (m, i)
+        if best:
+            picked[k] = best[1]
+    mains = []
+    for k, i in picked.items():
+        js = sorted(by[k][i], key=lambda j: j['info'])
         els = [j['elapsed'] for j in js]
-        main = {'code': k[0], 'hosts': sorted({j['host'] for j in js if j['host']}),
-                'form': 'individual' if all(re.search(r'_1_of_1$', j['info']) for j in js) else 'batch',
-                'jobs': [[j['info'] or j['code'], j['host'], _iso(j['start']), _iso(j['end']), round(j['elapsed'], 2)] for j in js],
-                'tat': round(m, 2), 'min': round(min(els), 2), 'max': round(max(els), 2),
-                'start': _iso(min(j['start'] for j in js)), 'end': _iso(max(j['end'] for j in js)),
-                'other_sets': len(by[k]) - 1}
-    w0 = pd.Timestamp(main['start']) if main else cs
-    w1 = pd.Timestamp(main['end']) if main else ce
+        mains.append({'code': k[0], 'hosts': sorted({j['host'] for j in js if j['host']}),
+                      'label': f'{k[0]} · {k[1]}' if len(picked) > 1 and k[1] else k[0],
+                      'form': 'individual' if all(re.search(r'_1_of_1$', j['info']) for j in js) else 'batch',
+                      'jobs': [[j['info'] or j['code'], j['host'], _iso(j['start']), _iso(j['end']), round(j['elapsed'], 2)] for j in js],
+                      'tat': round(statistics.mean(els), 2), 'min': round(min(els), 2), 'max': round(max(els), 2),
+                      'start': _iso(min(j['start'] for j in js)), 'end': _iso(max(j['end'] for j in js)),
+                      'other_sets': len(by[k]) - 1})
+    mains.sort(key=lambda m: (m['hosts'], m['code']))
+    w0 = min(pd.Timestamp(m['start']) for m in mains) if mains else cs
+    w1 = max(pd.Timestamp(m['end']) for m in mains) if mains else ce
     win = max((w1 - w0).total_seconds(), 1.0)
     hosts_per_code = {}
     for (code, host) in by:
         hosts_per_code.setdefault(code, set()).add(host)
     conc = []
     for (code, host), sets in by.items():
-        sets = [st for i, st in enumerate(sets) if not (best and (code, host) == best[1] and i == best[2])]
+        sets = [st for i, st in enumerate(sets) if picked.get((code, host)) != i]
         if not sets:
             continue
         rows, spans = [], []
@@ -199,11 +205,13 @@ def classify(case, jobs):
                      'outside_s': round(union_all - busy, 1), 'overlap_s': round(span_sum - union_all, 1),
                      'max_gap_s': round(max(gaps + [head, tail]), 1), 'head_gap_s': round(head, 1), 'tail_gap_s': round(tail, 1),
                      'set_rows': rows,
+                     'set_jobs': [[[j['info'] or j['code'], _iso(j['start']), _iso(j['end']), round(j['elapsed'], 2)]
+                                   for j in sorted(st, key=lambda j: j['info'])] for st in sets],
                      'points': [[round((j['start'] - w0).total_seconds(), 1), round(j['elapsed'], 2)] for st in sets for j in st]})
     conc.sort(key=lambda g: (g['code'], g['host']))
-    if not main and not conc:
+    if not mains and not conc:
         return None
-    return {'main': main, 'conc': conc, 'window': [_iso(w0), _iso(w1)], 'by_main': bool(main)}
+    return {'mains': mains, 'main': mains[0] if mains else None, 'conc': conc, 'window': [_iso(w0), _iso(w1)], 'by_main': bool(mains)}
 
 
 def assign(cases, jobs, log=print):
@@ -233,9 +241,8 @@ def assign(cases, jobs, log=print):
         if not r:
             continue
         c['jobs'], c['_job_rows'] = r, [dict(j['row'], __file=j['file']) for j in got[c['id']]]
-        m = r['main']
         log(f'[잡] {c["id"]}: '
-            + (f'TAT 측정 잡 {m["code"]} {len(m["jobs"])}개 평균 {m["tat"]:,.2f} s' if m else 'TAT 측정 잡 없음')
+            + (' · '.join(f'TAT 측정 잡 {m["label"]} {len(m["jobs"])}개 평균 {m["tat"]:,.2f} s' for m in r['mains']) or 'TAT 측정 잡 없음')
             + ''.join(f' · 동시 실행 잡 {g["label"]} {g["sets"]}세트(기준 구간 중 시작 {g["sets_in_window"]}회)' for g in r['conc']))
 
 

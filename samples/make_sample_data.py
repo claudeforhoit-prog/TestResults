@@ -111,25 +111,28 @@ def make_phase():
 
 
 def make_tat():
-    """잡 TAT 원장: TAT 측정 잡(bench_sim, esx01-vm01, 잡 4개)과 동시 실행 잡(bench_load, esx01-vm02, 4잡 세트를 이어서 실행)."""
+    """잡 TAT 원장: TAT 측정 잡(bench_sim, esx01-vm01, 잡 4개)과 동시 실행 잡(bench_load, esx01-vm02, 4잡 세트를 이어서 실행).
+    CASE-B 는 VM 3대 예: esx01-vm01 · esx01-vm03 두 VM 에서 bench_sim, esx01-vm02 에서 bench_load."""
     os.makedirs(os.path.join(OUT, 'tat'), exist_ok=True)
     rows = []
     for cid, base in PHASE_SELF.items():
         t0 = pd.Timestamp(next(c[3] for c in CASES if c[0] == cid))
         total = sum(v for v in base.values() if v > 0)
-        for idx, f in enumerate((0.996, 1.004, 0.998, 1.002), start=1):
-            el = round(total * f + 2, 2)
-            s = t0 + pd.Timedelta(seconds=idx - 1)
-            rows.append({'hostname': VMS['esx01'][0], 'Job_code': 'bench_sim', 'job_info': f'bench_sim_{idx}_of_4',
-                         'PSStartTime': f'{s:%Y-%m-%d_%H:%M:%S}', 'PSEndTime': f'{s + pd.Timedelta(seconds=el):%Y-%m-%d_%H:%M:%S}',
-                         'Job_elapse': el})
+        sim_vms = [(VMS['esx01'][0], 1.0)] + ([(VMS['esx01'][2], 1.012)] if cid == 'CASE-B' else [])
+        for vm, slow in sim_vms:
+            for idx, f in enumerate((0.996, 1.004, 0.998, 1.002), start=1):
+                el = round(total * f * slow + 2, 2)
+                s = t0 + pd.Timedelta(seconds=idx - 1)
+                rows.append({'hostname': vm, 'Job_code': 'bench_sim', 'job_info': f'bench_sim_{idx}_of_4',
+                             'PSStartTime': f'{s:%Y-%m-%d_%H:%M:%S}', 'PSEndTime': f'{s + pd.Timedelta(seconds=el):%Y-%m-%d_%H:%M:%S}',
+                             'Job_elapse': el})
         load = 2950 if cid == 'CASE-A' else 2780          # CASE-B 는 튜닝으로 동시 실행 잡도 짧아진 예
         t, k = t0 + pd.Timedelta(seconds=5), 0
         while t <= t0 + pd.Timedelta(seconds=total + 1500):  # 마지막 세트는 TAT 측정 잡이 끝난 뒤 시작해 기준 구간 밖이 된다
             k += 1
             longest = 0.0
             for i in range(1, 5):
-                el = round(load + 23 * ((k * 7 + i * 3) % 5) - 46, 2)
+                el = round(load + 23 * ((k * 7 + i * 3) % 5) - 46 + 40 * min(k - 1, 3), 2)   # 뒤 세트일수록 조금씩 길어지는 예
                 s = t + pd.Timedelta(seconds=i - 1)
                 longest = max(longest, el)
                 rows.append({'hostname': VMS['esx01'][1], 'Job_code': 'bench_load', 'job_info': f'bench_load_{i}_of_4',

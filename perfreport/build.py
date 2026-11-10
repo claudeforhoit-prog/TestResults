@@ -544,7 +544,7 @@ def run_job(job, base, log=print):
            'palette': palette_mod.PALETTES[pal][0], 'chart_width_cm': float(width_cm),
            'phase': {c['id']: {'jobs': c['phase']['jobs'], 'stages': len(c['phase']['stages']), 'total_s': c['phase']['total']}
                      for c in cases if c.get('phase')},
-           'jobs': {c['id']: {'tat_job': (c['jobs']['main'] or {}).get('code'), 'tat_s': (c['jobs']['main'] or {}).get('tat'),
+           'jobs': {c['id']: {'tat_jobs': [[m['label'], m['tat']] for m in c['jobs']['mains']],
                               'concurrent': [[g['label'], g['sets'], g['sets_in_window']] for g in c['jobs']['conc']]}
                     for c in cases if c.get('jobs')},
            'tat_baseline': job.get('tat_base'),
