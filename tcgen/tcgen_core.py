@@ -8,8 +8,11 @@ tcgen_core.py - 테스트 실행 명령 생성기의 계산과 출력 (화면 �
 - 붙여넣기 블록 생성: 점프 VM 최초 설정, VM 등록(점프 VM 에서 ssh), ESX 등록(root SSH 창)
 - 테스트 기록 CSV 행 추가, 로그 CSV 저장
 
-블록은 ASCII 문자만 쓴다. 점프 VM 은 csh(tcsh) 이므로 here-document 는 << 'TCEOF' 로 시작하고
-끝 줄도 'TCEOF' (따옴표 포함) 로 쓴다. tcsh 는 따옴표까지 같은 줄을 끝으로 인식한다.
+블록은 ASCII 문자만 쓴다. 점프 VM 의 셸이 csh(tcsh) 이든 bash 이든 같은 블록이 동작하도록
+here-document 끝 표시는 따옴표 없이 쓰고(<< TCEOF ... TCEOF), 본문의 \\, $, ` 앞에는 역슬래시를 넣는다.
+tcsh(6.18.01 ~ 최신 소스의 heredoc 처리 동일)와 sh, bash 는 이 세 글자 앞의 역슬래시만 풀어 원래 글을 넘긴다.
+비밀번호는 here-document 밖에서 ~/.tcgen/setpw 로 입력받는다. 붙여넣을 때 줄바꿈이 CR+LF 로 들어와 남은
+빈 줄이 비밀번호로 읽히지 않도록, setpw 는 남은 입력을 먼저 비우고 빈 입력이면 다시 묻는다.
 
 % 처리: VM 의 cron(cronie)은 명령 안의 % 를 줄바꿈으로, \\% 를 % 로 바꾼다. 그래서 VM 줄은 % 를 \\% 로 쓴다.
 ESX 의 crond(busybox)는 명령을 바꾸지 않고 sh -c 로 실행하므로 ESX 줄은 입력한 그대로 쓴다.
@@ -479,6 +482,16 @@ def _bre(s):
     return re.sub(r"([.\[\]*^$\\])", r"\\\1", s)
 
 
+def _hd(line):
+    """따옴표 없는 끝 표시 here-document 의 본문 한 줄: \\, $, ` 앞에 역슬래시를 넣는다."""
+    return re.sub(r"([\\$`])", r"\\\1", line)
+
+
+def hd_unescape(text):
+    """_hd 의 반대. 셸이 본문을 받아 처리한 결과와 같다(시험용)."""
+    return re.sub(r"\\([\\$`])", r"\1", text)
+
+
 VMSSH_LINES = [
     'SSH_ASKPASS="$HOME/.tcgen/askpass"; DISPLAY="${DISPLAY:-tcgen:0}"; SSH_ASKPASS_REQUIRE=force',
     "export SSH_ASKPASS DISPLAY SSH_ASKPASS_REQUIRE",
@@ -496,46 +509,55 @@ VMSSH_LINES = [
 ]
 
 
+# 비밀번호 입력 스크립트(~/.tcgen/setpw). 붙여넣기에서 남은 줄을 1초 동안 비우고, 빈 입력이면 다시 묻고, CR 을 지운다.
+SETPW_LINES = [
+    "D=$HOME/.tcgen",
+    "umask 077",
+    "while read -r -t 1 X 2>/dev/null; do :; done",
+    "trap 'stty echo 2>/dev/null' 0 2 15",
+    "stty -echo 2>/dev/null",
+    "PW=",
+    'while [ -z "$PW" ]; do',
+    "  printf 'VM password: '",
+    "  IFS= read -r PW || exit 1",
+    "  PW=`printf '%s' \"$PW\" | tr -d '\\r'`",
+    "  echo",
+    "done",
+    "stty echo 2>/dev/null",
+    "printf '%s\\n' \"$PW\" > $D/vmpw",
+    "chmod 600 $D/vmpw",
+    'echo "saved: $D/vmpw"',
+]
+
+
 def setup_block():
-    """점프 VM 최초 1회: VM 비밀번호 저장과 자동 로그인용 ssh 보조 스크립트 생성."""
-    lines = [
-        "sh << 'TCSETUP'",
-        "umask 077",
-        "D=$HOME/.tcgen; mkdir -p $D",
-        "printf '%s\\n' 'cat \"$HOME/.tcgen/vmpw\"' > $D/askpass",
-        ": > $D/vmssh",
-    ]
-    for v in VMSSH_LINES:
-        lines += _printf_lines(v, "$D/vmssh")
-    lines += [
-        "chmod 700 $D/askpass $D/vmssh",
-        "stty -echo < /dev/tty",
-        "printf 'VM password: ' > /dev/tty",
-        "IFS= read -r PW < /dev/tty",
-        "stty echo < /dev/tty",
-        "printf '\\n' > /dev/tty",
-        "printf '%s\\n' \"$PW\" > $D/vmpw",
-        "chmod 600 $D/vmpw",
-        'echo "saved: $D (vmpw, askpass, vmssh)"',
-        "'TCSETUP'",
-    ]
-    return "\n".join(lines) + "\n"
+    """점프 VM 최초 1회: 자동 로그인용 스크립트(askpass, vmssh, setpw) 생성 후 setpw 로 VM 비밀번호 입력."""
+    body = ["umask 077",
+            "D=$HOME/.tcgen; mkdir -p $D",
+            "printf '%s\\n' 'cat \"$HOME/.tcgen/vmpw\"' > $D/askpass"]
+    for name, src in (("vmssh", VMSSH_LINES), ("setpw", SETPW_LINES)):
+        body.append(": > $D/%s" % name)
+        for v in src:
+            body += _printf_lines(v, "$D/%s" % name)
+    body += ["chmod 700 $D/askpass $D/vmssh $D/setpw",
+             'echo "created: $D (askpass, vmssh, setpw)"']
+    out = ["sh << TCSETUP"] + [_hd(x) for x in body] + ["TCSETUP", "sh ~/.tcgen/setpw"]
+    return "\n".join(out) + "\n"
 
 
 def vm_block(host, user, lines, cases):
     target = "%s@%s" % (user, host) if user else host
-    out = ["sh ~/.tcgen/vmssh %s << 'TCEOF'" % target,
-           "N=$HOME/.tcgen_cron.new; P=$HOME/.tcgen_cron.pat",
-           ": > $P"]
+    body = ["N=$HOME/.tcgen_cron.new; P=$HOME/.tcgen_cron.pat",
+            ": > $P"]
     for c in cases:
-        out += _printf_lines(_bre(marker(c, host)) + "$", "$P")
-    out.append("crontab -l 2>/dev/null | grep -v -f $P > $N")
+        body += _printf_lines(_bre(marker(c, host)) + "$", "$P")
+    body.append("crontab -l 2>/dev/null | grep -v -f $P > $N")
     for ln in lines:
-        out += _printf_lines(ln, "$N")
-    out += ["crontab $N && rm -f $N $P || echo \"==== crontab FAILED, kept $N\"",
-            "echo \"== `hostname -s`  `date '+%Y-%m-%d %H:%M %Z'`\"",
-            "crontab -l | grep ' # tcgen '",
-            "'TCEOF'"]
+        body += _printf_lines(ln, "$N")
+    body += ["crontab $N && rm -f $N $P || echo \"==== crontab FAILED, kept $N\"",
+             "echo \"== `hostname -s`  `date '+%Y-%m-%d %H:%M %Z'`\"",
+             "crontab -l | grep ' # tcgen '"]
+    out = ["sh ~/.tcgen/vmssh %s << TCEOF" % target] + [_hd(x) for x in body] + ["TCEOF"]
     return "\n".join(out) + "\n"
 
 

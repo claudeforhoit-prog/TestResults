@@ -149,20 +149,28 @@ class EntryTests(TmpDir):
             self.assertTrue(all(ord(ch) < 127 for ch in text), "블록은 ASCII 만")
             self.assertNotIn("!", text)
             for ln in text.splitlines():
-                self.assertLessEqual(len(ln), 140)
-        self.assertEqual(res["vm"].count("<< 'TCEOF'"), 2)
-        self.assertEqual(res["vm"].count("\n'TCEOF'\n"), 2)
-        self.assertIn(" # tcgen A esx01ev01$", res["vm"])
+                self.assertLessEqual(len(ln), 160)
+        self.assertEqual(res["vm"].count(" << TCEOF\n"), 2)
+        self.assertEqual(res["vm"].count("\nTCEOF\n"), 2)
+        self.assertNotIn("'TCEOF'", res["vm"])
+        self.assertIn(" # tcgen A esx01ev01$", core.hd_unescape(res["vm"]))
+        self.assertTrue(res["setup"].startswith("sh << TCSETUP\n"))
+        self.assertTrue(res["setup"].endswith("\nTCSETUP\nsh ~/.tcgen/setpw\n"))
         self.assertIn("/bin/echo root >> /var/spool/cron/crontabs/cron.update", res["esx"]["esx01"])
 
     def test_vm_user(self):
         self.settings["vm_user"] = "tester"
         res = core.generate([case("A", "2026-11-20 00:00:00", monitors=[])], RUN, MON, self.settings, now=NOW, write=False)
-        self.assertTrue(res["vm"].startswith("sh ~/.tcgen/vmssh tester@esx01ev01 << 'TCEOF'"))
+        self.assertTrue(res["vm"].startswith("sh ~/.tcgen/vmssh tester@esx01ev01 << TCEOF\n"))
 
     def test_marker_escape(self):
         res = core.generate([case("A.1", "2026-11-20 00:00:00", monitors=[])], RUN, MON, self.settings, now=NOW, write=False)
-        self.assertIn("' # tcgen A\\.1 esx01ev01$'", res["vm"])
+        self.assertIn("' # tcgen A\\.1 esx01ev01$'", core.hd_unescape(res["vm"]))
+
+    def test_heredoc_escape(self):
+        for s in ("a$b", "x`y`z", "back\\slash \\% \\n", "plain 'q' \"dq\" %H"):
+            self.assertEqual(core.hd_unescape(core._hd(s)), s)
+        self.assertEqual(core._hd("$HOME `d` \\%"), "\\$HOME \\`d\\` \\\\%")
 
     def test_errors(self):
         st = self.settings

@@ -471,8 +471,9 @@ class App(object):
         pw = ttk.PanedWindow(f, orient="horizontal")
         pw.pack(fill="both", expand=True, pady=(self.px(6), 0))
         self.blk_setup = self._block_panel(pw, "A. 점프 VM 최초 1회 설정 (비밀번호 저장)",
-                                           "점프 VM 에서 처음 한 번만. 이 블록만 붙여넣고 VM 비밀번호를 입력한다 (화면에 보이지 않음). "
-                                           "~/.tcgen 에 본인만 읽을 수 있게 저장된다. ESX 비밀번호는 저장하지 않는다.",
+                                           "점프 VM 에서 처음 한 번만. 이 블록만 붙여넣고, VM password: 가 나오면 VM 비밀번호를 입력한다 "
+                                           "(화면에 보이지 않음). ~/.tcgen 에 본인만 읽을 수 있게 저장된다. 비밀번호를 바꿀 때는 "
+                                           "sh ~/.tcgen/setpw 를 실행한다. ESX 비밀번호는 저장하지 않는다.",
                                            lambda: self.copy_block("setup"))
         self.blk_vm = self._block_panel(pw, "B. VM 등록 블록 (점프 VM 터미널에 붙여넣기)",
                                         "어느 폴더에서 붙여넣어도 결과는 같다. VM 마다 ssh 로 접속해 crontab 에 줄을 등록하고 등록된 줄을 출력한다. "

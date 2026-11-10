@@ -100,7 +100,7 @@ Python 표준 라이브러리만 쓴다. 추가 패키지는 필요 없다.
 
 | 블록 | 붙여넣는 곳 | 하는 일 |
 | :-- | :-- | :-- |
-| A. 점프 VM 최초 1회 설정 | 점프 VM 터미널 (처음 한 번) | VM 비밀번호를 한 번 입력받아 `~/.tcgen/vmpw` 에 저장(권한 600). 자동 로그인용 `~/.tcgen/vmssh`, `~/.tcgen/askpass` 생성 |
+| A. 점프 VM 최초 1회 설정 | 점프 VM 터미널 (처음 한 번) | 자동 로그인용 `~/.tcgen/vmssh`, `~/.tcgen/askpass` 와 비밀번호 입력용 `~/.tcgen/setpw` 를 만들고, VM 비밀번호를 입력받아 `~/.tcgen/vmpw` 에 저장(권한 600) |
 | B. VM 등록 블록 | 점프 VM 터미널 (생성할 때마다) | VM 마다 ssh 로 접속해 crontab 에 줄을 등록하고, 등록된 줄을 출력한다 |
 | C. ESX 블록 | 그 ESX 의 root SSH 창 | `/var/spool/cron/crontabs/root` 에 줄을 추가하고 `cron.update` 로 crond 에 알린다 (Broadcom KB 323138 절차) |
 
@@ -110,7 +110,7 @@ ESX 가 여러 대이면 C 블록의 호스트 목록에서 하나씩 골라 복
 
 1. 탭 1, 탭 2 에 명령을 등록하고 [저장] 을 누른다. 한 번 저장한 명령은 다음 실행 때 다시 불러온다.
 2. 탭 3 에 케이스를 입력하고 [명령어 생성] 을 누른다.
-3. 점프 VM 에서 처음 한 번만 A 블록을 붙여넣는다. `VM password:` 가 나오면 VM 비밀번호를 입력한다. A 블록은 다른 블록과 함께 붙여넣지 않는다.
+3. 점프 VM 에서 처음 한 번만 A 블록을 붙여넣는다. 약 1초 뒤 `VM password:` 가 나오면 VM 비밀번호를 입력한다. A 블록은 다른 블록과 함께 붙여넣지 않는다. 붙여넣은 뒤 아무 출력이 없으면 Enter 를 한 번 누른다(bash 5.1 이상은 붙여넣은 글을 Enter 를 누를 때 실행한다).
 4. 점프 VM 에 B 블록을 붙여넣는다. VM 마다 `---- VM이름`, `== hostname 시각`, 등록된 `# tcgen` 줄이 출력된다.
 5. ESX 의 root SSH 창에 C 블록을 붙여넣는다. 마지막에 그 ESX 에 등록된 `# tcgen` 줄이 출력된다.
 
@@ -145,12 +145,13 @@ ESX 에서 줄을 지운 뒤에는 `/bin/echo root >> /var/spool/cron/crontabs/c
 
 ## 7. 제한과 주의
 
-- A, B 블록은 csh(tcsh) 용이다. 점프 VM 의 로그인 셸이 bash 이면 here-document 끝 줄 형식이 달라 그대로 쓸 수 없다.
+- A, B 블록은 점프 VM 의 셸이 csh, tcsh, bash 중 무엇이든 같은 블록을 쓴다. here-document 끝 줄은 따옴표 없이 쓰고, 본문의 `\`, `$`, `` ` `` 앞에는 역슬래시를 넣어 두었다(셸이 이 역슬래시를 지우고 원래 글을 넘긴다).
+- 터미널이 줄바꿈을 CR+LF 로 보내도 된다. 비밀번호 입력 단계는 붙여넣기에서 남은 빈 줄을 먼저 비우고, 빈 입력이면 다시 묻는다.
 - 명령에 `!`, 탭, 한글을 쓸 수 없다(한글은 변수 이름에만). csh 가 붙여넣는 글의 `!` 를 이전 명령 불러오기로, 탭을 자동 완성으로 처리하기 때문이다.
 - 이름(케이스, 호스트, 명령어 명)은 영문, 숫자, `.` `_` `-` 만 쓴다.
 - ESX 를 재부팅하면 crontab 변경이 지워진다. 재부팅 뒤에는 C 블록을 다시 붙여넣는다.
 - VM 비밀번호는 점프 VM 의 `~/.tcgen/vmpw` 에만 저장한다(본인만 읽기). 생성기 파일, CSV, 블록에는 비밀번호가 들어가지 않는다. ESX 비밀번호는 저장하지 않는다.
-- 비밀번호를 바꾸면 A 블록을 다시 붙여넣는다.
+- 비밀번호를 바꿀 때는 점프 VM 에서 `sh ~/.tcgen/setpw` 를 실행한다.
 
 ## 8. 시험
 
@@ -159,6 +160,6 @@ python -m unittest discover -s tests -v
 ```
 
 - `test_core.py`: 시각 계산, crontab 줄, 오류 검사, 기록 파일.
-- `test_blocks_shell.py`: tcsh 가 있는 Linux, macOS 에서만 실행된다. 대화형 tcsh 에 A, B 블록을 붙여넣듯이 보내 가짜 ssh, crontab 으로 등록 결과를 확인하고, cronie 와 busybox crond 처럼 줄을 실행해 변수와 `%` 처리를 확인한다. Windows 에서는 건너뛴다.
+- `test_blocks_shell.py`: tcsh 가 있는 Linux, macOS 에서만 실행된다. 대화형 tcsh 와 bash 에 A, B 블록을 붙여넣듯이 보내고(줄바꿈 LF, CR+LF 각각), 가짜 ssh, crontab 으로 등록 결과를 확인한다. cronie 와 busybox crond 처럼 줄을 실행해 변수와 `%` 처리를 확인한다. Windows 에서는 건너뛴다.
 - `gui_smoke.py`: 화면을 띄워 버튼과 선택 창을 코드로 눌러 본다. 수동 실행: `python tests\gui_smoke.py`
 - 실제 점프 VM, VM, ESX 에서의 동작은 아직 확인하지 않았다.
