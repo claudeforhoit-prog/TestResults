@@ -28,7 +28,7 @@ import re
 import shutil
 import sys
 
-VERSION = "1.1"
+VERSION = "1.2"
 KST_TO_UTC = dt.timedelta(hours=9)
 CHUNK = 100            # 붙여넣는 글 한 줄에 담는 명령 조각 길이(문자 수)
 NONE_JOB = "(없음)"

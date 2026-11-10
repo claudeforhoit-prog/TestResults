@@ -20,6 +20,11 @@ import tcgen_core as core
 TITLE = "테스트 실행 명령 생성기 v%s" % core.VERSION
 NONE_JOB = core.NONE_JOB
 
+COLORS = dict(bg="#f3f5f8", card="#ffffff", line="#d5dbe3", head="#e8edf4", ink="#1f2937", mut="#6b7280",
+              blue="#2a6fd6", blue_d="#1f5bb5", green="#1f9d6b", green_d="#17845a", purple="#7a4fbf", purple_d="#6540a3",
+              red="#c0392b", red_d="#a93226", case="#edf3fc", sel="#cfe0fb", stripe="#f8fafc", dark="#2f3a48",
+              tab="#e3e8ef", tab_h="#d5dce6", field="#aeb7c2")
+
 
 def enable_dpi_awareness():
     if sys.platform != "win32":
@@ -87,7 +92,7 @@ class EditableTable(ttk.Frame):
     row_ids, cell_value, cell_kind, row_check, row_tags 를 넘겨 행마다 다르게 다룬다."""
 
     def __init__(self, master, app, columns, height=8, check=None):
-        ttk.Frame.__init__(self, master)
+        ttk.Frame.__init__(self, master, style="Card.TFrame")
         self.app = app
         self.columns = columns
         self.check = check           # 맨 앞 체크 열: dict(title, width, on, off, toggle[, key]) 또는 None
@@ -109,6 +114,7 @@ class EditableTable(ttk.Frame):
             self.tree.column("#0", width=app.px(check["width"]), minwidth=app.px(check["width"]), stretch=False,
                              anchor="center")
         self.tree.tag_configure("applied", foreground="#8a8f98")
+        self.tree.tag_configure("odd", background=COLORS["stripe"])
         for c in columns:
             self.tree.heading(c["key"], text=c["title"], anchor="w")
             self.tree.column(c["key"], width=app.px(c["width"]), minwidth=app.px(40),
@@ -201,6 +207,8 @@ class EditableTable(ttk.Frame):
                 kw["tags"] = tuple(self.row_tags(iid))
             elif st:
                 kw["tags"] = ("applied",)
+            elif iid.isdigit() and int(iid) % 2 == 1:
+                kw["tags"] = ("odd",)
             self.tree.insert("", "end", iid=iid, values=[self.cell_text(iid, c["key"]) for c in self.columns], **kw)
         if not ids or select is None:
             return
@@ -270,10 +278,11 @@ class EditableTable(ttk.Frame):
         x, y, w, h = bbox
         var = tk.StringVar(value=self.value(iid, c["key"]))
         if kind == "combo":
-            ed = ttk.Combobox(self.tree, textvariable=var, values=list(c["values"]()), state="readonly")
+            ed = ttk.Combobox(self.tree, textvariable=var, values=list(c["values"]()), state="readonly",
+                              style="Cell.TCombobox")
             ed.bind("<<ComboboxSelected>>", lambda e, w=ed: self.tree.after_idle(lambda: self._finish_if(w, True)))
         else:
-            ed = ttk.Entry(self.tree, textvariable=var)
+            ed = ttk.Entry(self.tree, textvariable=var, style="Cell.TEntry")
             ed.bind("<FocusOut>", lambda e, w=ed: self.tree.after_idle(lambda: self._finish_if(w, False)))
         tw = self.tree.winfo_width()
         width = max(w, self.app.px(c.get("edit_width", 0)))
@@ -475,10 +484,8 @@ class App(object):
         self.save_warned = {}
         self.t_run.refresh(0)
         self.t_mon.refresh(0)
-        self.update_case_hint()
         self.t_case.refresh(0)
         self.show_messages("데이터를 다시 읽음. [명령어 생성] 을 누르면 결과가 나온다.", [], [])
-        self.update_data_hint()
         self.update_status()
         if self.upgrade_msg:
             messagebox.showinfo(TITLE, self.upgrade_msg, parent=self.root)
@@ -503,23 +510,101 @@ class App(object):
             except tk.TclError:
                 pass
         base = tkfont.nametofont("TkDefaultFont")
-        self.bold = base.copy()
-        self.bold.configure(weight="bold")
-        self.small = base.copy()
-        self.small.configure(size=max(8, abs(int(base.cget("size"))) - 1))
-        self.mono_font = tkfont.Font(family=self.mono, size=max(9, abs(int(base.cget("size")))))
+        raw = int(base.cget("size")) or 9          # 양수 = 포인트, 음수 = 픽셀
+
+        def sized(delta, weight="normal"):
+            f = base.copy()
+            n = abs(raw) + (delta if raw > 0 else int(round(delta * 4 / 3.0)))
+            f.configure(size=(n if raw > 0 else -n), weight=weight)
+            return f
+
+        self.bold = sized(0, "bold")
+        self.small = sized(-1) if abs(raw) > 8 else sized(0)
+        self.tab_font = sized(1)
+        self.tab_font_b = sized(1, "bold")
+        self.title_font = sized(4, "bold")
+        self.mono_font = tkfont.Font(family=self.mono, size=(max(9, raw) if raw > 0 else min(-12, raw)))
+        C = COLORS
+        px = self.px
         style = ttk.Style(self.root)
-        line = base.metrics("linespace")
-        style.configure("Treeview", rowheight=int(line * 1.45))
-        try:   # 일부 Tk 8.6 버전에서 행 글자색(tag)이 적용되지 않는 문제 회피
-            style.map("Treeview", foreground=[e for e in style.map("Treeview", query_opt="foreground")
-                                              if e[:2] != ("!disabled", "!selected")])
+        try:
+            style.theme_use("clam")       # Windows 기본 테마는 버튼, 탭 색을 바꿀 수 없어 색을 지정할 수 있는 테마를 쓴다
         except tk.TclError:
             pass
+        self.root.configure(bg=C["bg"])
+        style.configure(".", background=C["bg"], foreground=C["ink"], bordercolor=C["line"], focuscolor=C["blue"])
+        style.configure("TFrame", background=C["card"])
+        style.configure("Card.TFrame", background=C["card"])
+        style.configure("Bg.TFrame", background=C["bg"])
+        style.configure("TLabel", background=C["card"], foreground=C["ink"])
+        style.configure("Hint.TLabel", background=C["card"], foreground=C["mut"], font=self.small)
+        style.configure("Title.TLabel", background=C["card"], foreground=C["blue"], font=self.bold)
+        style.configure("Bold.TLabel", background=C["card"], font=self.bold)
+        style.configure("Ok.TLabel", background=C["card"], foreground="#1e7b34", font=self.bold)
+        for w in ("TEntry", "TSpinbox", "TCombobox"):
+            style.configure(w, fieldbackground="white", bordercolor=C["field"], lightcolor="white", darkcolor="white",
+                            padding=(px(4), px(3)))
+            style.map(w, bordercolor=[("focus", C["blue"])], lightcolor=[("focus", C["blue"])])
+        style.map("TCombobox", fieldbackground=[("readonly", "white")], foreground=[("readonly", C["ink"])],
+                  selectbackground=[("readonly", C["sel"])], selectforeground=[("readonly", C["ink"])])
+        style.configure("TSpinbox", arrowsize=px(11))
+        style.configure("Cell.TEntry", padding=(px(3), 0))          # 표 칸 안 편집기: 행 높이 안에 글자가 들어가게
+        style.configure("Cell.TCombobox", padding=(px(3), 0))
+        style.configure("TButton", background="white", foreground=C["ink"], bordercolor=C["field"], lightcolor="white",
+                        darkcolor="white", padding=(px(10), px(4)), width=-8)
+        style.map("TButton", background=[("pressed", "#e2e8f0"), ("active", "#eef2f7")],
+                  bordercolor=[("active", "#8a96a5")], lightcolor=[("pressed", "#e2e8f0")],
+                  darkcolor=[("pressed", "#e2e8f0")])
+        for name, c, d in (("Green", C["green"], C["green_d"]), ("Purple", C["purple"], C["purple_d"]),
+                           ("Red", C["red"], C["red_d"]), ("Blue", C["blue"], C["blue_d"])):
+            style.configure(name + ".TButton", background=c, foreground="white", bordercolor=c, lightcolor=c, darkcolor=c,
+                            font=self.bold, padding=(px(12), px(4)), focuscolor="white")
+            style.map(name + ".TButton", background=[("pressed", d), ("active", d)], bordercolor=[("active", d)],
+                      lightcolor=[("active", d)], darkcolor=[("active", d)], foreground=[("disabled", "#e5e7eb")])
+        for w in ("TCheckbutton", "TRadiobutton"):
+            style.configure(w, background=C["card"])
+            style.map(w, background=[("active", C["card"])])
+        style.configure("TNotebook", background=C["bg"], bordercolor=C["line"], lightcolor=C["card"],
+                        darkcolor=C["card"], tabmargins=(px(2), px(4), px(2), 0))
+        style.configure("TNotebook.Tab", background=C["tab"], foreground="#374151", padding=(px(20), px(7)),
+                        font=self.tab_font, bordercolor="#c7cfd9", lightcolor=C["tab"], focuscolor="white")
+        style.map("TNotebook.Tab", background=[("selected", C["blue"]), ("active", C["tab_h"])],
+                  foreground=[("selected", "white")], lightcolor=[("selected", C["blue"])],
+                  bordercolor=[("selected", C["blue"])], padding=[("selected", (px(20), px(7)))],
+                  expand=[("selected", (1, 2, 1, 0))])
+        try:
+            style.map("TNotebook.Tab", font=[("selected", self.tab_font_b)])
+        except tk.TclError:
+            pass
+        line = base.metrics("linespace")
+        style.configure("Treeview", background="white", fieldbackground="white", foreground=C["ink"],
+                        bordercolor=C["line"], lightcolor="white", rowheight=int(line * 1.6))
+        style.map("Treeview", background=[("selected", C["sel"])], foreground=[("selected", C["ink"])])
+        style.configure("Treeview.Heading", background=C["head"], foreground="#334155", font=self.bold, relief="flat",
+                        bordercolor=C["line"], lightcolor=C["head"], padding=(px(4), px(5)))
+        style.map("Treeview.Heading", background=[("active", "#dde4ee")])
+        style.configure("TLabelframe", background=C["card"], bordercolor=C["line"], lightcolor=C["card"],
+                        darkcolor=C["card"])
+        style.configure("TLabelframe.Label", background=C["card"], foreground=C["blue"], font=self.bold)
+        style.configure("TPanedwindow", background=C["card"])
+        for w in ("Vertical.TScrollbar", "Horizontal.TScrollbar"):
+            style.configure(w, background="#dfe4ea", troughcolor=C["card"], bordercolor=C["card"], lightcolor="#dfe4ea",
+                            darkcolor="#dfe4ea", arrowcolor=C["mut"])
         self.img_on, self.img_off = make_check_images(self.root, self.scale)
-        style.configure("Hint.TLabel", foreground="#5b6470", font=self.small)
-        style.configure("Ok.TLabel", foreground="#1e7b34", font=self.bold)
-        style.configure("Bold.TLabel", font=self.bold)
+
+    def card(self, parent, **pack):
+        """흰 바탕에 옅은 테두리가 있는 영역."""
+        outer = tk.Frame(parent, bg=COLORS["card"], highlightthickness=1, highlightbackground=COLORS["line"])
+        outer.pack(**pack)
+        inner = ttk.Frame(outer, style="Card.TFrame", padding=(self.px(12), self.px(8)))
+        inner.pack(fill="both", expand=True)
+        return inner
+
+    def text_box(self, parent, **kw):
+        opts = dict(relief="flat", bd=0, highlightthickness=1, highlightbackground=COLORS["line"],
+                    highlightcolor=COLORS["blue"], bg="white", fg=COLORS["ink"], padx=self.px(6), pady=self.px(4))
+        opts.update(kw)
+        return tk.Text(parent, **opts)
 
     def hint(self, parent, text):
         lb = ttk.Label(parent, text=text, style="Hint.TLabel", justify="left", wraplength=self.px(280))
@@ -534,100 +619,197 @@ class App(object):
         w, h = min(self.px(1480), int(sw * 0.95)), min(self.px(900), int(sh * 0.9))
         r.geometry("%dx%d" % (w, h))
         r.minsize(min(self.px(1000), w), min(self.px(640), h))
-        outer = ttk.Frame(r, padding=self.px(6))
+        C, px = COLORS, self.px
+        head = tk.Frame(r, bg=C["dark"])
+        head.pack(fill="x")
+        tk.Label(head, text="테스트 실행 명령 생성기", font=self.title_font, bg=C["dark"], fg="white").pack(
+            side="left", padx=(px(14), px(8)), pady=px(6))
+        tk.Label(head, text="v" + core.VERSION, font=self.bold, bg=C["dark"], fg="#c9d3df").pack(side="left")
+        bar = tk.Frame(r, bg=C["head"])
+        bar.pack(side="bottom", fill="x")
+        tk.Label(bar, textvariable=self.v_status, font=self.small, bg=C["head"], fg="#374151", anchor="w").pack(
+            side="left", fill="x", expand=True, padx=px(12), pady=px(4))
+        outer = ttk.Frame(r, style="Bg.TFrame", padding=(px(10), px(8), px(10), px(8)))
         outer.pack(fill="both", expand=True)
 
-        sf = ttk.LabelFrame(outer, text="설정 (바뀔 때마다 데이터 폴더의 settings.json 에 자동 저장)", padding=self.px(6))
-        sf.pack(fill="x")
+        sf = self.card(outer, fill="x")
+        row0 = ttk.Frame(sf)
+        row0.pack(fill="x")
+        ttk.Label(row0, text="설정", style="Title.TLabel").pack(side="left")
+        ttk.Label(row0, text="바뀌면 바로 데이터 폴더에 저장된다. 데이터 폴더는 생성기를 다시 빌드해도 남는다.",
+                  style="Hint.TLabel").pack(side="left", padx=px(10))
         row1 = ttk.Frame(sf)
-        row1.pack(fill="x")
+        row1.pack(fill="x", pady=(px(6), 0))
         ttk.Label(row1, text="테스트 기록 CSV").grid(row=0, column=0, sticky="w")
-        ttk.Entry(row1, textvariable=self.v_record, width=30).grid(row=0, column=1, sticky="ew", padx=(4, 2))
-        ttk.Button(row1, text="찾기", command=self.pick_record, width=6).grid(row=0, column=2, padx=(0, 14))
+        ttk.Entry(row1, textvariable=self.v_record, width=30).grid(row=0, column=1, sticky="ew", padx=(px(6), px(4)))
+        ttk.Button(row1, text="찾기", command=self.pick_record, width=6).grid(row=0, column=2, padx=(0, px(16)))
         ttk.Label(row1, text="로그 폴더").grid(row=0, column=3, sticky="w")
-        ttk.Entry(row1, textvariable=self.v_log, width=24).grid(row=0, column=4, sticky="ew", padx=(4, 2))
+        ttk.Entry(row1, textvariable=self.v_log, width=24).grid(row=0, column=4, sticky="ew", padx=(px(6), px(4)))
         ttk.Button(row1, text="찾기", command=self.pick_log, width=6).grid(row=0, column=5)
         row1.columnconfigure(1, weight=3)
         row1.columnconfigure(4, weight=2)
         row2 = ttk.Frame(sf)
-        row2.pack(fill="x", pady=(self.px(5), 0))
+        row2.pack(fill="x", pady=(px(6), 0))
         ttk.Label(row2, text="VM 접속 계정").pack(side="left")
-        ttk.Entry(row2, textvariable=self.v_user, width=14).pack(side="left", padx=(4, 2))
-        ttk.Label(row2, text="(비우면 점프 VM 계정)", style="Hint.TLabel").pack(side="left", padx=(0, 14))
+        ttk.Entry(row2, textvariable=self.v_user, width=14).pack(side="left", padx=(px(6), px(4)))
+        ttk.Label(row2, text="비우면 점프 VM 계정", style="Hint.TLabel").pack(side="left", padx=(0, px(18)))
         ttk.Label(row2, text="모니터링 시작").pack(side="left")
-        tk.Spinbox(row2, from_=0, to=240, width=4, textvariable=self.v_mon).pack(side="left", padx=4)
-        ttk.Label(row2, text="분 전 (잡 시작 기준)").pack(side="left", padx=(0, 14))
+        ttk.Spinbox(row2, from_=0, to=240, width=4, textvariable=self.v_mon).pack(side="left", padx=px(6))
+        ttk.Label(row2, text="분 전 (잡 시작 기준)").pack(side="left", padx=(0, px(18)))
         ttk.Label(row2, text="모니터링 중지").pack(side="left")
-        tk.Spinbox(row2, from_=0, to=240, width=4, textvariable=self.v_stop).pack(side="left", padx=4)
+        ttk.Spinbox(row2, from_=0, to=240, width=4, textvariable=self.v_stop).pack(side="left", padx=px(6))
         ttk.Label(row2, text="분 전 (다음 케이스 잡 시작 기준)").pack(side="left")
         row3 = ttk.Frame(sf)
-        row3.pack(fill="x", pady=(self.px(6), 0))
+        row3.pack(fill="x", pady=(px(8), px(2)))
         for text, cmd in (("설정 백업", self.backup), ("백업 불러오기", self.restore_backup),
                           ("데이터 폴더 열기", self.open_data_dir), ("데이터 폴더 변경", self.change_data_dir),
                           ("테스트 케이스 폴더 열기", self.open_case_dir)):
-            ttk.Button(row3, text=text, command=cmd).pack(side="left", padx=(0, 6))
-        self.data_hint = self.hint(row3, "")
-        self.data_hint.pack(side="left", fill="x", expand=True, padx=8)
-        self.update_data_hint()
+            ttk.Button(row3, text=text, command=cmd).pack(side="left", padx=(0, px(6)))
 
-        bar = ttk.Frame(outer)
-        bar.pack(side="bottom", fill="x", pady=(self.px(4), 0))
-        ttk.Label(bar, textvariable=self.v_status, style="Hint.TLabel").pack(side="left")
         self.nb = ttk.Notebook(outer)
-        self.nb.pack(fill="both", expand=True, pady=(self.px(6), 0))
+        self.nb.pack(fill="both", expand=True, pady=(px(10), 0))
         self.nb.bind("<<NotebookTabChanged>>", lambda e: self.finish_all_edits())
         self.build_run_tab()
         self.build_mon_tab()
         self.build_case_tab()
         self.build_result_tab()
 
+    def tab_page(self, text):
+        """탭 하나: 탭 바로 아래 파란 줄과 흰 바탕 내용 영역."""
+        f = ttk.Frame(self.nb)
+        self.nb.add(f, text=text)
+        tk.Frame(f, bg=COLORS["blue"], height=self.px(3)).pack(fill="x")
+        body = ttk.Frame(f, padding=(self.px(10), self.px(8)))
+        body.pack(fill="both", expand=True)
+        return body
+
+    def toolbar(self, parent):
+        tb = ttk.Frame(parent)
+        tb.pack(fill="x", pady=(0, self.px(8)))
+        return tb
+
+    def help_button(self, bar, title, lines):
+        ttk.Button(bar, text="도움말", command=lambda: self.show_help(title, lines)).pack(side="right", padx=(self.px(6), 0))
+
+    def show_help(self, title, lines):
+        """[도움말] 창. lines 는 문장 목록 또는 문장 목록을 돌려주는 함수."""
+        if callable(lines):
+            lines = lines()
+        old = getattr(self, "help_win", None)
+        if old is not None:
+            try:
+                old.destroy()
+            except tk.TclError:
+                pass
+        C, px = COLORS, self.px
+        top = tk.Toplevel(self.root, bg=C["card"])
+        self.help_win = top
+        top.title("도움말 - " + title)
+        top.transient(self.root)
+        hd = tk.Frame(top, bg=C["dark"])
+        hd.pack(fill="x")
+        tk.Label(hd, text="도움말 - " + title, font=self.bold, bg=C["dark"], fg="white").pack(
+            side="left", padx=px(12), pady=px(6))
+        body = ttk.Frame(top, padding=(px(14), px(10), px(14), px(4)))
+        body.pack(fill="both", expand=True)
+        for i, line in enumerate(lines):
+            ttk.Label(body, text="•").grid(row=i, column=0, sticky="nw", padx=(0, px(6)), pady=px(2))
+            ttk.Label(body, text=line, wraplength=px(640), justify="left").grid(row=i, column=1, sticky="w", pady=px(2))
+        bf = ttk.Frame(top, padding=(px(14), px(6), px(14), px(12)))
+        bf.pack(fill="x")
+        ttk.Button(bf, text="닫기", command=top.destroy).pack(side="right")
+        top.bind("<Escape>", lambda e: top.destroy())
+        self._center(top)
+        top.focus_set()
+
+    RUN_HELP = [
+        "칸을 두 번 누르면(또는 F2, Enter) 그 칸을 고친다. 고치는 중에 Tab 을 누르면 다음 칸으로 간다.",
+        "고칠 때마다 데이터 폴더의 run_commands.csv 에 자동 저장되고, 다음 실행 때 불러온다.",
+        "명령어 명은 영문, 숫자, . _ - 만 쓴다. 탭 3 의 잡 칸에서 이 이름을 고른다. 이름을 바꾸면 그 이름을 쓰던 케이스도 바뀐다.",
+        "명령은 절대 경로로 입력한다. crontab 에 한 줄로 그대로 들어가고, cron 은 홈 폴더에서 실행한다.",
+        "변수: <vm이름> = VM 게스트 hostname, <실행시각> = 실행 시각 14자리 (예: 20261109000000)",
+        "예: /home/tester/bench/run_a.sh >> /home/tester/log/run_a-<vm이름>-<실행시각>.log 2>&1",
+    ]
+    MON_HELP = [
+        "어떤 모니터링 명령이든 직접 등록한다. 고칠 때마다 데이터 폴더의 monitor_commands.csv 에 자동 저장되고, 다음 실행 때 불러온다.",
+        "실행 위치가 VM 이면 그 VM 의 crontab 에, ESX 이면 ESX 호스트의 crontab 에 등록한다.",
+        "탭 3 에서 VM 행의 모니터링 칸은 실행 위치가 VM 인 명령을, 케이스 행의 모니터링 칸은 ESX 인 명령을 고른다.",
+        "중지 명령을 비우면 중지 줄을 만들지 않는다.",
+        "변수는 탭 1 과 같다. ESX 에서 실행하는 명령의 <vm이름> 은 ESX 호스트 이름이다.",
+    ]
+    RESULT_HELP = [
+        "A. 점프 VM 최초 1회 설정: 점프 VM 에서 처음 한 번만 붙여넣는다. VM password: 가 나오면 VM 비밀번호를 입력한다(화면에 보이지 않음). "
+        "비밀번호는 ~/.tcgen 에 본인만 읽을 수 있게 저장된다. 비밀번호를 바꿀 때는 sh ~/.tcgen/setpw 를 실행한다. "
+        "ESX 비밀번호는 저장하지 않는다.",
+        "B. VM 등록 블록: 점프 VM 터미널에 붙여넣는다. 어느 폴더에서 붙여넣어도 결과는 같다. VM 마다 ssh 로 접속해 crontab 에 줄을 "
+        "등록하고 등록된 줄을 출력한다. 다시 붙여넣어도 줄이 늘지 않는다.",
+        "C. ESX 블록: ESX 호스트를 고른 뒤 복사해 그 ESX 의 root SSH 창에 붙여넣는다. crontab 시각은 UTC (KST - 9시간)이다. "
+        "ESX 를 재부팅하면 등록한 줄이 지워진다.",
+        "[복사] 를 누르면 그 블록 전체가 클립보드에 들어간다. 점프 VM 터미널에서는 마우스 오른쪽 또는 Shift+Insert 로 붙여넣는다.",
+        "생성할 때마다 테스트 기록 CSV 에 케이스 행이 추가되고, 로그 폴더에 생성 로그가 남는다.",
+    ]
+
+    def case_help(self):
+        ld = self.leads() or (self.settings["mon_lead_min"], self.settings["stop_lead_min"])
+        p = self.vm_prefix()
+        n = int(self.settings.get("default_vms", 2))
+        return [
+            "케이스 행(옅은 파란 바탕, 굵은 글씨): 적용 체크, 케이스 이름, ESX 호스트, ESX 모니터링, 간격, 잡 시작, 모니터링 중지",
+            "VM 행(└): VM 이름, 잡, 그 VM 의 모니터링",
+            "칸을 두 번 누르면 고친다. 적용 칸을 누르면(또는 Space) 체크되고, 체크한 케이스는 [명령어 생성] 에서 빠진다. "
+            "표는 바뀔 때마다 데이터 폴더의 test_cases.json 에 저장된다.",
+            "새 케이스는 VM %d대(ESX 호스트 + %s01, %s02)가 기본이다. [+ VM 추가] 는 선택한 케이스에 다음 번호 VM(%s03, %s04 …)을 추가한다. "
+            "ESX 호스트를 바꾸면 자동으로 붙은 VM 이름도 따라 바뀐다." % (n, p, p, p, p),
+            "잡이 (없음) 이면 모니터링만 등록한다. 잡과 모니터링이 모두 없는 VM 은 등록하지 않는다.",
+            "+ 케이스 추가: 선택한 케이스를 VM 구성까지 복사한다. 잡 시작 = 윗줄 잡 시작 + 간격",
+            "삭제, 위로, 아래로: 케이스 행을 고르면 케이스를, VM 행을 고르면 그 VM 을 대상으로 한다. "
+            "위로, 아래로는 순서만 바꾸고 시각은 그 행에 남는다.",
+            "시각 형식: 2026-11-09 10:00:00, 간격 형식: 12:00",
+            "모니터링 시작 = 잡 시작 %d분 전. 모니터링 중지 = 자동(다음 케이스 잡 시작 %d분 전, 마지막 케이스는 잡 시작 + 간격 - %d분), "
+            "직접 입력, 중지 없음 중 하나. 이 시각은 그 케이스의 모든 VM 과 ESX 에 같이 적용된다." % (ld[0], ld[1], ld[1]),
+        ]
+
     def build_run_tab(self):
-        f = ttk.Frame(self.nb, padding=self.px(6))
-        self.nb.add(f, text=" 1. 실행 명령 ")
+        f = self.tab_page("1. 실행 명령")
         cols = [dict(key="app", title="App명", width=110), dict(key="name", title="명령어 명", width=140),
                 dict(key="desc", title="잡 조건 설명", width=200),
                 dict(key="cmd", title="경로/실행 명령 (절대 경로, 변수 <vm이름> <실행시각>)", width=700, stretch=True,
                      edit_width=700)]
+        tb = self.toolbar(f)
+        ttk.Button(tb, text="+ 행 추가", style="Green.TButton",
+                   command=lambda: self.add_cmd_row(self.t_run, "run")).pack(side="left")
+        ttk.Button(tb, text="삭제", command=lambda: self.del_cmd_row(self.t_run, "run")).pack(side="left", padx=self.px(6))
+        self.help_button(tb, "1. 실행 명령", self.RUN_HELP)
         self.t_run = EditableTable(f, self, cols, height=8)
         self.t_run.rows = self.run_cmds
         self.t_run.on_commit = self.commit_run
-        h = self.hint(f, "칸을 두 번 누르면 고친다. 고칠 때마다 run_commands.csv 에 자동 저장되고 다음 실행 때 불러온다. "
-                         "명령은 절대 경로로 입력한다. crontab 에 한 줄로 그대로 들어가고 cron 은 홈 폴더에서 실행한다. "
-                         "<vm이름> = VM 게스트 hostname, <실행시각> = 실행 시각 14자리 (예: 20261109000000). "
-                         "예: /home/tester/bench/run_a.sh >> /home/tester/log/run_a-<vm이름>-<실행시각>.log 2>&1")
-        h.pack(side="bottom", fill="x", pady=(self.px(6), 0))
-        b = ttk.Frame(f)
-        b.pack(side="bottom", fill="x", pady=(self.px(6), 0))
+        self.hint(f, "칸을 두 번 누르면 고친다. 명령은 절대 경로로 입력하고 변수 <vm이름> <실행시각> 을 쓸 수 있다. "
+                     "자세한 설명은 [도움말].").pack(side="bottom", fill="x", pady=(self.px(6), 0))
         self.t_run.pack(fill="both", expand=True)
-        ttk.Button(b, text="+ 행 추가", command=lambda: self.add_cmd_row(self.t_run, "run")).pack(side="left")
-        ttk.Button(b, text="삭제", command=lambda: self.del_cmd_row(self.t_run, "run")).pack(side="left", padx=6)
         self.t_run.refresh()
 
     def build_mon_tab(self):
-        f = ttk.Frame(self.nb, padding=self.px(6))
-        self.nb.add(f, text=" 2. 모니터링 명령 ")
+        f = self.tab_page("2. 모니터링 명령")
         cols = [dict(key="app", title="App명", width=100), dict(key="name", title="명령어 명", width=130),
                 dict(key="desc", title="설명", width=150),
                 dict(key="where", title="실행 위치", width=80, kind="combo", values=lambda: ["VM", "ESX"]),
                 dict(key="start", title="시작 명령", width=480, stretch=True, edit_width=600),
                 dict(key="stop", title="중지 명령", width=320, edit_width=500)]
+        tb = self.toolbar(f)
+        ttk.Button(tb, text="+ 행 추가", style="Green.TButton",
+                   command=lambda: self.add_cmd_row(self.t_mon, "mon")).pack(side="left")
+        ttk.Button(tb, text="삭제", command=lambda: self.del_cmd_row(self.t_mon, "mon")).pack(side="left", padx=self.px(6))
+        self.help_button(tb, "2. 모니터링 명령", self.MON_HELP)
         self.t_mon = EditableTable(f, self, cols, height=8)
         self.t_mon.rows = self.mon_cmds
         self.t_mon.on_commit = self.commit_mon
-        h = self.hint(f, "어떤 모니터링 명령이든 직접 등록한다. 고칠 때마다 monitor_commands.csv 에 자동 저장되고 다음 실행 때 불러온다. "
-                         "실행 위치가 VM 이면 PVM, SVM 의 crontab 에, ESX 이면 ESX 호스트의 crontab 에 등록한다. "
-                         "중지 명령을 비우면 중지 줄을 만들지 않는다. 변수는 탭 1 과 같다 (ESX 의 <vm이름> = ESX 호스트 이름).")
-        h.pack(side="bottom", fill="x", pady=(self.px(6), 0))
-        b = ttk.Frame(f)
-        b.pack(side="bottom", fill="x", pady=(self.px(6), 0))
+        self.hint(f, "칸을 두 번 누르면 고친다. 실행 위치가 VM 이면 VM 의 crontab, ESX 이면 ESX 호스트의 crontab 에 등록한다. "
+                     "자세한 설명은 [도움말].").pack(side="bottom", fill="x", pady=(self.px(6), 0))
         self.t_mon.pack(fill="both", expand=True)
-        ttk.Button(b, text="+ 행 추가", command=lambda: self.add_cmd_row(self.t_mon, "mon")).pack(side="left")
-        ttk.Button(b, text="삭제", command=lambda: self.del_cmd_row(self.t_mon, "mon")).pack(side="left", padx=6)
         self.t_mon.refresh()
 
     def build_case_tab(self):
-        f = ttk.Frame(self.nb, padding=self.px(6))
-        self.nb.add(f, text=" 3. 테스트 케이스 ")
+        f = self.tab_page("3. 테스트 케이스")
         job_values = lambda: [NONE_JOB] + [r["name"] for r in self.run_cmds if r.get("name")]
         cols = [dict(key="name", title="케이스 / VM", width=215), dict(key="esx", title="ESX 호스트", width=100),
                 dict(key="job", title="잡", width=110, values=job_values),
@@ -636,6 +818,16 @@ class App(object):
                 dict(key="start", title="잡 시작 (KST)", width=150),
                 dict(key="mon_start", title="모니터링 시작", width=105),
                 dict(key="mon_stop", title="모니터링 중지", width=150, popup=self.edit_stop)]
+        px = self.px
+        tb = self.toolbar(f)
+        ttk.Button(tb, text="+ 케이스 추가", style="Green.TButton", command=self.add_case).pack(side="left")
+        ttk.Button(tb, text="+ VM 추가", style="Purple.TButton", command=self.add_vm).pack(side="left", padx=(px(6), 0))
+        ttk.Button(tb, text="삭제", command=self.del_row).pack(side="left", padx=(px(16), 0))
+        ttk.Button(tb, text="위로", command=lambda: self.move_row(-1)).pack(side="left", padx=(px(6), 0))
+        ttk.Button(tb, text="아래로", command=lambda: self.move_row(1)).pack(side="left", padx=(px(6), 0))
+        ttk.Button(tb, text="명령어 생성", style="Red.TButton", command=self.generate).pack(side="right", ipadx=px(10),
+                                                                                    padx=(px(8), 0))
+        self.help_button(tb, "3. 테스트 케이스", self.case_help)
         t = EditableTable(f, self, cols, height=10,
                           check=dict(title="적용", width=48, on=self.img_on, off=self.img_off, toggle=self.toggle_applied))
         self.t_case = t
@@ -648,29 +840,22 @@ class App(object):
         t.display = self.case_display
         t.on_commit = self.commit_case
         t.before_refresh = self.calc_schedule
-        t.tree.tag_configure("case", font=self.bold)
-        self.case_hint = self.hint(f, "")
-        self.case_hint.pack(side="bottom", fill="x", pady=(self.px(6), 0))
-        b = ttk.Frame(f)
-        b.pack(side="bottom", fill="x", pady=(self.px(6), 0))
+        t.tree.tag_configure("case", background=COLORS["case"], font=self.bold)
+        t.tree.tag_configure("vm", background="white")
+        self.hint(f, "칸을 두 번 누르면 고친다. 케이스 행(옅은 파란 바탕)은 케이스 설정, VM 행(└)은 그 VM 의 잡과 모니터링. "
+                     "적용 체크한 케이스는 [명령어 생성] 에서 빠진다. 자세한 설명은 [도움말].").pack(
+            side="bottom", fill="x", pady=(px(6), 0))
         t.pack(fill="both", expand=True)
-        ttk.Button(b, text="+ 케이스 추가", command=self.add_case).pack(side="left")
-        ttk.Button(b, text="+ VM 추가", command=self.add_vm).pack(side="left", padx=(6, 0))
-        ttk.Button(b, text="삭제", command=self.del_row).pack(side="left", padx=6)
-        ttk.Button(b, text="위로", command=lambda: self.move_row(-1)).pack(side="left")
-        ttk.Button(b, text="아래로", command=lambda: self.move_row(1)).pack(side="left", padx=6)
-        gen = tk.Button(b, text="  명령어 생성  ", command=self.generate, font=self.bold, bg="#c0392b", fg="white",
-                        activebackground="#a93226", activeforeground="white", relief="raised", bd=1)
-        gen.pack(side="right")
-        self.update_case_hint()
         t.refresh()
 
     def build_result_tab(self):
-        f = ttk.Frame(self.nb, padding=self.px(6))
-        self.nb.add(f, text=" 4. 생성 결과 ")
-        top = ttk.Frame(f)
-        top.pack(fill="x")
-        self.res_text = tk.Text(top, height=6, wrap="word", relief="solid", bd=1, font=self.small)
+        f = self.tab_page("4. 생성 결과")
+        px = self.px
+        tb = self.toolbar(f)
+        self.help_button(tb, "4. 생성 결과", self.RESULT_HELP)
+        self.hint(tb, "블록마다 [복사] 를 누른 뒤 붙여넣을 창에 붙여넣는다. A 는 점프 VM 에서 처음 한 번만 붙여넣고, "
+                      "VM password: 가 나오면 VM 비밀번호를 입력한다.").pack(side="left", fill="x", expand=True)
+        self.res_text = self.text_box(f, height=5, wrap="word", font=self.small)
         self.res_text.pack(fill="x")
         make_readonly(self.res_text)
         self.res_text.tag_configure("ok", foreground="#1e7b34", font=self.bold)
@@ -678,35 +863,27 @@ class App(object):
         self.res_text.tag_configure("warn", foreground="#9a6700")
         set_text(self.res_text, "탭 3 에서 [명령어 생성] 을 누르면 여기에 결과가 나온다.")
         pw = ttk.PanedWindow(f, orient="horizontal")
-        pw.pack(fill="both", expand=True, pady=(self.px(6), 0))
-        self.blk_setup = self._block_panel(pw, "A. 점프 VM 최초 1회 설정 (비밀번호 저장)",
-                                           "점프 VM 에서 처음 한 번만. 이 블록만 붙여넣고, VM password: 가 나오면 VM 비밀번호를 입력한다 "
-                                           "(화면에 보이지 않음). ~/.tcgen 에 본인만 읽을 수 있게 저장된다. 비밀번호를 바꿀 때는 "
-                                           "sh ~/.tcgen/setpw 를 실행한다. ESX 비밀번호는 저장하지 않는다.",
-                                           lambda: self.copy_block("setup"))
-        self.blk_vm = self._block_panel(pw, "B. VM 등록 블록 (점프 VM 터미널에 붙여넣기)",
-                                        "어느 폴더에서 붙여넣어도 결과는 같다. VM 마다 ssh 로 접속해 crontab 에 줄을 등록하고 등록된 줄을 출력한다. "
-                                        "다시 붙여넣어도 줄이 늘지 않는다.", lambda: self.copy_block("vm"))
-        self.blk_esx = self._block_panel(pw, "C. ESX 블록 (root SSH 창에 붙여넣기)",
-                                         "호스트를 고른 뒤 복사해 그 ESX 의 root SSH 창에 붙여넣는다. crontab 시각은 UTC (KST - 9시간). "
-                                         "ESX 를 재부팅하면 등록한 줄이 지워진다.", lambda: self.copy_block("esx"), esx=True)
+        pw.pack(fill="both", expand=True, pady=(px(8), 0))
+        self.blk_setup = self._block_panel(pw, "A. 점프 VM 최초 1회 설정", lambda: self.copy_block("setup"))
+        self.blk_vm = self._block_panel(pw, "B. VM 등록 블록 (점프 VM 터미널)", lambda: self.copy_block("vm"))
+        self.blk_esx = self._block_panel(pw, "C. ESX 블록 (root SSH 창, 시각은 UTC)", lambda: self.copy_block("esx"),
+                                         esx=True)
 
-    def _block_panel(self, pw, title, note, copy_cmd, esx=False):
-        lf = ttk.LabelFrame(pw, text=title, padding=self.px(4))
+    def _block_panel(self, pw, title, copy_cmd, esx=False):
+        px = self.px
+        lf = ttk.LabelFrame(pw, text=title, padding=(px(8), px(4)))
         pw.add(lf, weight=1)
         hb = ttk.Frame(lf)
         hb.pack(fill="x")
-        tk.Button(hb, text=" 복사 ", command=copy_cmd, font=self.bold, bg="#c0392b", fg="white",
-                  activebackground="#a93226", activeforeground="white", bd=1).pack(side="right")
+        ttk.Button(hb, text="복사", style="Red.TButton", command=copy_cmd).pack(side="right")
         if esx:
             ttk.Label(hb, text="ESX 호스트").pack(side="left")
             self.cb_esx = ttk.Combobox(hb, textvariable=self.v_esx_host, state="readonly", width=14)
-            self.cb_esx.pack(side="left", padx=4)
+            self.cb_esx.pack(side="left", padx=px(6))
             self.cb_esx.bind("<<ComboboxSelected>>", lambda e: self.show_esx_block())
-        self.hint(lf, note).pack(fill="x", pady=(self.px(4), self.px(4)))
         body = ttk.Frame(lf)
-        body.pack(fill="both", expand=True)
-        t = tk.Text(body, wrap="none", font=self.mono_font, relief="solid", bd=1, width=40, height=10)
+        body.pack(fill="both", expand=True, pady=(px(6), 0))
+        t = self.text_box(body, wrap="none", font=self.mono_font, width=40, height=10)
         ys = ttk.Scrollbar(body, orient="vertical", command=t.yview)
         xs = ttk.Scrollbar(body, orient="horizontal", command=t.xview)
         t.configure(yscrollcommand=ys.set, xscrollcommand=xs.set)
@@ -724,7 +901,6 @@ class App(object):
             return
         self.autosave("settings")
         if hasattr(self, "t_case"):
-            self.update_case_hint()
             self.t_case.refresh()
 
     SAVE_NAMES = (("설정", "settings"), ("탭 1 실행 명령", "run"), ("탭 2 모니터링 명령", "mon"), ("탭 3 테스트 케이스", "cases"))
@@ -737,10 +913,6 @@ class App(object):
         if failed:
             tail += "   저장 실패: " + ", ".join(failed)
         self.v_status.set("데이터 폴더: %s%s" % (self.base, tail))
-
-    def update_data_hint(self):
-        self.data_hint.configure(text="데이터 폴더 = %s (설정, 명령, 테스트 케이스 표, 기록 기본 위치). 생성기 폴더와 따로 있어 "
-                                      "다시 빌드해도 남는다. 테스트 케이스 폴더 = 로그 폴더 (testcaselogging-*.csv)" % self.base)
 
     def autosave(self, kind):
         """설정, 탭 1, 탭 2, 탭 3 을 바뀔 때마다 데이터 폴더에 저장한다. 실패하면 상태 줄과 한 번의 알림으로 알린다."""
@@ -783,21 +955,6 @@ class App(object):
 
     def vm_prefix(self):
         return self.settings.get("vm_prefix") or "ev"
-
-    def update_case_hint(self):
-        ld = self.leads() or (self.settings["mon_lead_min"], self.settings["stop_lead_min"])
-        p = self.vm_prefix()
-        self.case_hint.configure(text=(
-            "케이스 행(굵은 글씨): 적용 체크, 케이스 이름, ESX 호스트, ESX 모니터링, 간격, 잡 시작, 모니터링 중지. "
-            "VM 행(└): VM 이름, 잡, 그 VM 의 모니터링. 칸을 두 번 누르면 고친다. 적용 칸을 누르면(또는 Space) 체크되고, "
-            "체크한 케이스는 [명령어 생성] 에서 빠진다. 표는 바뀔 때마다 test_cases.json 에 저장된다.\n"
-            "새 케이스는 VM %d대(ESX 호스트+%s01, %s02)가 기본. [+ VM 추가] 는 선택한 케이스에 다음 번호 VM(%s03, %s04 …)을 추가. "
-            "ESX 호스트를 바꾸면 자동으로 붙은 VM 이름도 따라 바뀐다. 잡이 (없음) 이면 모니터링만, 잡과 모니터링이 모두 없는 VM 은 등록하지 않는다.\n"
-            "+ 케이스 추가: 선택한 케이스를 VM 구성까지 복사, 잡 시작 = 윗줄 잡 시작 + 간격. 삭제, 위로, 아래로: 케이스 행이면 케이스, "
-            "VM 행이면 그 VM. 위로, 아래로는 케이스 순서만 바꾸고 시각은 그 행에 남는다. 시각 형식: 2026-11-09 10:00:00, 간격 형식: 12:00\n"
-            "모니터링 시작 = 잡 시작 %d분 전. 모니터링 중지 = 자동(다음 케이스 잡 시작 %d분 전, 마지막 케이스는 잡 시작 + 간격 - %d분) "
-            "/ 직접 입력 / 중지 없음. 이 시각은 그 케이스의 모든 VM 과 ESX 에 같이 적용된다."
-            % (int(self.settings.get("default_vms", 2)), p, p, p, p, ld[0], ld[1], ld[1])))
 
     def finish_all_edits(self):
         for t in (getattr(self, n, None) for n in ("t_run", "t_mon", "t_case")):
@@ -1327,7 +1484,7 @@ class App(object):
         if not mons and not missing:
             messagebox.showinfo(TITLE, "탭 2 에 실행 위치가 %s 인 모니터링 명령을 먼저 등록할 것" % where, parent=self.root)
             return
-        top = tk.Toplevel(self.root)
+        top = tk.Toplevel(self.root, bg=COLORS["card"])
         top.title(title)
         top.transient(self.root)
         fr = ttk.Frame(top, padding=self.px(10))
@@ -1359,7 +1516,7 @@ class App(object):
             self.t_case.refresh(iid)
 
         ttk.Button(bf, text="모두 해제", command=lambda: [var.set(False) for _, var in vars_]).pack(side="left", padx=(0, 20))
-        ttk.Button(bf, text="확인", command=ok).pack(side="left", padx=4)
+        ttk.Button(bf, text="확인", command=ok, style="Blue.TButton").pack(side="left", padx=4)
         ttk.Button(bf, text="취소", command=top.destroy).pack(side="left")
         top.bind("<Escape>", lambda e: top.destroy())
         top.bind("<Return>", lambda e: ok())
@@ -1378,7 +1535,7 @@ class App(object):
         self.calc_schedule()
         s = self.sched[i]
         ld = self.leads() or (self.settings["mon_lead_min"], self.settings["stop_lead_min"])
-        top = tk.Toplevel(self.root)
+        top = tk.Toplevel(self.root, bg=COLORS["card"])
         top.title("모니터링 중지 - %s" % (c.get("name") or "%d번째 케이스" % (i + 1)))
         top.transient(self.root)
         fr = ttk.Frame(top, padding=self.px(10))
@@ -1415,7 +1572,7 @@ class App(object):
             self.mark_cases()
             self.t_case.refresh(iid)
 
-        ttk.Button(bf, text="확인", command=ok).pack(side="left", padx=4)
+        ttk.Button(bf, text="확인", command=ok, style="Blue.TButton").pack(side="left", padx=4)
         ttk.Button(bf, text="취소", command=top.destroy).pack(side="left")
         top.bind("<Escape>", lambda e: top.destroy())
         top.bind("<Return>", lambda e: ok())
