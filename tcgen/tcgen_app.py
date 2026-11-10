@@ -340,7 +340,9 @@ class App(object):
                 keep = bad
             self.load_msg = "%s 를 읽지 못해 빈 표로 시작함 (원래 파일: %s) %s" % (core.CASES_FILE, keep, e)
         self.sched = []
-        self.dirty = {"settings": False, "run": False, "mon": False}
+        self.dirty = {"settings": False, "run": False, "mon": False, "cases": False}   # True = 자동 저장 실패
+        self.save_warned = {}
+        self.last_saved = None
         self.result = None
         self.setup_style()
         self.v_record = tk.StringVar(value=paths["record_csv"])
@@ -411,7 +413,7 @@ class App(object):
         outer = ttk.Frame(r, padding=self.px(6))
         outer.pack(fill="both", expand=True)
 
-        sf = ttk.LabelFrame(outer, text="설정 (생성기 폴더의 settings.json 에 저장)", padding=self.px(6))
+        sf = ttk.LabelFrame(outer, text="설정 (바뀔 때마다 생성기 폴더의 settings.json 에 자동 저장)", padding=self.px(6))
         sf.pack(fill="x")
         row1 = ttk.Frame(sf)
         row1.pack(fill="x")
@@ -436,7 +438,7 @@ class App(object):
         ttk.Label(row2, text="분 전 (다음 케이스 잡 시작 기준)").pack(side="left")
         row3 = ttk.Frame(sf)
         row3.pack(fill="x", pady=(self.px(6), 0))
-        for text, cmd in (("설정 저장", self.save_settings), ("설정 백업", self.backup), ("설정 폴더 열기", self.open_settings_dir),
+        for text, cmd in (("설정 백업", self.backup), ("설정 폴더 열기", self.open_settings_dir),
                           ("테스트 케이스 폴더 열기", self.open_case_dir)):
             ttk.Button(row3, text=text, command=cmd).pack(side="left", padx=(0, 6))
         self.hint(row3, "설정 폴더 = 생성기 폴더 (settings.json, run_commands.csv, monitor_commands.csv). "
@@ -463,7 +465,7 @@ class App(object):
         self.t_run = EditableTable(f, self, cols, height=8)
         self.t_run.rows = self.run_cmds
         self.t_run.on_commit = self.commit_run
-        h = self.hint(f, "칸을 두 번 누르면 고친다. [저장] 하면 run_commands.csv 에 저장되고 다음 실행 때 불러온다. "
+        h = self.hint(f, "칸을 두 번 누르면 고친다. 고칠 때마다 run_commands.csv 에 자동 저장되고 다음 실행 때 불러온다. "
                          "명령은 절대 경로로 입력한다. crontab 에 한 줄로 그대로 들어가고 cron 은 홈 폴더에서 실행한다. "
                          "<vm이름> = VM 게스트 hostname, <실행시각> = 실행 시각 14자리 (예: 20261109000000). "
                          "예: /home/tester/bench/run_a.sh >> /home/tester/log/run_a-<vm이름>-<실행시각>.log 2>&1")
@@ -473,7 +475,6 @@ class App(object):
         self.t_run.pack(fill="both", expand=True)
         ttk.Button(b, text="+ 행 추가", command=lambda: self.add_cmd_row(self.t_run, "run")).pack(side="left")
         ttk.Button(b, text="삭제", command=lambda: self.del_cmd_row(self.t_run, "run")).pack(side="left", padx=6)
-        ttk.Button(b, text="저장", command=self.save_run).pack(side="left")
         self.t_run.refresh()
 
     def build_mon_tab(self):
@@ -487,7 +488,7 @@ class App(object):
         self.t_mon = EditableTable(f, self, cols, height=8)
         self.t_mon.rows = self.mon_cmds
         self.t_mon.on_commit = self.commit_mon
-        h = self.hint(f, "어떤 모니터링 명령이든 직접 등록한다. [저장] 하면 monitor_commands.csv 에 저장되고 다음 실행 때 불러온다. "
+        h = self.hint(f, "어떤 모니터링 명령이든 직접 등록한다. 고칠 때마다 monitor_commands.csv 에 자동 저장되고 다음 실행 때 불러온다. "
                          "실행 위치가 VM 이면 PVM, SVM 의 crontab 에, ESX 이면 ESX 호스트의 crontab 에 등록한다. "
                          "중지 명령을 비우면 중지 줄을 만들지 않는다. 변수는 탭 1 과 같다 (ESX 의 <vm이름> = ESX 호스트 이름).")
         h.pack(side="bottom", fill="x", pady=(self.px(6), 0))
@@ -496,7 +497,6 @@ class App(object):
         self.t_mon.pack(fill="both", expand=True)
         ttk.Button(b, text="+ 행 추가", command=lambda: self.add_cmd_row(self.t_mon, "mon")).pack(side="left")
         ttk.Button(b, text="삭제", command=lambda: self.del_cmd_row(self.t_mon, "mon")).pack(side="left", padx=6)
-        ttk.Button(b, text="저장", command=self.save_mon).pack(side="left")
         self.t_mon.refresh()
 
     def build_case_tab(self):
@@ -589,16 +589,53 @@ class App(object):
 
     # ------------------------------------------------------------ 상태
     def _settings_changed(self, *a):
-        self.dirty["settings"] = True
-        self.update_status()
+        self.autosave("settings")
         if hasattr(self, "t_case"):
             self.update_case_hint()
             self.t_case.refresh()
 
+    SAVE_NAMES = (("설정", "settings"), ("탭 1 실행 명령", "run"), ("탭 2 모니터링 명령", "mon"), ("탭 3 테스트 케이스", "cases"))
+
     def update_status(self):
-        parts = [name for name, key in (("설정", "settings"), ("탭 1", "run"), ("탭 2", "mon")) if self.dirty[key]]
-        tail = ("   저장하지 않은 변경: " + ", ".join(parts)) if parts else ""
+        failed = [name for name, key in self.SAVE_NAMES if self.dirty[key]]
+        tail = ""
+        if self.last_saved:
+            tail = "   자동 저장 %s" % self.last_saved.strftime("%H:%M:%S")
+        if failed:
+            tail += "   저장 실패: " + ", ".join(failed)
         self.v_status.set("생성기 폴더 (설정 폴더): %s%s" % (self.base, tail))
+
+    def autosave(self, kind):
+        """설정, 탭 1, 탭 2, 탭 3 을 바뀔 때마다 생성기 폴더에 저장한다. 실패하면 상태 줄과 한 번의 알림으로 알린다."""
+        try:
+            if kind == "settings":
+                st = self.current_settings(show_error=False)
+                if st is None:          # 분 칸을 입력하는 중(숫자가 아님): 숫자가 되면 저장
+                    return
+                core.save_settings(self.base, core.resolve_paths(self.base, st))
+                self.settings = st
+            elif kind == "run":
+                core.save_rows(os.path.join(self.base, core.RUN_FILE), core.RUN_FIELDS, core.RUN_HEADERS, self.run_cmds)
+            elif kind == "mon":
+                core.save_rows(os.path.join(self.base, core.MON_FILE), core.MON_FIELDS, core.MON_HEADERS, self.mon_cmds)
+            else:
+                core.save_cases(self.base, self.cases)
+            self.dirty[kind] = False
+            self.last_saved = dt.datetime.now()
+        except OSError as e:
+            self.dirty[kind] = True
+            if not self.save_warned.get(kind):
+                self.save_warned[kind] = True
+                name = dict((k, n) for n, k in self.SAVE_NAMES)[kind]
+                messagebox.showerror(TITLE, "%s 을 자동 저장하지 못함\n%s\n%s\n\n생성기 폴더에 쓸 수 있는지 확인할 것"
+                                     % (name, self.base, e), parent=self.root)
+        self.update_status()
+
+    def save_everything(self):
+        self.finish_all_edits()
+        for _, kind in self.SAVE_NAMES:
+            self.autosave(kind)
+        return not any(self.dirty.values())
 
     def leads(self):
         try:
@@ -659,41 +696,8 @@ class App(object):
         if p:
             self.v_log.set(os.path.normpath(p))
 
-    def save_settings(self, quiet=False):
-        s = self.current_settings()
-        if s is None:
-            return False
-        try:
-            core.save_settings(self.base, core.resolve_paths(self.base, s))
-        except OSError as e:
-            messagebox.showerror(TITLE, "settings.json 을 저장하지 못함\n%s\n%s" % (self.base, e), parent=self.root)
-            return False
-        self.settings = s
-        self.dirty["settings"] = False
-        self.update_status()
-        if not quiet:
-            self.v_status.set("저장함: %s" % os.path.join(self.base, core.SETTINGS_FILE))
-        return True
-
-    def save_all(self):
-        ok = True
-        if self.dirty["settings"]:
-            ok = self.save_settings(quiet=True) and ok
-        if self.dirty["run"]:
-            ok = self.save_run(quiet=True) and ok
-        if self.dirty["mon"]:
-            ok = self.save_mon(quiet=True) and ok
-        return ok
-
     def backup(self):
-        self.finish_all_edits()
-        if any(self.dirty.values()):
-            ans = messagebox.askyesnocancel(TITLE, "저장하지 않은 변경이 있음.\n\n예: 지금 저장한 뒤 백업\n아니요: 마지막으로 저장한 파일을 백업\n취소: 백업하지 않음",
-                                            parent=self.root)
-            if ans is None:
-                return
-            if ans and not self.save_all():
-                return
+        self.save_everything()
         try:
             dest, copied = core.backup_settings(self.base)
         except OSError as e:
@@ -704,7 +708,7 @@ class App(object):
                 os.rmdir(dest)
             except OSError:
                 pass
-            messagebox.showinfo(TITLE, "백업할 파일이 없음. 먼저 [설정 저장] 과 탭 1, 탭 2 의 [저장] 을 누를 것", parent=self.root)
+            messagebox.showinfo(TITLE, "백업할 파일이 없음. 생성기 폴더에 저장된 파일이 없음", parent=self.root)
             return
         if messagebox.askyesno(TITLE, "백업함: %s\n\n%s\n\n복원은 이 파일들을 생성기 폴더에 덮어쓰고 생성기를 다시 실행한다.\n백업 폴더를 열까요?"
                                % (dest, "\n".join(copied)), parent=self.root):
@@ -730,8 +734,7 @@ class App(object):
         i = table.selected()
         i = len(table.rows) if i is None else i + 1
         table.rows.insert(i, row)
-        self.dirty[kind] = True
-        self.update_status()
+        self.autosave(kind)
         table.refresh(i)
         table.start_edit(i, 0)
 
@@ -748,8 +751,7 @@ class App(object):
         if not messagebox.askyesno(TITLE, msg, parent=self.root):
             return
         del table.rows[i]
-        self.dirty[kind] = True
-        self.update_status()
+        self.autosave(kind)
         table.refresh(i)
         self.t_case.refresh()
 
@@ -795,8 +797,9 @@ class App(object):
             self._cmd_warn(row["cmd"], "경로/실행 명령")
         else:
             row[key] = text.strip()
-        self.dirty["run"] = True
-        self.update_status()
+        self.autosave("run")
+        if key == "name":
+            self.autosave("cases")          # 이름을 바꾸면 탭 3 의 잡 칸도 따라 바뀜
         self.t_run.refresh(i)
         self.t_case.refresh()
 
@@ -828,49 +831,11 @@ class App(object):
             self._cmd_warn(row[key], "시작 명령" if key == "start" else "중지 명령")
         else:
             row[key] = text.strip()
-        self.dirty["mon"] = True
-        self.update_status()
+        self.autosave("mon")
+        if key in ("name", "where"):
+            self.autosave("cases")          # 탭 3 의 모니터링 선택도 따라 바뀜
         self.t_mon.refresh(i)
         self.t_case.refresh()
-
-    def _check_cmd_names(self, rows, label):
-        names = [r.get("name", "").strip() for r in rows]
-        if any(not n for n in names):
-            messagebox.showerror(TITLE, "%s: 명령어 명이 빈 행이 있음. 이름을 넣거나 행을 삭제할 것" % label, parent=self.root)
-            return False
-        return True
-
-    def save_run(self, quiet=False):
-        self.t_run.finish_edit()
-        if not self._check_cmd_names(self.run_cmds, "탭 1"):
-            return False
-        p = os.path.join(self.base, core.RUN_FILE)
-        try:
-            core.save_rows(p, core.RUN_FIELDS, core.RUN_HEADERS, self.run_cmds)
-        except OSError as e:
-            messagebox.showerror(TITLE, "저장하지 못함\n%s\n%s" % (p, e), parent=self.root)
-            return False
-        self.dirty["run"] = False
-        self.update_status()
-        if not quiet:
-            self.v_status.set("저장함: %s (%d행)" % (p, len(self.run_cmds)))
-        return True
-
-    def save_mon(self, quiet=False):
-        self.t_mon.finish_edit()
-        if not self._check_cmd_names(self.mon_cmds, "탭 2"):
-            return False
-        p = os.path.join(self.base, core.MON_FILE)
-        try:
-            core.save_rows(p, core.MON_FIELDS, core.MON_HEADERS, self.mon_cmds)
-        except OSError as e:
-            messagebox.showerror(TITLE, "저장하지 못함\n%s\n%s" % (p, e), parent=self.root)
-            return False
-        self.dirty["mon"] = False
-        self.update_status()
-        if not quiet:
-            self.v_status.set("저장함: %s (%d행)" % (p, len(self.mon_cmds)))
-        return True
 
     # ------------------------------------------------------------ 탭 3
     def calc_schedule(self):
@@ -900,10 +865,7 @@ class App(object):
 
     def mark_cases(self):
         """탭 3 이 바뀔 때마다 test_cases.json 에 저장한다(적용 체크 포함)."""
-        try:
-            core.save_cases(self.base, self.cases)
-        except OSError as e:
-            self.v_status.set("%s 저장 실패: %s" % (core.CASES_FILE, e))
+        self.autosave("cases")
 
     def toggle_applied(self, i):
         self.t_case.finish_edit()
@@ -1229,15 +1191,10 @@ class App(object):
 
     # ------------------------------------------------------------ 끝내기
     def on_close(self):
-        self.finish_all_edits()
-        parts = [name for name, key in (("설정", "settings"), ("탭 1 실행 명령", "run"), ("탭 2 모니터링 명령", "mon"))
-                 if self.dirty[key]]
-        if parts:
-            ans = messagebox.askyesnocancel(TITLE, "저장하지 않은 변경이 있음: %s\n저장하고 끝낼까요?" % ", ".join(parts),
-                                            parent=self.root)
-            if ans is None:
-                return
-            if ans and not self.save_all():
+        if not self.save_everything():
+            failed = [name for name, key in self.SAVE_NAMES if self.dirty[key]]
+            if not messagebox.askokcancel(TITLE, "저장하지 못한 항목이 있음: %s\n끝내면 이 변경은 사라진다. 끝낼까요?"
+                                          % ", ".join(failed), parent=self.root):
                 return
         self.root.destroy()
 

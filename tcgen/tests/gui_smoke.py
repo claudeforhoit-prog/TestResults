@@ -95,8 +95,8 @@ def main():
     check([r["name"] for r in app.run_cmds] == ["job_a", "job_b4"], "탭 1 명령 2개 입력")
     app.commit_run(1, "name", "job_a")
     check(any(x[0] == "error" for x in LOG) and app.run_cmds[1]["name"] == "job_b4", "같은 명령어 명 입력 거부")
-    check(app.save_run(), "탭 1 저장")
-    check(os.path.exists(os.path.join(BASE, core.RUN_FILE)), "run_commands.csv 생성")
+    saved_run = core.load_rows(os.path.join(BASE, core.RUN_FILE), core.RUN_FIELDS, core.RUN_HEADERS)
+    check([r["name"] for r in saved_run] == ["job_a", "job_b4"], "탭 1 은 [저장] 없이 run_commands.csv 에 자동 저장")
 
     # 탭 2: 모니터링 명령 (VM 1개, ESX 1개)
     app.add_cmd_row(app.t_mon, "mon")
@@ -115,7 +115,9 @@ def main():
     app.t_mon.start_edit(0, ci)
     check(isinstance(app.t_mon.editor[0], ttk.Combobox), "실행 위치 칸은 목록 선택")
     app.t_mon.finish_edit(commit=False)
-    check(app.save_mon(), "탭 2 저장")
+    saved_mon = core.load_rows(os.path.join(BASE, core.MON_FILE), core.MON_FIELDS, core.MON_HEADERS)
+    check([m["name"] for m in saved_mon] == ["guest_perf", "host_pmu"] and saved_mon[1]["where"] == "ESX",
+          "탭 2 는 [저장] 없이 monitor_commands.csv 에 자동 저장")
 
     # 탭 3: 케이스
     app.add_case()
@@ -177,10 +179,13 @@ def main():
     check([c["name"] for c in app.cases] == ["TC-base-a", "TC-base-b4", "TC-base-a-r3"], "다시 아래로")
 
     # 설정
+    n_log = len(LOG)
     app.v_user.set("tester")
-    check(app.dirty["settings"], "설정 변경 표시")
-    check(app.save_settings(), "설정 저장")
-    check(core.load_settings(BASE)["vm_user"] == "tester", "settings.json 에 계정 저장")
+    check(core.load_settings(BASE)["vm_user"] == "tester", "설정은 바뀌자마자 settings.json 에 자동 저장")
+    app.v_mon.set("")
+    check(core.load_settings(BASE)["mon_lead_min"] == 5, "분 칸을 비운 동안에는 저장하지 않음")
+    app.v_mon.set("5")
+    check(not any(x[0] == "error" for x in LOG[n_log:]), "분 칸 입력 중에는 오류 창이 뜨지 않음")
 
     # 생성
     shot(root, app, 0, "tcgen_tab1.png")
@@ -246,12 +251,17 @@ def main():
     check([c["start"] for c in app.cases] == ["2030-01-15 00:00:00", "2030-01-16 01:00:00"], "삭제해도 다른 케이스 시각 유지")
     check(app.cases[1]["interval"] == "25:00", "삭제 뒤 아래 행 간격 다시 계산")
 
-    # 다시 실행하면 명령 목록을 불러온다
+    # 저장 버튼 없이 고친 직후 창을 닫아도(끝내기 확인 없이) 다시 열면 남아 있다
+    app.commit_run(0, "desc", "1 job edited")
+    app.commit_mon(0, "stop", "/home/tester/mon/stop_mon.sh --all")
+    app.v_stop.set("12")
     root.destroy()
     root2 = tk.Tk()
     app2 = appmod.App(root2)
     check([r["name"] for r in app2.run_cmds] == ["job_a", "job_b4"] and len(app2.mon_cmds) == 2, "다시 실행 시 명령 목록 불러옴")
-    check(app2.v_user.get() == "tester", "다시 실행 시 설정 불러옴")
+    check(app2.v_user.get() == "tester" and app2.v_stop.get() == "12", "다시 실행 시 설정 불러옴")
+    check(app2.run_cmds[0]["desc"] == "1 job edited" and app2.mon_cmds[0]["stop"] == "/home/tester/mon/stop_mon.sh --all",
+          "닫기 직전에 고친 실행 명령, 모니터링 명령도 남아 있음")
     check([c["name"] for c in app2.cases] == ["TC-base-a", "TC-base-a-r3"] and [c["applied"] for c in app2.cases] == [True, False],
           "다시 실행 시 테스트 케이스 표와 적용 체크 불러옴")
     check("applied" in app2.t_case.tree.item("0", "tags"), "다시 실행 시 체크한 행 회색 표시")
