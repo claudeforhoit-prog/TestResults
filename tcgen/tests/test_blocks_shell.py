@@ -241,6 +241,7 @@ class ShellBlockTests(unittest.TestCase):
                                "svm_job": svm_job, "interval": "12:00", "start": "2026-11-20 00:00:00" if not self.cases else "",
                                "monitors": [dict(m, targets=list(m["targets"])) for m in mons], "stop_mode": mode})
         core.recalc_starts(self.cases)
+        self.cases = [core._clean_case(c) for c in self.cases]      # 예전 형식(PVM, SVM)을 VM 목록 형식으로
         self.settings = core.resolve_paths(r, core.load_settings(r))
         self.env = {"HOME": self.jump, "PATH": self.fakebin + ":/usr/bin:/bin", "TERM": "dumb", "FAKE_PW": TEST_PW,
                     "FAKE_VMS": self.vms, "LANG": "C", "USER": "tester"}

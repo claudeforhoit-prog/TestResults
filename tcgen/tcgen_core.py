@@ -28,7 +28,7 @@ import re
 import shutil
 import sys
 
-VERSION = "1.0"
+VERSION = "1.1"
 KST_TO_UTC = dt.timedelta(hours=9)
 CHUNK = 100            # 붙여넣는 글 한 줄에 담는 명령 조각 길이(문자 수)
 NONE_JOB = "(없음)"
@@ -38,10 +38,13 @@ RUN_FILE = "run_commands.csv"
 MON_FILE = "monitor_commands.csv"
 CASES_FILE = "test_cases.json"       # 탭 3 테스트 케이스 표와 적용 체크 상태
 
+CASES_VERSION = 2                     # 2: 케이스마다 VM 목록 (1: PVM, SVM 칸 고정)
 CASE_DEFAULTS = {
     "applied": False,      # 적용 체크: 이미 등록한 케이스. [명령어 생성] 에서 빠진다
-    "name": "", "esx": "", "pvm": "", "svm": "", "pvm_job": "(없음)", "svm_job": "(없음)",
-    "interval": "", "start": "", "monitors": [], "stop_mode": "auto", "stop_time": "",
+    "name": "", "esx": "",
+    "vms": [],             # VM 목록: {"name": VM 이름, "job": 탭 1 명령어 명 또는 (없음), "monitors": [탭 2 명령어 명]}
+    "esx_monitors": [],    # ESX 호스트에서 실행할 모니터링 (탭 2 명령어 명)
+    "interval": "", "start": "", "stop_mode": "auto", "stop_time": "",
 }
 DEFAULT_CASE_DIR = "testcases"
 DEFAULT_RECORD = "test_record.csv"
@@ -52,8 +55,8 @@ DEFAULT_SETTINGS = {
     "vm_user": "",             # 비우면 점프 VM 계정 그대로 ssh
     "mon_lead_min": 5,         # 모니터링 시작 = 잡 시작 N분 전
     "stop_lead_min": 10,       # 모니터링 중지(자동) = 다음 케이스 잡 시작 N분 전
-    "pvm_suffix": "ev01",      # PVM 이름 = ESX 호스트 이름 + 이 값
-    "svm_suffix": "ev02",      # SVM 이름 = ESX 호스트 이름 + 이 값
+    "vm_prefix": "ev",         # VM 이름 = ESX 호스트 이름 + 이 값 + 두 자리 번호 (ev01, ev02 ...)
+    "default_vms": 2,          # 새 케이스의 VM 수
 }
 
 RUN_FIELDS = ["app", "name", "desc", "cmd"]
@@ -104,12 +107,13 @@ def load_settings(base):
                 s.update(data)
         except (OSError, ValueError):
             pass
-    for k in ("mon_lead_min", "stop_lead_min"):
+    for k in ("mon_lead_min", "stop_lead_min", "default_vms"):
         try:
             s[k] = int(s[k])
         except (TypeError, ValueError):
             s[k] = DEFAULT_SETTINGS[k]
-    for k in ("record_csv", "log_dir", "vm_user", "pvm_suffix", "svm_suffix"):
+    s["default_vms"] = min(max(s["default_vms"], 0), 20)
+    for k in ("record_csv", "log_dir", "vm_user", "vm_prefix"):
         s[k] = "" if s.get(k) is None else str(s[k])
     return s
 
@@ -169,22 +173,45 @@ def save_rows(path, fields, headers, rows):
     _atomic_write(path, buf.getvalue(), "utf-8-sig")
 
 
+def _names(items):
+    """모니터링 명령어 명 목록을 정리한다(중복, 빈 이름 제거). 예전 형식의 {"name": ...} 도 받는다."""
+    out = []
+    for m in items or []:
+        n = m.get("name") if isinstance(m, dict) else m
+        n = "" if n is None else str(n).strip()
+        if n and n not in out:
+            out.append(n)
+    return out
+
+
+def _clean_vm(v):
+    job = "" if v.get("job") is None else str(v.get("job")).strip()
+    return {"name": "" if v.get("name") is None else str(v.get("name")).strip(),
+            "job": job or NONE_JOB, "monitors": _names(v.get("monitors"))}
+
+
 def _clean_case(c):
-    d = {k: c.get(k, v) for k, v in CASE_DEFAULTS.items()}
-    for k in ("name", "esx", "pvm", "svm", "pvm_job", "svm_job", "interval", "start", "stop_mode", "stop_time"):
-        d[k] = "" if d[k] is None else str(d[k])
-    d["stop_mode"] = d["stop_mode"] if d["stop_mode"] in ("auto", "manual", "none") else "auto"
-    d["applied"] = bool(d["applied"])
-    mons = []
-    for m in d.get("monitors") or []:
-        if isinstance(m, dict) and m.get("name"):
-            mons.append({"name": str(m["name"]), "targets": [t for t in (m.get("targets") or []) if t in ("PVM", "SVM", "ESX")]})
-    d["monitors"] = mons
+    d = {"applied": bool(c.get("applied", False))}
+    for k in ("name", "esx", "interval", "start", "stop_mode", "stop_time"):
+        v = c.get(k, CASE_DEFAULTS[k])
+        d[k] = "" if v is None else str(v)
+    if d["stop_mode"] not in ("auto", "manual", "none"):
+        d["stop_mode"] = "auto"
+    if "vms" in c:
+        d["vms"] = [_clean_vm(v) for v in (c.get("vms") or []) if isinstance(v, dict)]
+        d["esx_monitors"] = _names(c.get("esx_monitors"))
+    else:
+        # 예전 형식(PVM, SVM 칸): VM 2대로 바꾼다. 모니터링 대상 PVM, SVM 은 그 VM 의 모니터링, ESX 는 ESX 모니터링
+        mons = [m for m in (c.get("monitors") or []) if isinstance(m, dict) and m.get("name")]
+        d["vms"] = [{"name": str(c.get(nk) or "").strip(), "job": str(c.get(jk) or "").strip() or NONE_JOB,
+                     "monitors": _names([m for m in mons if role in (m.get("targets") or [])])}
+                    for role, nk, jk in (("PVM", "pvm", "pvm_job"), ("SVM", "svm", "svm_job"))]
+        d["esx_monitors"] = _names([m for m in mons if "ESX" in (m.get("targets") or [])])
     return d
 
 
 def load_cases(base):
-    """탭 3 테스트 케이스 표(적용 체크 포함)를 불러온다. 파일이 없으면 빈 목록."""
+    """탭 3 테스트 케이스 표(적용 체크 포함)를 불러온다. 파일이 없으면 빈 목록. 예전 형식도 읽는다."""
     p = os.path.join(base, CASES_FILE)
     if not os.path.exists(p):
         return []
@@ -195,8 +222,107 @@ def load_cases(base):
 
 
 def save_cases(base, cases):
-    data = {"version": 1, "cases": [_clean_case(c) for c in cases]}
+    data = {"version": CASES_VERSION, "cases": [_clean_case(c) for c in cases]}
     _atomic_write(os.path.join(base, CASES_FILE), json.dumps(data, ensure_ascii=False, indent=1) + "\n", "utf-8")
+
+
+def cases_file_version(base):
+    p = os.path.join(base, CASES_FILE)
+    if not os.path.exists(p):
+        return None
+    try:
+        with open(p, encoding="utf-8-sig") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if isinstance(data, dict):
+        try:
+            return int(data.get("version", 1) or 1)
+        except (TypeError, ValueError):
+            return 1
+    return 1
+
+
+def upgrade_cases_file(base, now=None):
+    """test_cases.json 이 예전 형식(PVM, SVM 칸)이면 원본을 backup/<시각>_before_vm_format/ 에 복사하고 VM 목록 형식으로
+    다시 저장한다. 바꿨으면 원본을 복사한 폴더, 아니면 None 을 반환한다."""
+    v = cases_file_version(base)
+    if v is None or v >= CASES_VERSION:
+        return None
+    ts = (now or dt.datetime.now()).strftime("%Y%m%d%H%M%S")
+    dest = os.path.join(base, "backup", ts + "_before_vm_format")
+    os.makedirs(dest, exist_ok=True)
+    shutil.copy2(os.path.join(base, CASES_FILE), os.path.join(dest, CASES_FILE))
+    save_cases(base, load_cases(base))
+    return dest
+
+
+def vm_name(esx, n, prefix="ev"):
+    esx = (esx or "").strip()
+    return "%s%s%02d" % (esx, prefix, n) if esx else ""
+
+
+def _vm_numbers(c, prefix="ev"):
+    esx = (c.get("esx") or "").strip()
+    nums = []
+    if esx:
+        rx = re.compile(re.escape(esx) + re.escape(prefix) + r"(\d+)$")
+        for v in c.get("vms") or []:
+            m = rx.match(v.get("name") or "")
+            if m:
+                nums.append(int(m.group(1)))
+    return nums
+
+
+def next_vm_number(c, prefix="ev"):
+    """[+ VM 추가] 로 붙일 다음 번호: 'ESX 호스트+ev번호' 이름 중 가장 큰 번호 + 1. 그런 이름이 없으면 VM 수 + 1."""
+    nums = _vm_numbers(c, prefix)
+    return max(nums) + 1 if nums else len(c.get("vms") or []) + 1
+
+
+def new_case(esx="", start="", count=2, prefix="ev"):
+    return {"applied": False, "name": "", "esx": esx,
+            "vms": [{"name": vm_name(esx, k + 1, prefix), "job": NONE_JOB, "monitors": []} for k in range(count)],
+            "esx_monitors": [], "interval": "", "start": start, "stop_mode": "auto", "stop_time": ""}
+
+
+def rename_vms_for_esx(c, old, new, prefix="ev"):
+    """ESX 호스트를 바꾸면 자동 이름(옛 호스트+ev번호)과 빈 이름의 VM 을 새 호스트 기준 이름으로 바꾼다. 직접 고친 이름은 둔다."""
+    old, new = (old or "").strip(), (new or "").strip()
+    vms = c.get("vms") or []
+    if old:
+        rx = re.compile(re.escape(old) + "(" + re.escape(prefix) + r"\d+)$")
+        for v in vms:
+            m = rx.match(v.get("name") or "")
+            if m:
+                v["name"] = (new + m.group(1)) if new else ""
+    if new:
+        c["esx"] = new
+        used = set(_vm_numbers(c, prefix))
+        n = 1
+        for v in vms:
+            if not v.get("name"):
+                while n in used:
+                    n += 1
+                v["name"] = vm_name(new, n, prefix)
+                used.add(n)
+
+
+def case_has_monitors(c):
+    return bool(c.get("esx_monitors")) or any(v.get("monitors") for v in (c.get("vms") or []))
+
+
+def format_vms(c):
+    """기록용 VM 구성: 'esx01ev01=job_a, esx01ev02=(없음)'."""
+    return ", ".join("%s=%s" % (v.get("name") or "(이름 없음)", v.get("job") or NONE_JOB) for v in (c.get("vms") or []))
+
+
+def format_case_monitors(c):
+    """기록용 모니터링: 'esx01ev01:guest_perf, esx01ev03:guest_perf+guest_gpu, esx01:host_pmu'."""
+    parts = ["%s:%s" % (v.get("name") or "(이름 없음)", "+".join(v["monitors"])) for v in (c.get("vms") or []) if v.get("monitors")]
+    if c.get("esx_monitors"):
+        parts.append("%s:%s" % (c.get("esx") or "ESX", "+".join(c["esx_monitors"])))
+    return ", ".join(parts)
 
 
 def backup_settings(base, now=None):
@@ -436,10 +562,6 @@ def interval_from_starts(cases, i):
     cases[i]["interval"] = fmt_interval(diff) if diff.total_seconds() > 0 else ""
 
 
-def selected_monitors(c):
-    return [m for m in (c.get("monitors") or []) if m.get("targets")]
-
-
 def case_schedule(cases, mon_lead_min, stop_lead_min):
     """케이스마다 잡 시작, 모니터링 시작, 모니터링 중지 시각과 시각 오류를 반환한다."""
     starts = []
@@ -533,11 +655,6 @@ def cron_line(t_kst, cmd, case, host, esx=False):
     return "%02d %02d %02d %02d * %s%s" % (t.minute, t.hour, t.day, t.month, render_command(cmd, esx), marker(case, host))
 
 
-def format_monitors(sel):
-    parts = ["%s(%s)" % (m["name"], ",".join(m["targets"])) for m in (sel or []) if m.get("targets")]
-    return ", ".join(parts) if parts else NONE_JOB
-
-
 def _dup_names(rows):
     seen, dup = set(), []
     for r in rows:
@@ -580,10 +697,10 @@ def build_entries(cases, run_cmds, mon_cmds, settings, now=None):
         checked.add(key)
         return check_command(text, label)
 
-    def add(c, role, host, kind, name, app, t, cmd, esx):
+    def add(c, role, host, kind, name, app, t, cmd, esx, desc=""):
         line = cron_line(t, cmd, c["name"].strip(), host, esx)
         entries.append({"case": c["name"].strip(), "role": role, "host": host, "kind": kind, "name": name,
-                        "app": app, "when": t, "esx": esx, "cmd": cmd.strip(), "line": line})
+                        "app": app, "desc": desc, "when": t, "esx": esx, "cmd": cmd.strip(), "line": line})
         if t < now:
             warnings.append("%s %s %s %s: %s 는 지난 시각. cron 은 연도가 없어 내년 같은 날짜에 실행됨"
                             % (c["name"].strip(), host, name, kind, fmt_dt(t)))
@@ -591,7 +708,7 @@ def build_entries(cases, run_cmds, mon_cmds, settings, now=None):
     for i, c in enumerate(cases):
         if c.get("applied"):
             continue
-        row = "%d행" % (i + 1)
+        row = "%d번째 케이스" % (i + 1)
         name = names[i]
         if not NAME_RE.match(name):
             errors.append("%s: 케이스 이름은 영문, 숫자, . _ - 만 사용 ('%s')" % (row, name))
@@ -601,61 +718,74 @@ def build_entries(cases, run_cmds, mon_cmds, settings, now=None):
                           "crontab 줄이 지워지고 바뀜" % (row, name))
             continue
         s = sched[i]
-        sel = selected_monitors(c)
-        jobs = [(role, (c.get(key) or "").strip()) for role, key in (("PVM", "pvm_job"), ("SVM", "svm_job"))]
-        jobs = [(role, j) for role, j in jobs if j and j != NONE_JOB]
-        if not sel and not jobs:
-            warnings.append("%s %s: 잡도 모니터링도 없어 등록할 줄이 없음" % (row, name))
+        esx_host = (c.get("esx") or "").strip()
+        esx_mons = list(c.get("esx_monitors") or [])
+        active = [v for v in (c.get("vms") or [])
+                  if ((v.get("job") or NONE_JOB).strip() not in ("", NONE_JOB)) or v.get("monitors")]
+        if not active and not esx_mons:
+            warnings.append("%s %s: VM 마다 잡도 모니터링도 없고 ESX 모니터링도 없어 등록할 줄이 없음" % (row, name))
             continue
         if s["start_error"]:
             errors.append("%s %s: 잡 시작 %s" % (row, name, s["start_error"]))
             continue
-        hosts = {"ESX": (c.get("esx") or "").strip(), "PVM": (c.get("pvm") or "").strip(),
-                 "SVM": (c.get("svm") or "").strip()}
-        need = set(role for role, _ in jobs)
-        for m in sel:
-            need.update(m["targets"])
-        bad = [r for r in ("ESX", "PVM", "SVM") if r in need and not NAME_RE.match(hosts[r])]
+        bad = ["VM '%s'" % (v.get("name") or "이름 없음") for v in active if not NAME_RE.match(v.get("name") or "")]
+        if esx_mons and not NAME_RE.match(esx_host):
+            bad.append("ESX 호스트 '%s'" % esx_host)
         if bad:
-            errors.append("%s %s: %s 이름이 비었거나 영문, 숫자, . _ - 밖의 문자가 있음" % (row, name, ", ".join(bad)))
+            errors.append("%s %s: 이름이 비었거나 영문, 숫자, . _ - 밖의 문자가 있음: %s" % (row, name, ", ".join(bad)))
             continue
-        if sel and s["stop_error"]:
+        vm_names = [v["name"] for v in active]
+        dups = sorted(set(n for n in vm_names if vm_names.count(n) > 1))
+        if dups:
+            errors.append("%s %s: 같은 VM 이름이 두 번 이상 있음: %s" % (row, name, ", ".join(dups)))
+            continue
+        has_mon = bool(esx_mons) or any(v.get("monitors") for v in active)
+        if has_mon and s["stop_error"]:
             errors.append("%s %s: %s" % (row, name, s["stop_error"]))
             continue
-        if sel and s["mon_stop"] is not None and i + 1 < len(cases) and sched[i + 1]["mon_start"] is not None \
-                and selected_monitors(cases[i + 1]) and s["mon_stop"] >= sched[i + 1]["mon_start"]:
+        if has_mon and s["mon_stop"] is not None and i + 1 < len(cases) and sched[i + 1]["mon_start"] is not None \
+                and case_has_monitors(cases[i + 1]) and s["mon_stop"] >= sched[i + 1]["mon_start"]:
             warnings.append("%s %s: 모니터링 중지 %s 가 다음 케이스 모니터링 시작 %s 보다 늦음"
                             % (row, name, fmt_dt(s["mon_stop"]), fmt_dt(sched[i + 1]["mon_start"])))
-        for m in sel:
-            mname = m["name"]
+
+        def add_monitor(mname, host, esx, where_label):
             mc = mon_by.get(mname)
             if not mc:
                 errors.append("%s %s: 모니터링 명령 '%s' 가 탭 2 에 없음" % (row, name, mname))
-                continue
-            esx = (mc.get("where") or "VM").strip().upper() == "ESX"
-            wrong = [t for t in m["targets"] if (t == "ESX") != esx]
-            if wrong:
-                errors.append("%s %s: 모니터링 '%s' 실행 위치는 %s 인데 대상이 %s. 모니터링 칸에서 다시 선택"
-                              % (row, name, mname, "ESX" if esx else "VM", ",".join(wrong)))
-                continue
+                return
+            if ((mc.get("where") or "VM").strip().upper() == "ESX") != esx:
+                errors.append("%s %s: 모니터링 '%s' 의 실행 위치는 %s 인데 %s 에서 골랐음. %s" % (
+                    row, name, mname, "VM" if esx else "ESX", where_label,
+                    "VM 행의 모니터링 칸에서 고를 것" if esx else "케이스 행의 모니터링 칸에서 고를 것"))
+                return
             for e in cmd_errors(mc.get("start"), "탭 2 '%s' 시작 명령" % mname):
                 errors.append(e)
             stop_cmd = (mc.get("stop") or "").strip()
             if stop_cmd:
                 for e in cmd_errors(stop_cmd, "탭 2 '%s' 중지 명령" % mname):
                     errors.append(e)
-            for role in m["targets"]:
-                add(c, role, hosts[role], "모니터링 시작", mname, mc.get("app", ""), s["mon_start"], mc.get("start", ""), esx)
-                if s["mon_stop"] is not None and stop_cmd:
-                    add(c, role, hosts[role], "모니터링 중지", mname, mc.get("app", ""), s["mon_stop"], stop_cmd, esx)
-        for role, jn in jobs:
+            role = "ESX" if esx else "VM"
+            add(c, role, host, "모니터링 시작", mname, mc.get("app", ""), s["mon_start"], mc.get("start", ""), esx,
+                mc.get("desc", ""))
+            if s["mon_stop"] is not None and stop_cmd:
+                add(c, role, host, "모니터링 중지", mname, mc.get("app", ""), s["mon_stop"], stop_cmd, esx, mc.get("desc", ""))
+
+        for v in active:
+            for mname in v.get("monitors") or []:
+                add_monitor(mname, v["name"], False, "VM 행 (%s)" % v["name"])
+        for mname in esx_mons:
+            add_monitor(mname, esx_host, True, "케이스 행 (ESX 모니터링)")
+        for v in active:
+            jn = (v.get("job") or NONE_JOB).strip()
+            if jn in ("", NONE_JOB):
+                continue
             rc = run_by.get(jn)
             if not rc:
-                errors.append("%s %s: %s 잡 '%s' 가 탭 1 에 없음" % (row, name, role, jn))
+                errors.append("%s %s: VM '%s' 의 잡 '%s' 가 탭 1 에 없음" % (row, name, v["name"], jn))
                 continue
             for e in cmd_errors(rc.get("cmd"), "탭 1 '%s' 명령" % jn):
                 errors.append(e)
-            add(c, role, hosts[role], "잡", jn, rc.get("app", ""), s["job"], rc.get("cmd", ""), False)
+            add(c, "VM", v["name"], "잡", jn, rc.get("app", ""), s["job"], rc.get("cmd", ""), False, rc.get("desc", ""))
     entries.sort(key=lambda e: (e["when"], order[e["kind"]]))
     return entries, errors, warnings, sched
 
@@ -794,25 +924,26 @@ def build_blocks(entries, settings):
 
 
 # ------------------------------------------------------------------ 기록
-RECORD_HEADER = ["테스트 케이스 이름", "생성 시각", "ESX 호스트", "PVM", "SVM",
-                 "PVM 잡", "PVM 잡 조건", "PVM 잡 명령", "SVM 잡", "SVM 잡 조건", "SVM 잡 명령",
-                 "잡 시작(KST)", "간격", "모니터링(대상)", "모니터링 시작(KST)", "모니터링 중지(KST)"]
-LOG_HEADER = ["테스트 케이스 이름", "생성 시각", "구분", "대상", "호스트", "명령어 명", "App명", "실행 시각(KST)",
-              "crontab 시각 기준", "명령", "crontab 줄", "ESX 호스트", "PVM", "SVM", "잡 시작(KST)", "간격",
-              "모니터링(대상)", "모니터링 시작(KST)", "모니터링 중지(KST)"]
+RECORD_HEADER = ["테스트 케이스 이름", "생성 시각", "ESX 호스트", "VM 구성", "잡 시작(KST)", "간격", "모니터링",
+                 "모니터링 시작(KST)", "모니터링 중지(KST)"]
+LOG_HEADER = ["테스트 케이스 이름", "생성 시각", "구분", "대상", "실행 위치", "명령어 명", "App명", "설명", "실행 시각(KST)",
+              "crontab 시각 기준", "명령", "crontab 줄", "ESX 호스트", "VM 구성", "잡 시작(KST)", "간격", "모니터링",
+              "모니터링 시작(KST)", "모니터링 중지(KST)"]
 
 
 def _stop_text(c, s):
-    if not selected_monitors(c):
+    if not case_has_monitors(c):
         return ""
     if (c.get("stop_mode") or "auto") == "none":
         return "중지 없음"
     return fmt_dt(s["mon_stop"]) if s.get("mon_stop") else ""
 
 
-def append_csv(path, header, rows):
-    """CSV 에 행을 추가한다. 새 파일이면 머리글을 쓴다. 기존 파일 머리글이 다르면 같은 이름의 열에만 값을 넣는다.
-    첫 열에는 항상 테스트 케이스 이름을 넣는다. 기존 파일에 없어 기록하지 못한 열 이름 목록을 반환한다."""
+def append_csv(path, header, rows, backup_dir=None, now=None):
+    """CSV 에 행을 추가한다. 새 파일이면 머리글을 쓴다. 기존 파일은 머리글 이름으로 열을 맞춰 기록하고, 첫 열에는 항상
+    테스트 케이스 이름을 넣는다. 기존 머리글에 없는 열은 머리글 끝에 덧붙이고(기존 행의 그 칸은 비움) 파일을 다시 쓴다.
+    다시 쓰기 전 원본은 backup_dir(없으면 같은 폴더)에 <시각>_before_header_change_<파일 이름> 으로 복사한다.
+    (덧붙인 열 이름 목록, 원본 복사 경로 또는 None) 반환."""
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     if not os.path.exists(path) or os.path.getsize(path) == 0:
         buf = io.StringIO()
@@ -821,75 +952,78 @@ def append_csv(path, header, rows):
         w.writerows(rows)
         with open(path, "w", encoding="utf-8-sig", newline="") as f:
             f.write(buf.getvalue())
-        return []
+        return [], None
     with open(path, "rb") as f:
         data = f.read()
     if b"\x00" in data[:4096]:
         raise ValueError("테스트 기록 CSV 를 글자로 읽을 수 없음 (암호화된 파일일 수 있음): %s" % path)
+    bom = data.startswith(codecs.BOM_UTF8)
     try:
         text, enc = _decode(data)
     except UnicodeDecodeError:
         raise ValueError("테스트 기록 CSV 의 글자 인코딩을 알 수 없음 (UTF-8, CP949 아님): %s" % path)
-    first = next(csv.reader(io.StringIO(text)), [])
-    existing = [h.strip() for h in first]
-    if existing == header:
-        out_rows, missing = rows, []
-    else:
-        idx = {h: i for i, h in enumerate(header)}
-        out_rows = []
-        for r in rows:
-            o = []
-            for j, h in enumerate(existing):
-                if j == 0:
-                    o.append(r[0])
-                elif h in idx:
-                    o.append(r[idx[h]])
-                else:
-                    o.append("")
-            out_rows.append(o)
-        missing = [h for h in header[1:] if h not in existing]
+    all_rows = list(csv.reader(io.StringIO(text)))
+    existing = [h.strip() for h in (all_rows[0] if all_rows else [])]
+    added = [h for h in header[1:] if h not in existing]
+    cols = existing + added
+    idx = {h: i for i, h in enumerate(header)}
+    out_rows = []
+    for r in rows:
+        o = []
+        for j, h in enumerate(cols):
+            o.append(r[0] if j == 0 else (r[idx[h]] if h in idx else ""))
+        out_rows.append(o)
+    if not added:
+        buf = io.StringIO()
+        if data and not data.endswith(b"\n"):
+            buf.write("\r\n")
+        csv.writer(buf).writerows(out_rows)
+        with open(path, "a", encoding=enc, newline="", errors="replace") as f:
+            f.write(buf.getvalue())
+        return [], None
+    ts = (now or dt.datetime.now()).strftime("%Y%m%d%H%M%S")
+    bdir = backup_dir or os.path.dirname(os.path.abspath(path))
+    os.makedirs(bdir, exist_ok=True)
+    keep = os.path.join(bdir, "%s_before_header_change_%s" % (ts, os.path.basename(path)))
+    shutil.copy2(path, keep)
     buf = io.StringIO()
-    if data and not data.endswith(b"\n"):
-        buf.write("\r\n")
-    csv.writer(buf).writerows(out_rows)
-    with open(path, "a", encoding=enc, newline="", errors="replace") as f:
+    w = csv.writer(buf)
+    w.writerow(cols)
+    for r in all_rows[1:]:
+        w.writerow(list(r) + [""] * max(0, len(cols) - len(r)))
+    w.writerows(out_rows)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding=("utf-8-sig" if bom else enc), newline="", errors="replace") as f:
         f.write(buf.getvalue())
-    return missing
+    os.replace(tmp, path)
+    return added, keep
 
 
-def write_records(settings, cases, sched, entries, run_cmds, gen_time):
+def write_records(settings, cases, sched, entries, run_cmds, gen_time, backup_dir=None):
     """테스트 기록 CSV 에 케이스마다 한 행 추가, 로그 폴더에 testcaselogging-<년월일시분초>.csv 저장."""
-    run_by = {r["name"].strip(): r for r in run_cmds if (r.get("name") or "").strip()}
     gen_text = fmt_dt(gen_time)
     used = set(e["case"] for e in entries)
     rec_rows = []
     by_case = {}
     for i, c in enumerate(cases):
         name = (c.get("name") or "").strip()
-        if name not in used:
+        if name not in used or c.get("applied"):
             continue
         s = sched[i]
         by_case[name] = (c, s)
-        jobs = []
-        for key in ("pvm_job", "svm_job"):
-            j = (c.get(key) or "").strip()
-            j = "" if j == NONE_JOB else j
-            rc = run_by.get(j, {})
-            jobs += [j, rc.get("desc", "") if j else "", rc.get("cmd", "") if j else ""]
-        has_mon = bool(selected_monitors(c))
-        rec_rows.append([name, gen_text, c.get("esx", ""), c.get("pvm", ""), c.get("svm", "")] + jobs +
-                        [fmt_dt(s["job"]) if s["job"] else "", c.get("interval", ""),
-                         format_monitors(c.get("monitors")) if has_mon else "",
+        has_mon = case_has_monitors(c)
+        rec_rows.append([name, gen_text, c.get("esx", ""), format_vms(c), fmt_dt(s["job"]) if s["job"] else "",
+                         c.get("interval", ""), format_case_monitors(c) if has_mon else "",
                          fmt_dt(s["mon_start"]) if (has_mon and s["mon_start"]) else "", _stop_text(c, s)])
-    missing = append_csv(settings["record_csv"], RECORD_HEADER, rec_rows)
+    added, keep = append_csv(settings["record_csv"], RECORD_HEADER, rec_rows, backup_dir=backup_dir, now=gen_time)
     log_rows = []
     for e in entries:
         c, s = by_case[e["case"]]
-        has_mon = bool(selected_monitors(c))
-        log_rows.append([e["case"], gen_text, e["kind"], e["role"], e["host"], e["name"], e["app"], fmt_dt(e["when"]),
-                         "UTC" if e["esx"] else "KST", e["cmd"], e["line"], c.get("esx", ""), c.get("pvm", ""),
-                         c.get("svm", ""), fmt_dt(s["job"]) if s["job"] else "", c.get("interval", ""),
-                         format_monitors(c.get("monitors")) if has_mon else "",
+        has_mon = case_has_monitors(c)
+        log_rows.append([e["case"], gen_text, e["kind"], e["host"], e["role"], e["name"], e["app"], e.get("desc", ""),
+                         fmt_dt(e["when"]), "UTC" if e["esx"] else "KST", e["cmd"], e["line"], c.get("esx", ""),
+                         format_vms(c), fmt_dt(s["job"]) if s["job"] else "", c.get("interval", ""),
+                         format_case_monitors(c) if has_mon else "",
                          fmt_dt(s["mon_start"]) if (has_mon and s["mon_start"]) else "", _stop_text(c, s)])
     os.makedirs(settings["log_dir"], exist_ok=True)
     log_path = os.path.join(settings["log_dir"], "testcaselogging-%s.csv" % gen_time.strftime("%Y%m%d%H%M%S"))
@@ -899,27 +1033,27 @@ def write_records(settings, cases, sched, entries, run_cmds, gen_time):
     w.writerows(log_rows)
     with open(log_path, "w", encoding="utf-8-sig", newline="") as f:
         f.write(buf.getvalue())
-    return settings["record_csv"], log_path, len(rec_rows), missing
+    return settings["record_csv"], log_path, len(rec_rows), added, keep
 
 
-def generate(cases, run_cmds, mon_cmds, settings, now=None, write=True):
+def generate(cases, run_cmds, mon_cmds, settings, now=None, write=True, backup_dir=None):
     """화면의 [명령어 생성] 한 번에 해당한다. 오류가 있으면 블록과 기록을 만들지 않는다.
-    settings 의 record_csv, log_dir 는 resolve_paths 로 바꾼 절대 경로여야 한다."""
+    settings 의 record_csv, log_dir 는 resolve_paths 로 바꾼 절대 경로여야 한다. backup_dir: 기록 CSV 머리글을 바꾸기 전 원본 복사 위치."""
     now = (now or dt.datetime.now()).replace(microsecond=0)
     entries, errors, warnings, sched = build_entries(cases, run_cmds, mon_cmds, settings, now)
     res = {"errors": errors, "warnings": warnings, "entries": entries, "sched": sched,
            "vm": "", "esx": {}, "setup": setup_block(), "record": "", "log": "", "record_rows": 0,
-           "record_missing": [], "gen_time": now}
+           "record_added": [], "record_backup": None, "gen_time": now}
     res["skipped"] = sum(1 for c in cases if c.get("applied"))
     if errors or not entries:
         if not entries and not errors:
             if cases and all(c.get("applied") for c in cases):
                 res["errors"] = ["모든 케이스가 적용 체크되어 있어 생성할 케이스가 없음. 새로 등록할 케이스는 적용 체크를 끌 것"]
             else:
-                res["errors"] = ["등록할 줄이 없음. 적용 체크를 끈 케이스마다 잡이나 모니터링을 하나 이상 지정할 것"]
+                res["errors"] = ["등록할 줄이 없음. 적용 체크를 끈 케이스의 VM 에 잡이나 모니터링을 하나 이상 지정할 것"]
         return res
     res["vm"], res["esx"] = build_blocks(entries, settings)
     if write:
-        res["record"], res["log"], res["record_rows"], res["record_missing"] = write_records(
-            settings, cases, sched, entries, run_cmds, now)
+        res["record"], res["log"], res["record_rows"], res["record_added"], res["record_backup"] = write_records(
+            settings, cases, sched, entries, run_cmds, now, backup_dir=backup_dir)
     return res

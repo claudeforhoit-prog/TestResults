@@ -27,14 +27,18 @@ MON = [
      "stop": "/home/tester/mon/stop_mon.sh"},
     {"app": "mon", "name": "host_mon", "desc": "", "where": "ESX",
      "start": "/bin/sh /vmfs/volumes/ds1/mon/host_mon.sh start '%H'", "stop": "/bin/sh /vmfs/volumes/ds1/mon/host_mon.sh stop"},
+    {"app": "mon", "name": "guest_gpu", "desc": "GPU", "where": "VM",
+     "start": "/home/tester/mon/gpu_mon.sh", "stop": "/home/tester/mon/gpu_mon.sh --stop"},
 ]
 
 
 def case(name, start, interval="12:00", pvm_job="job_a", svm_job="(없음)", monitors=None, stop_mode="auto", stop_time=""):
-    return {"name": name, "esx": "esx01", "pvm": "esx01ev01", "svm": "esx01ev02", "pvm_job": pvm_job, "svm_job": svm_job,
-            "interval": interval, "start": start, "stop_mode": stop_mode, "stop_time": stop_time,
-            "monitors": copy.deepcopy(monitors) if monitors is not None else
-            [{"name": "guest_perf", "targets": ["PVM", "SVM"]}, {"name": "host_mon", "targets": ["ESX"]}]}
+    """예전 형식(PVM, SVM 칸)으로 만들어 core._clean_case 로 바꾼다. 예전 형식 변환도 함께 시험된다."""
+    old = {"name": name, "esx": "esx01", "pvm": "esx01ev01", "svm": "esx01ev02", "pvm_job": pvm_job, "svm_job": svm_job,
+           "interval": interval, "start": start, "stop_mode": stop_mode, "stop_time": stop_time,
+           "monitors": copy.deepcopy(monitors) if monitors is not None else
+           [{"name": "guest_perf", "targets": ["PVM", "SVM"]}, {"name": "host_mon", "targets": ["ESX"]}]}
+    return core._clean_case(old)
 
 
 class TmpDir(unittest.TestCase):
@@ -184,9 +188,9 @@ class EntryTests(TmpDir):
                           RUN, MON, st, now=NOW)["errors"]
         self.assertTrue(any("실행 위치는 ESX" in x for x in e))
         c = case("A", "2026-11-20 00:00:00")
-        c["pvm"] = ""
+        c["vms"][0]["name"] = ""
         e = core.generate([c], RUN, MON, st, now=NOW)["errors"]
-        self.assertTrue(any("PVM 이름" in x for x in e))
+        self.assertTrue(any("이름이 비었거나" in x for x in e), e)
         e = core.generate([case("A", "2026-11-20 00:00:00")], RUN + [dict(RUN[0])], MON, st, now=NOW)["errors"]
         self.assertTrue(any("두 번 이상" in x for x in e))
         st2 = dict(st, stop_lead_min=5, mon_lead_min=5)
@@ -254,15 +258,17 @@ class AppliedTests(TmpDir):
         self.assertEqual([c["name"] for c in got], ["A", "B"])
         self.assertEqual([c["applied"] for c in got], [True, False])
         self.assertEqual(got[1]["stop_mode"], "none")
-        self.assertEqual(got[0]["monitors"], cs[0]["monitors"])
+        self.assertEqual(got[0]["vms"], cs[0]["vms"])
+        self.assertEqual(got[0]["esx_monitors"], ["host_mon"])
         with open(os.path.join(self.base, core.CASES_FILE), "w", encoding="utf-8") as f:
-            json.dump({"version": 1, "cases": [{"name": "X", "applied": 1, "monitors": [{"name": "m", "targets": ["PVM", "BAD"]}],
+            json.dump({"version": 1, "cases": [{"name": "X", "applied": 1, "pvm": "h1ev01",
+                                                "monitors": [{"name": "m", "targets": ["PVM", "BAD"]}],
                                                 "stop_mode": "odd"}]}, f)
         got = core.load_cases(self.base)
         self.assertEqual(got[0]["applied"], True)
-        self.assertEqual(got[0]["monitors"], [{"name": "m", "targets": ["PVM"]}])
+        self.assertEqual(got[0]["vms"][0], {"name": "h1ev01", "job": "(없음)", "monitors": ["m"]})
+        self.assertEqual(got[0]["vms"][1], {"name": "", "job": "(없음)", "monitors": []})
         self.assertEqual(got[0]["stop_mode"], "auto")
-        self.assertEqual(got[0]["pvm_job"], "(없음)")
         dest, copied = core.backup_settings(self.base, now=NOW)
         self.assertIn(core.CASES_FILE, copied)
         self.assertEqual(core.load_cases(os.path.join(self.base, "missing")), [])
@@ -365,6 +371,96 @@ class DataDirTests(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(other, core.RUN_FILE)), "데이터가 있는 폴더로 바꿀 때는 복사하지 않음")
 
 
+class VmTests(TmpDir):
+    """케이스마다 VM 여러 대: VM 별 잡과 모니터링, ESX 모니터링, 이름 자동 번호, 예전 형식 변환."""
+
+    def vm_case(self, name, start, vms, esx_monitors=(), interval="12:00", stop_mode="auto"):
+        return core._clean_case({"name": name, "esx": "esx01", "vms": vms, "esx_monitors": list(esx_monitors),
+                                 "interval": interval, "start": start, "stop_mode": stop_mode})
+
+    def read(self, path):
+        with open(path, encoding="utf-8-sig", newline="") as f:
+            return list(csv.reader(f))
+
+    def test_four_vms_each_own_job_and_monitors(self):
+        c = self.vm_case("TC-4vm", "2026-11-20 12:00:00", [
+            {"name": "esx01ev01", "job": "job_a", "monitors": ["guest_perf"]},
+            {"name": "esx01ev02", "job": "job_a", "monitors": []},
+            {"name": "esx01ev03", "job": "job_b4", "monitors": ["guest_perf", "guest_gpu"]},
+            {"name": "esx01ev04", "job": "(없음)", "monitors": []}], esx_monitors=["host_mon"])
+        res = core.generate([c], RUN, MON, self.settings, now=NOW)
+        self.assertEqual(res["errors"], [])
+        got = set((e["host"], e["kind"], e["name"]) for e in res["entries"])
+        self.assertIn(("esx01ev01", "잡", "job_a"), got)
+        self.assertIn(("esx01ev03", "모니터링 시작", "guest_gpu"), got)
+        self.assertIn(("esx01ev03", "모니터링 중지", "guest_gpu"), got)
+        self.assertNotIn(("esx01ev02", "모니터링 시작", "guest_perf"), got, "VM 마다 모니터링이 다름")
+        self.assertIn(("esx01", "모니터링 시작", "host_mon"), got)
+        self.assertFalse(any(e["host"] == "esx01ev04" for e in res["entries"]), "잡도 모니터링도 없는 VM 은 등록하지 않음")
+        vm_text = core.hd_unescape(res["vm"])
+        self.assertEqual(vm_text.count("<< TCEOF"), 3)
+        for h in ("esx01ev01", "esx01ev02", "esx01ev03"):
+            self.assertIn("sh ~/.tcgen/vmssh %s << TCEOF" % h, vm_text)
+        rows = self.read(self.settings["record_csv"])
+        self.assertEqual(rows[1][3], "esx01ev01=job_a, esx01ev02=job_a, esx01ev03=job_b4, esx01ev04=(없음)")
+        self.assertEqual(rows[1][6], "esx01ev01:guest_perf, esx01ev03:guest_perf+guest_gpu, esx01:host_mon")
+        log = self.read(res["log"])
+        hdr = log[0]
+        job3 = [r for r in log[1:] if r[hdr.index("구분")] == "잡" and r[hdr.index("대상")] == "esx01ev03"]
+        self.assertEqual(job3[0][hdr.index("실행 위치")], "VM")
+        self.assertEqual(job3[0][hdr.index("설명")], "4 jobs")
+        esx_rows = [r for r in log[1:] if r[hdr.index("대상")] == "esx01"]
+        self.assertTrue(esx_rows and all(r[hdr.index("실행 위치")] == "ESX" and r[hdr.index("crontab 시각 기준")] == "UTC"
+                                         for r in esx_rows))
+
+    def test_wrong_place_and_duplicate_vm(self):
+        c = self.vm_case("A", "2026-11-20 12:00:00", [{"name": "esx01ev01", "job": "job_a", "monitors": ["host_mon"]}])
+        e = core.generate([c], RUN, MON, self.settings, now=NOW, write=False)["errors"]
+        self.assertTrue(any("실행 위치는 ESX" in x and "케이스 행" in x for x in e), e)
+        c = self.vm_case("A", "2026-11-20 12:00:00", [{"name": "esx01ev01", "job": "job_a"}], esx_monitors=["guest_perf"])
+        e = core.generate([c], RUN, MON, self.settings, now=NOW, write=False)["errors"]
+        self.assertTrue(any("실행 위치는 VM" in x and "VM 행" in x for x in e), e)
+        c = self.vm_case("A", "2026-11-20 12:00:00", [{"name": "esx01ev01", "job": "job_a"}, {"name": "esx01ev01", "job": "job_b4"}])
+        e = core.generate([c], RUN, MON, self.settings, now=NOW, write=False)["errors"]
+        self.assertTrue(any("같은 VM 이름" in x for x in e), e)
+        c = self.vm_case("A", "2026-11-20 12:00:00", [], esx_monitors=["host_mon"])
+        res = core.generate([c], RUN, MON, self.settings, now=NOW, write=False)
+        self.assertEqual(res["errors"], [])
+        self.assertTrue(res["entries"] and all(e["esx"] for e in res["entries"]), "VM 없이 ESX 모니터링만 있는 케이스")
+
+    def test_vm_naming(self):
+        c = core.new_case("esx01", "2026-11-20 00:00:00", count=2)
+        self.assertEqual([v["name"] for v in c["vms"]], ["esx01ev01", "esx01ev02"])
+        self.assertEqual(core.next_vm_number(c), 3)
+        c["vms"].append({"name": core.vm_name("esx01", core.next_vm_number(c)), "job": "(없음)", "monitors": []})
+        self.assertEqual(c["vms"][-1]["name"], "esx01ev03")
+        c["vms"][1]["name"] = "custom-vm"
+        core.rename_vms_for_esx(c, "esx01", "esx02")
+        self.assertEqual([v["name"] for v in c["vms"]], ["esx02ev01", "custom-vm", "esx02ev03"], "자동 이름만 따라 바뀜")
+        e = core.new_case("", "", count=2)
+        self.assertEqual([v["name"] for v in e["vms"]], ["", ""])
+        core.rename_vms_for_esx(e, "", "esx05")
+        self.assertEqual([v["name"] for v in e["vms"]], ["esx05ev01", "esx05ev02"], "빈 이름은 번호를 채움")
+        self.assertEqual(core.next_vm_number({"esx": "esx01", "vms": [{"name": "a"}, {"name": "b"}]}), 3)
+
+    def test_upgrade_old_cases_file(self):
+        with open(os.path.join(self.base, core.CASES_FILE), "w", encoding="utf-8") as f:
+            json.dump({"version": 1, "cases": [{"name": "OLD", "esx": "esx01", "pvm": "esx01ev01", "svm": "esx01ev02",
+                                                "pvm_job": "job_a", "svm_job": "job_b4",
+                                                "monitors": [{"name": "guest_perf", "targets": ["SVM"]},
+                                                             {"name": "host_mon", "targets": ["ESX"]}]}]}, f)
+        self.assertEqual(core.cases_file_version(self.base), 1)
+        dest = core.upgrade_cases_file(self.base, now=NOW)
+        self.assertTrue(dest.endswith("20261109153012_before_vm_format"))
+        self.assertTrue(os.path.exists(os.path.join(dest, core.CASES_FILE)), "바꾸기 전 원본을 복사해 둠")
+        self.assertEqual(core.cases_file_version(self.base), core.CASES_VERSION)
+        c = core.load_cases(self.base)[0]
+        self.assertEqual(c["vms"], [{"name": "esx01ev01", "job": "job_a", "monitors": []},
+                                    {"name": "esx01ev02", "job": "job_b4", "monitors": ["guest_perf"]}])
+        self.assertEqual(c["esx_monitors"], ["host_mon"])
+        self.assertIsNone(core.upgrade_cases_file(self.base), "이미 새 형식이면 다시 바꾸지 않음")
+
+
 class RecordTests(TmpDir):
     def read(self, path, enc="utf-8-sig"):
         with open(path, encoding=enc, newline="") as f:
@@ -377,7 +473,8 @@ class RecordTests(TmpDir):
         self.assertEqual(rows[0], core.RECORD_HEADER)
         self.assertEqual([r[0] for r in rows[1:]], ["A", "B"])
         self.assertEqual(rows[1][1], "2026-11-09 15:30:12")
-        self.assertEqual(rows[1][6], "1 job")
+        self.assertEqual(rows[1][3], "esx01ev01=job_a, esx01ev02=(없음)")
+        self.assertEqual(rows[1][6], "esx01ev01:guest_perf, esx01ev02:guest_perf, esx01:host_mon")
         self.assertTrue(os.path.basename(r1["log"]) == "testcaselogging-20261109153012.csv")
         log = self.read(r1["log"])
         self.assertEqual(log[0], core.LOG_HEADER)
@@ -392,12 +489,22 @@ class RecordTests(TmpDir):
         os.makedirs(os.path.dirname(p))
         with open(p, "w", encoding="cp949", newline="") as f:
             f.write("케이스,잡 시작(KST),비고\r\nOLD,2026-11-01 00:00:00,기존 행")      # 마지막 줄바꿈 없음
-        res = core.generate([case("A", "2026-11-20 00:00:00")], RUN, MON, self.settings, now=NOW)
+        bk = os.path.join(self.base, "bk")
+        res = core.generate([case("A", "2026-11-20 00:00:00")], RUN, MON, self.settings, now=NOW, backup_dir=bk)
         rows = self.read(p, enc="cp949")
-        self.assertEqual(rows[0], ["케이스", "잡 시작(KST)", "비고"])
-        self.assertEqual(rows[1], ["OLD", "2026-11-01 00:00:00", "기존 행"])
-        self.assertEqual(rows[2], ["A", "2026-11-20 00:00:00", ""])
-        self.assertIn("생성 시각", res["record_missing"])
+        added = [h for h in core.RECORD_HEADER[1:] if h != "잡 시작(KST)"]
+        self.assertEqual(rows[0], ["케이스", "잡 시작(KST)", "비고"] + added, "머리글 끝에 새 열을 덧붙임")
+        self.assertEqual(rows[1], ["OLD", "2026-11-01 00:00:00", "기존 행"] + [""] * len(added), "기존 행은 새 칸을 비움")
+        self.assertEqual(rows[2][:3], ["A", "2026-11-20 00:00:00", ""])
+        self.assertEqual(rows[2][3 + added.index("VM 구성")], "esx01ev01=job_a, esx01ev02=(없음)")
+        self.assertEqual(res["record_added"], added)
+        self.assertTrue(os.path.basename(res["record_backup"]).startswith("20261109153012_before_header_change_"))
+        with open(res["record_backup"], encoding="cp949") as f:
+            self.assertTrue(f.read().startswith("케이스,잡 시작(KST),비고"), "덧붙이기 전 원본을 복사해 둠")
+        core.generate([case("B", "2026-11-21 00:00:00")], RUN, MON, self.settings, now=NOW + dt.timedelta(minutes=1))
+        rows = self.read(p, enc="cp949")
+        self.assertEqual(len(rows), 4)
+        self.assertEqual(len(rows[3]), len(rows[0]), "두 번째부터는 같은 머리글로 이어서 기록")
 
     def test_encrypted_record(self):
         p = self.settings["record_csv"]

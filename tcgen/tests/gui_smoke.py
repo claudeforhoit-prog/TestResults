@@ -6,6 +6,7 @@
 그림 저장 폴더를 주면 macOS 에서는 탭마다 화면을 저장한다. 자동 시험(unittest discover)에는 포함하지 않는다.
 """
 import datetime as dt
+import json
 import os
 import shutil
 import subprocess
@@ -123,67 +124,116 @@ def main():
     app.t_mon.start_edit(0, ci)
     check(isinstance(app.t_mon.editor[0], ttk.Combobox), "실행 위치 칸은 목록 선택")
     app.t_mon.finish_edit(commit=False)
+    app.t_mon.tree.selection_set("1")          # 마지막 행을 골라 그 아래(맨 끝)에 추가
+    app.add_cmd_row(app.t_mon, "mon")
+    app.t_mon.finish_edit(commit=False)
+    k = app.t_mon.selected_index()
+    check(k == 2, "선택한 행 아래에 새 행 추가")
+    for key, val in (("app", "mon"), ("name", "guest_gpu"), ("desc", "GPU 지표 수집"),
+                     ("start", "/home/tester/mon/gpu_mon.sh >> /home/tester/log/gpu-<vm이름>-<실행시각>.log"),
+                     ("stop", "/home/tester/mon/gpu_mon.sh --stop")):
+        app.commit_mon(k, key, val)
     saved_mon = core.load_rows(os.path.join(BASE, core.MON_FILE), core.MON_FIELDS, core.MON_HEADERS)
-    check([m["name"] for m in saved_mon] == ["guest_perf", "host_pmu"] and saved_mon[1]["where"] == "ESX",
+    check([m["name"] for m in saved_mon] == ["guest_perf", "host_pmu", "guest_gpu"] and saved_mon[1]["where"] == "ESX",
           "탭 2 는 [저장] 없이 monitor_commands.csv 에 자동 저장")
 
-    # 탭 3: 케이스
+    # 탭 3: 케이스 행 아래 VM 행
+    t = app.t_case
+    tree = t.tree
     app.add_case()
-    check(app.t_case.editor is not None, "첫 케이스 추가 후 이름 칸 편집 상태")
-    app.t_case.editor[1].set("TC-base-a")
-    app.t_case.finish_edit()
-    app.commit_case(0, "esx", "esx01")
-    check(app.cases[0]["pvm"] == "esx01ev01" and app.cases[0]["svm"] == "esx01ev02", "ESX 호스트 입력 시 PVM, SVM 자동 입력")
-    app.commit_case(0, "esx", "esx02")
-    check(app.cases[0]["pvm"] == "esx02ev01", "ESX 호스트를 바꾸면 자동 입력 값도 따라감")
-    app.commit_case(0, "pvm", "vm-special")
-    app.commit_case(0, "esx", "esx01")
-    check(app.cases[0]["pvm"] == "vm-special" and app.cases[0]["svm"] == "esx01ev02", "직접 고친 PVM 은 유지")
-    app.commit_case(0, "pvm", "esx01ev01")
-    app.commit_case(0, "pvm_job", "job_a")
-    app.commit_case(0, "interval", "12")
-    app.commit_case(0, "start", "2030-01-15 00:00")
-    check(app.cases[0]["start"] == "2030-01-15 00:00:00" and app.cases[0]["interval"] == "12:00", "시각, 간격 형식 정리")
-    app.t_case.refresh(0)
-    app.edit_monitors(0)
+    check(t.editor is not None and t.editor[2] == "c0", "첫 케이스 추가 후 케이스 이름 칸 편집 상태")
+    t.editor[1].set("TC-base-a")
+    t.finish_edit()
+    c0 = app.cases[0]
+    check([v["name"] for v in c0["vms"]] == ["", ""], "새 케이스는 VM 2대 (ESX 호스트 입력 전 이름 빈칸)")
+    app.commit_case("c0", "esx", "esx01")
+    check([v["name"] for v in c0["vms"]] == ["esx01ev01", "esx01ev02"], "ESX 호스트 입력 시 VM 이름 자동 입력 (ev01, ev02)")
+    app.commit_case("c0", "esx", "esx02")
+    check([v["name"] for v in c0["vms"]] == ["esx02ev01", "esx02ev02"], "ESX 호스트를 바꾸면 자동 이름도 따라감")
+    app.commit_case("c0v0", "name", "vm-special")
+    app.commit_case("c0", "esx", "esx01")
+    check([v["name"] for v in c0["vms"]] == ["vm-special", "esx01ev02"], "직접 고친 VM 이름은 유지")
+    app.commit_case("c0v0", "name", "esx01ev01")
+    ci_job = [c["key"] for c in t.columns].index("job")
+    t.start_edit("c0v0", ci_job)
+    check(isinstance(t.editor[0], ttk.Combobox), "VM 행 잡 칸은 목록 선택")
+    t.finish_edit(commit=False)
+    t.start_edit("c0", ci_job)
+    check(t.editor is None, "케이스 행의 잡 칸은 고칠 수 없음")
+    app.commit_case("c0v0", "job", "job_a")
+    app.commit_case("c0v1", "job", "job_a")
+    app.commit_case("c0", "interval", "12")
+    app.commit_case("c0", "start", "2030-01-15 00:00")
+    check(c0["start"] == "2030-01-15 00:00:00" and c0["interval"] == "12:00", "시각, 간격 형식 정리")
+    t.refresh("c0")
+    app.add_vm()
+    check([v["name"] for v in c0["vms"]] == ["esx01ev01", "esx01ev02", "esx01ev03"] and t.selected() == "c0v2",
+          "+ VM 추가: 선택한 케이스에 다음 번호 ev03")
+    app.commit_case("c0v2", "job", "job_b4")
+    app.edit_monitors("c0v0")
     top = last_toplevel(root)
-    cbs = [w for w in walk(top) if isinstance(w, ttk.Checkbutton)]
-    check([w.cget("text") for w in cbs] == ["PVM", "SVM", "ESX"], "모니터링 선택 창: VM 은 PVM, SVM / ESX 는 ESX")
-    for w in cbs:
-        w.invoke()
+    texts = [w.cget("text") for w in walk(top) if isinstance(w, ttk.Checkbutton)]
+    check(texts == ["mon / guest_perf", "mon / guest_gpu"], "VM 모니터링 선택 창: 실행 위치 VM 명령만 %s" % texts)
+    press(top, "mon / guest_perf")
     press(top, "확인")
-    check(app.cases[0]["monitors"] == [{"name": "guest_perf", "targets": ["PVM", "SVM"]},
-                                       {"name": "host_pmu", "targets": ["ESX"]}], "모니터링 3개 대상 선택")
-    app.t_case.refresh(0)
+    app.edit_monitors("c0v2")
+    top = last_toplevel(root)
+    press(top, "mon / guest_perf")
+    press(top, "mon / guest_gpu")
+    press(top, "확인")
+    check([v["monitors"] for v in c0["vms"]] == [["guest_perf"], [], ["guest_perf", "guest_gpu"]], "VM 마다 모니터링 다르게 선택")
+    app.edit_monitors("c0")
+    top = last_toplevel(root)
+    texts = [w.cget("text") for w in walk(top) if isinstance(w, ttk.Checkbutton)]
+    check(texts == ["mon / host_pmu"], "ESX 모니터링 선택 창: 실행 위치 ESX 명령만 %s" % texts)
+    press(top, "mon / host_pmu")
+    press(top, "확인")
+    check(c0["esx_monitors"] == ["host_pmu"], "ESX 모니터링은 케이스 행에서 선택")
+    t.refresh("c0")
+    v0, v2 = tree.item("c0", "values"), tree.item("c0v2", "values")
+    check(v0[3] == "host_pmu (ESX)", "케이스 행 모니터링 칸에 ESX 모니터링 표시")
+    check(v2[0].strip() == "└ esx01ev03" and v2[2] == "job_b4" and v2[3] == "guest_perf, guest_gpu", "VM 행 표시 %s" % (v2[:4],))
+    check("case" in tree.item("c0", "tags") and "vm" in tree.item("c0v1", "tags"), "케이스 행과 VM 행 구분")
+    t.refresh("c0")
     app.add_case()
     app.add_case()
     names = [c["name"] for c in app.cases]
-    check(names == ["TC-base-a", "TC-base-a-r2", "TC-base-a-r3"], "+ 케이스 추가: 윗줄 복사, 이름 중복 피함 %s" % names)
+    check(names == ["TC-base-a", "TC-base-a-r2", "TC-base-a-r3"], "+ 케이스 추가: 선택한 케이스 복사, 이름 중복 피함 %s" % names)
     check([c["start"] for c in app.cases] == ["2030-01-15 00:00:00", "2030-01-15 12:00:00", "2030-01-16 00:00:00"],
           "잡 시작 = 윗줄 + 간격")
-    app.commit_case(1, "name", "TC-base-b4")
-    app.commit_case(1, "svm_job", "job_b4")
-    app.commit_case(1, "start", "2030-01-15 13:00:00")
+    check(all([v["job"] for v in c["vms"]] == ["job_a", "job_a", "job_b4"] for c in app.cases), "복사한 케이스에 VM 구성도 복사")
+    app.commit_case("c1", "name", "TC-base-b4")
+    app.commit_case("c1", "start", "2030-01-15 13:00:00")
     check(app.cases[1]["interval"] == "13:00" and app.cases[2]["start"] == "2030-01-16 01:00:00", "잡 시작을 고치면 간격과 아래 행이 따라감")
-    app.commit_case(2, "start", "bad time")
+    app.commit_case("c2", "start", "bad time")
     check(app.cases[2]["start"] == "2030-01-16 01:00:00", "잘못된 시각 입력 거부")
-    app.t_case.refresh(2)
-    app.edit_stop(2)
+    t.refresh("c1v1")
+    app.add_vm()
+    check([v["name"] for v in app.cases[1]["vms"]][-1] == "esx01ev04" and t.selected() == "c1v3", "VM 행을 골라도 그 케이스에 추가 (ev04)")
+    app.del_row()
+    check(len(app.cases[1]["vms"]) == 3 and len(app.cases) == 3, "VM 행 삭제는 그 VM 만")
+    t.refresh("c0v2")
+    app.move_row(-1)
+    check([v["name"] for v in c0["vms"]] == ["esx01ev01", "esx01ev03", "esx01ev02"] and t.selected() == "c0v1", "VM 행 위로")
+    app.move_row(1)
+    check([v["name"] for v in c0["vms"]] == ["esx01ev01", "esx01ev02", "esx01ev03"], "VM 행 아래로")
+    t.refresh("c2")
+    app.edit_stop("c2")
     top = last_toplevel(root)
     press(top, "중지 없음 (중지 줄을 만들지 않음)")
     press(top, "확인")
     check(app.cases[2]["stop_mode"] == "none", "마지막 케이스 모니터링 중지: 중지 없음")
-    app.t_case.refresh(1)
-    vals = app.t_case.tree.item("0", "values")
-    check(vals[9] == "01-14 23:55" and vals[10] == "01-15 12:50 (자동)", "모니터링 시작 5분 전, 중지 다음 케이스 10분 전 %s" % (vals[9:],))
-    check(app.t_case.tree.item("2", "values")[10] == "중지 없음", "중지 없음 표시")
+    t.refresh("c1")
+    vals = tree.item("c0", "values")
+    check(vals[6] == "01-14 23:55" and vals[7] == "01-15 12:50 (자동)", "모니터링 시작 5분 전, 중지 다음 케이스 10분 전 %s" % (vals[6:],))
+    check(tree.item("c2", "values")[7] == "중지 없음", "중지 없음 표시")
 
-    # 위로, 아래로, 삭제
-    app.t_case.refresh(2)
-    app.move_case(-1)
+    # 위로, 아래로 (케이스 행)
+    t.refresh("c2")
+    app.move_row(-1)
     check([c["name"] for c in app.cases] == ["TC-base-a", "TC-base-a-r3", "TC-base-b4"], "아래 케이스를 위로")
     check([c["start"] for c in app.cases] == ["2030-01-15 00:00:00", "2030-01-15 13:00:00", "2030-01-16 01:00:00"], "시각은 행에 남음")
-    app.move_case(1)
+    app.move_row(1)
     check([c["name"] for c in app.cases] == ["TC-base-a", "TC-base-b4", "TC-base-a-r3"], "다시 아래로")
 
     # 설정
@@ -205,19 +255,25 @@ def main():
     check(app.blk_vm.get("1.0", "end-1c") == res["vm"], "B 블록 표시")
     check(app.v_esx_host.get() == "esx01" and app.blk_esx.get("1.0", "end-1c") == res["esx"]["esx01"], "C 블록 esx01 표시")
     check("tester@esx01ev01" in res["vm"], "VM 접속 계정 반영")
+    check(sorted(set(e["host"] for e in res["entries"])) == ["esx01", "esx01ev01", "esx01ev02", "esx01ev03"],
+          "VM 3대와 ESX 모두 등록 대상")
+    check(core.hd_unescape(res["vm"]).count("<< TCEOF") == 3, "B 블록에 VM 3대")
     app.copy_block("vm")
     check(root.clipboard_get() == res["vm"], "B 블록 복사")
     app.copy_block("esx")
     check(root.clipboard_get() == res["esx"]["esx01"], "C 블록 복사")
     rec = core.resolve_paths(BASE, core.load_settings(BASE))["record_csv"]
     check(os.path.exists(rec) and os.path.exists(res["log"]), "테스트 기록 CSV, 로그 저장")
+    with open(rec, encoding="utf-8-sig") as f:
+        rec_text = f.read()
+    check("esx01ev01=job_a, esx01ev02=job_a, esx01ev03=job_b4" in rec_text, "테스트 기록 CSV 의 VM 구성 열")
     shot(root, app, 3, "tcgen_tab4.png")
 
     # 적용 체크: 적용 칸을 누르면 체크, 다시 누르면 해제. 체크한 케이스는 생성에서 빠지고 test_cases.json 에 저장
     app.nb.select(2)
     root.update()
     tree = app.t_case.tree
-    x, y, w, h = tree.bbox("0", "#0")
+    x, y, w, h = tree.bbox("c0", "#0")
 
     def click_check():
         tree.event_generate("<Button-1>", x=x + w // 2, y=y + h // 2)
@@ -225,7 +281,7 @@ def main():
 
     click_check()
     check(app.cases[0]["applied"] is True, "적용 칸 클릭으로 체크")
-    check("applied" in tree.item("0", "tags"), "체크한 행은 회색 표시")
+    check("applied" in tree.item("c0", "tags") and "applied" in tree.item("c0v2", "tags"), "체크한 케이스와 그 VM 행은 회색 표시")
     click_check()
     check(app.cases[0]["applied"] is False, "다시 누르면 체크 해제")
     click_check()
@@ -237,11 +293,10 @@ def main():
     check([c["applied"] for c in core.load_cases(BASE)] == [True, False, False], "체크 상태가 test_cases.json 에 저장됨")
 
     # 오류가 있으면 만들지 않음
-    app.commit_case(1, "pvm_job", "(없음)")
-    app.cases[1]["svm_job"] = "nojob"
+    app.cases[1]["vms"][2]["job"] = "nojob"
     app.generate()
     check(app.result is None and app.blk_vm.get("1.0", "end-1c") == "", "오류가 있으면 블록 비움")
-    app.cases[1]["svm_job"] = "job_b4"
+    app.cases[1]["vms"][2]["job"] = "job_b4"
 
     # 백업(위치 선택), 백업 불러오기, 폴더 열기
     BK = os.path.join(TMP, "my_backups")
@@ -277,8 +332,8 @@ def main():
           "생성기 폴더 안은 데이터 폴더로 쓸 수 없음")
 
     # 삭제
-    app.t_case.refresh(1)
-    app.del_case()
+    app.t_case.refresh("c1")
+    app.del_row()
     check([c["start"] for c in app.cases] == ["2030-01-15 00:00:00", "2030-01-16 01:00:00"], "삭제해도 다른 케이스 시각 유지")
     check(app.cases[1]["interval"] == "25:00", "삭제 뒤 아래 행 간격 다시 계산")
 
@@ -290,14 +345,36 @@ def main():
     root2 = tk.Tk()
     app2 = appmod.App(root2)
     check(app2.base == os.path.normpath(NEW), "다시 실행 시 바꾼 데이터 폴더를 씀")
-    check([r["name"] for r in app2.run_cmds] == ["job_a", "job_b4"] and len(app2.mon_cmds) == 2, "다시 실행 시 명령 목록 불러옴")
+    check([r["name"] for r in app2.run_cmds] == ["job_a", "job_b4"] and len(app2.mon_cmds) == 3, "다시 실행 시 명령 목록 불러옴")
     check(app2.v_user.get() == "tester" and app2.v_stop.get() == "12", "다시 실행 시 설정 불러옴")
     check(app2.run_cmds[0]["desc"] == "1 job edited" and app2.mon_cmds[0]["stop"] == "/home/tester/mon/stop_mon.sh --all",
           "닫기 직전에 고친 실행 명령, 모니터링 명령도 남아 있음")
     check([c["name"] for c in app2.cases] == ["TC-base-a", "TC-base-a-r3"] and [c["applied"] for c in app2.cases] == [True, False],
           "다시 실행 시 테스트 케이스 표와 적용 체크 불러옴")
-    check("applied" in app2.t_case.tree.item("0", "tags"), "다시 실행 시 체크한 행 회색 표시")
+    check("applied" in app2.t_case.tree.item("c0", "tags"), "다시 실행 시 체크한 행 회색 표시")
+    check([len(c["vms"]) for c in app2.cases] == [3, 3] and app2.cases[0]["vms"][2]["monitors"] == ["guest_perf", "guest_gpu"],
+          "다시 실행 시 VM 구성과 VM 별 모니터링 불러옴")
     root2.destroy()
+
+    # 예전 형식 케이스 표(PVM, SVM 칸): 원본을 backup 에 복사하고 VM 행 형식으로 바꿔 보여 준다
+    old_dir = os.path.join(TMP, "data_oldfmt")
+    os.makedirs(old_dir)
+    with open(os.path.join(old_dir, core.CASES_FILE), "w", encoding="utf-8") as f:
+        json.dump({"version": 1, "cases": [{"name": "OLD", "esx": "esx09", "pvm": "esx09ev01", "svm": "esx09ev02",
+                                            "pvm_job": "job_a", "svm_job": "(없음)", "interval": "12:00",
+                                            "start": "2030-02-01 00:00:00",
+                                            "monitors": [{"name": "guest_perf", "targets": ["PVM", "SVM"]}]}]}, f)
+    core.save_config({"data_dir": old_dir})
+    n_log = len(LOG)
+    root4 = tk.Tk()
+    app4 = appmod.App(root4)
+    check(app4.cases[0]["vms"] == [{"name": "esx09ev01", "job": "job_a", "monitors": ["guest_perf"]},
+                                   {"name": "esx09ev02", "job": "(없음)", "monitors": ["guest_perf"]}],
+          "예전 PVM, SVM 케이스를 VM 2대로 변환")
+    check(any(x[0] == "info" and "VM 행 형식으로 바꿨다" in x[1] for x in LOG[n_log:]), "변환했다는 안내 표시")
+    check(any(d.endswith("_before_vm_format") for d in os.listdir(os.path.join(old_dir, "backup"))), "변환 전 원본을 backup 에 복사")
+    check(app4.t_case.tree.exists("c0v1"), "변환한 케이스가 VM 행으로 보임")
+    root4.destroy()
 
     # 예전 판 데이터 옮기기: 생성기 폴더에 예전 파일이 있고 데이터 폴더가 비어 있으면 처음 실행 때 복사해 쓴다
     prog2 = os.path.join(TMP, "prog_old")

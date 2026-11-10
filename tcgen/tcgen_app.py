@@ -82,17 +82,24 @@ def next_hour():
 
 # ---------------------------------------------------------------------------- 표
 class EditableTable(ttk.Frame):
-    """Treeview 표. 칸을 두 번 누르거나 F2, Enter 로 그 칸을 고친다. Tab 으로 다음 칸."""
+    """Treeview 표. 칸을 두 번 누르거나 F2, Enter 로 그 칸을 고친다. Tab 으로 다음 칸.
+    rows 의 항목 하나가 표의 행 하나이면(iid = 순번) 그대로 쓴다. 탭 3 처럼 케이스 행과 VM 행이 섞이면
+    row_ids, cell_value, cell_kind, row_check, row_tags 를 넘겨 행마다 다르게 다룬다."""
 
     def __init__(self, master, app, columns, height=8, check=None):
         ttk.Frame.__init__(self, master)
         self.app = app
         self.columns = columns
-        self.check = check           # 맨 앞 체크 열: dict(key, title, width, on, off, toggle) 또는 None
+        self.check = check           # 맨 앞 체크 열: dict(title, width, on, off, toggle[, key]) 또는 None
         self.rows = []
-        self.display = None          # (i, key) -> 표시 문자열 또는 None
-        self.on_commit = None        # (i, key, text) -> None
+        self.display = None          # (iid, key) -> 표시 문자열 또는 None
+        self.on_commit = None        # (iid, key, text) -> None
         self.before_refresh = None
+        self.row_ids = None          # () -> [iid]. 없으면 rows 순번
+        self.cell_value = None       # (iid, key) -> 편집 칸에 넣을 값
+        self.cell_kind = None        # (iid, column) -> "entry", "combo", "popup", "readonly" 또는 None(열 기본값)
+        self.row_check = None        # (iid) -> None(체크 칸 없음), True, False
+        self.row_tags = None         # (iid) -> 행 태그 목록
         self.editor = None
         keys = [c["key"] for c in columns]
         self.tree = ttk.Treeview(self, columns=keys, show=("tree headings" if check else "headings"), height=height,
@@ -124,6 +131,29 @@ class EditableTable(ttk.Frame):
             self.tree.bind("<Button-1>", self._click_check, add="+")
             self.tree.bind("<space>", self._space_check)
 
+    # 행과 칸
+    def ids(self):
+        return list(self.row_ids()) if self.row_ids else [str(i) for i in range(len(self.rows))]
+
+    def value(self, iid, key):
+        if self.cell_value:
+            return self.cell_value(iid, key)
+        i = int(iid)
+        return self.rows[i].get(key, "") if i < len(self.rows) else ""
+
+    def kind(self, iid, ci):
+        c = self.columns[ci]
+        k = self.cell_kind(iid, c) if self.cell_kind else None
+        return k or c.get("kind", "entry")
+
+    def check_state(self, iid):
+        if not self.check:
+            return None
+        if self.row_check:
+            return self.row_check(iid)
+        i = int(iid)
+        return bool(self.rows[i].get(self.check.get("key", "applied"))) if i < len(self.rows) else None
+
     # 체크 열
     def _click_check(self, ev):
         try:
@@ -131,47 +161,66 @@ class EditableTable(ttk.Frame):
         except tk.TclError:
             return None
         iid = self.tree.identify_row(ev.y)
-        if region != "tree" or not iid:
+        if region != "tree" or not iid or self.check_state(iid) is None:
             return None
         self.tree.selection_set(iid)
-        self.check["toggle"](int(iid))
+        self.check["toggle"](iid)
         return "break"
 
     def _space_check(self, ev):
-        i = self.selected()
-        if i is not None:
-            self.check["toggle"](i)
+        iid = self.selected()
+        if iid is not None and self.check_state(iid) is not None:
+            self.check["toggle"](iid)
         return "break"
 
     # 표시
-    def cell_text(self, i, key):
+    def cell_text(self, iid, key):
         if self.display:
-            v = self.display(i, key)
+            v = self.display(iid, key)
             if v is not None:
                 return v
-        return self.rows[i].get(key, "")
+        return self.value(iid, key)
 
     def refresh(self, select=None):
         if select is None:
             select = self.selected()
+        elif not isinstance(select, str):
+            select = str(select)
         if self.before_refresh:
             self.before_refresh()
         self.tree.delete(*self.tree.get_children())
-        for i in range(len(self.rows)):
+        ids = self.ids()
+        for iid in ids:
             kw = {}
+            st = self.check_state(iid) if self.check else None
             if self.check:
-                on = bool(self.rows[i].get(self.check["key"]))
-                kw = {"image": self.check["on"] if on else self.check["off"], "text": "", "tags": ("applied",) if on else ()}
-            self.tree.insert("", "end", iid=str(i), values=[self.cell_text(i, c["key"]) for c in self.columns], **kw)
-        if select is not None and self.rows:
-            select = max(0, min(select, len(self.rows) - 1))
-            self.tree.selection_set(str(select))
-            self.tree.focus(str(select))
-            self.tree.see(str(select))
+                kw["text"] = ""
+                if st is not None:
+                    kw["image"] = self.check["on"] if st else self.check["off"]
+            if self.row_tags:
+                kw["tags"] = tuple(self.row_tags(iid))
+            elif st:
+                kw["tags"] = ("applied",)
+            self.tree.insert("", "end", iid=iid, values=[self.cell_text(iid, c["key"]) for c in self.columns], **kw)
+        if not ids or select is None:
+            return
+        if select not in ids:
+            if not select.isdigit():
+                return
+            select = str(max(0, min(int(select), len(ids) - 1)))
+            if select not in ids:
+                return
+        self.tree.selection_set(select)
+        self.tree.focus(select)
+        self.tree.see(select)
 
     def selected(self):
         sel = self.tree.selection()
-        return int(sel[0]) if sel else None
+        return sel[0] if sel else None
+
+    def selected_index(self):
+        s = self.selected()
+        return int(s) if (s is not None and s.isdigit()) else None
 
     # 편집
     def _double(self, ev):
@@ -182,43 +231,44 @@ class EditableTable(ttk.Frame):
         iid, col = self.tree.identify_row(ev.y), self.tree.identify_column(ev.x)
         if self.check and region == "tree":
             # 빠른 두 번째 클릭은 Tk 가 더블클릭으로 처리하므로 여기서도 체크를 바꾼다(누를 때마다 바뀜)
-            if iid:
-                self.check["toggle"](int(iid))
+            if iid and self.check_state(iid) is not None:
+                self.check["toggle"](iid)
             return "break"
         if region != "cell" or not iid or not col:
             return None
-        self.start_edit(int(iid), int(col.lstrip("#")) - 1)
+        self.start_edit(iid, int(col.lstrip("#")) - 1)
         return "break"
 
     def _key_edit(self, ev):
-        i = self.selected()
-        if i is None:
+        iid = self.selected()
+        if iid is None:
             return None
-        for ci, c in enumerate(self.columns):
-            if c.get("kind", "entry") in ("entry", "combo"):
-                self.start_edit(i, ci)
+        for ci in range(len(self.columns)):
+            if self.kind(iid, ci) in ("entry", "combo"):
+                self.start_edit(iid, ci)
                 break
         return "break"
 
-    def start_edit(self, i, ci):
+    def start_edit(self, iid, ci):
         self.finish_edit()
-        if i >= len(self.rows):
+        iid = str(iid)
+        if not self.tree.exists(iid):
             return
         c = self.columns[ci]
-        kind = c.get("kind", "entry")
+        kind = self.kind(iid, ci)
         if kind == "readonly":
             return
         if kind == "popup":
-            c["popup"](i)
+            c["popup"](iid)
             return
-        self.tree.selection_set(str(i))
-        self.tree.see(str(i))
+        self.tree.selection_set(iid)
+        self.tree.see(iid)
         self.tree.update_idletasks()
-        bbox = self.tree.bbox(str(i), c["key"])
+        bbox = self.tree.bbox(iid, c["key"])
         if not bbox:
             return
         x, y, w, h = bbox
-        var = tk.StringVar(value=self.rows[i].get(c["key"], ""))
+        var = tk.StringVar(value=self.value(iid, c["key"]))
         if kind == "combo":
             ed = ttk.Combobox(self.tree, textvariable=var, values=list(c["values"]()), state="readonly")
             ed.bind("<<ComboboxSelected>>", lambda e, w=ed: self.tree.after_idle(lambda: self._finish_if(w, True)))
@@ -237,13 +287,13 @@ class EditableTable(ttk.Frame):
         ed.bind("<Return>", lambda e: self._finish_key(True))
         ed.bind("<KP_Enter>", lambda e: self._finish_key(True))
         ed.bind("<Escape>", lambda e: self._finish_key(False))
-        ed.bind("<Tab>", lambda e: self._tab(i, ci, 1))
+        ed.bind("<Tab>", lambda e: self._tab(iid, ci, 1))
         for seq in ("<Shift-Tab>", "<ISO_Left_Tab>"):
             try:
-                ed.bind(seq, lambda e: self._tab(i, ci, -1))
+                ed.bind(seq, lambda e: self._tab(iid, ci, -1))
             except tk.TclError:
                 pass
-        self.editor = (ed, var, i, c["key"])
+        self.editor = (ed, var, iid, c["key"])
         if kind == "combo":
             ed.after_idle(lambda: self._post_combo(ed))
 
@@ -261,12 +311,12 @@ class EditableTable(ttk.Frame):
         self.finish_edit(commit=commit, refocus=True)
         return "break"
 
-    def _tab(self, i, ci, step):
+    def _tab(self, iid, ci, step):
         self.finish_edit(refocus=True)
         n = ci + step
         while 0 <= n < len(self.columns):
-            if self.columns[n].get("kind", "entry") in ("entry", "combo"):
-                self.start_edit(i, n)
+            if self.tree.exists(iid) and self.kind(iid, n) in ("entry", "combo"):
+                self.start_edit(iid, n)
                 break
             n += step
         return "break"
@@ -274,19 +324,19 @@ class EditableTable(ttk.Frame):
     def finish_edit(self, commit=True, refocus=False):
         if not self.editor:
             return
-        ed, var, i, key = self.editor
+        ed, var, iid, key = self.editor
         self.editor = None
         text = var.get()
         try:
             ed.destroy()
         except tk.TclError:
             pass
-        if commit and i < len(self.rows) and text != self.rows[i].get(key, ""):
+        if commit and text != str(self.value(iid, key)):
             if self.on_commit:
-                self.on_commit(i, key, text)
-            else:
-                self.rows[i][key] = text
-                self.refresh(i)
+                self.on_commit(iid, key, text)
+            elif iid.isdigit() and int(iid) < len(self.rows):
+                self.rows[int(iid)][key] = text
+                self.refresh(iid)
         if refocus:
             self.tree.focus_set()
 
@@ -329,6 +379,8 @@ class App(object):
         self.load_msg = ""
         self.run_cmds, self.mon_cmds, self.cases = [], [], []
         self.read_data()
+        if self.upgrade_msg:
+            self.start_msgs.append(self.upgrade_msg)
         paths = core.resolve_paths(self.base, self.settings)
         self.sched = []
         self.dirty = {"settings": False, "run": False, "mon": False, "cases": False}   # True = 자동 저장 실패
@@ -378,7 +430,17 @@ class App(object):
         return base
 
     def read_data(self):
-        """데이터 폴더에서 설정, 실행 명령, 모니터링 명령, 테스트 케이스 표를 읽는다. 목록 객체는 그대로 두고 내용만 바꾼다."""
+        """데이터 폴더에서 설정, 실행 명령, 모니터링 명령, 테스트 케이스 표를 읽는다. 목록 객체는 그대로 두고 내용만 바꾼다.
+        테스트 케이스 표가 예전 형식(PVM, SVM 칸)이면 원본을 backup 에 복사한 뒤 VM 행 형식으로 바꾼다."""
+        self.upgrade_msg = ""
+        try:
+            up = core.upgrade_cases_file(self.base)
+        except (OSError, ValueError) as e:
+            up = None
+            self.upgrade_msg = "테스트 케이스 표를 새 형식으로 바꾸지 못함 (원래 파일은 그대로): %s" % e
+        if up:
+            self.upgrade_msg = ("테스트 케이스 표를 VM 행 형식으로 바꿨다. 예전 PVM, SVM 은 VM 2대로 옮겼다.\n\n"
+                                "바꾸기 전 파일: %s" % os.path.join(up, core.CASES_FILE))
         self.settings = core.load_settings(self.base)
         self.run_cmds[:] = core.load_rows(os.path.join(self.base, core.RUN_FILE), core.RUN_FIELDS, core.RUN_HEADERS)
         self.mon_cmds[:] = core.load_rows(os.path.join(self.base, core.MON_FILE), core.MON_FIELDS, core.MON_HEADERS)
@@ -418,6 +480,8 @@ class App(object):
         self.show_messages("데이터를 다시 읽음. [명령어 생성] 을 누르면 결과가 나온다.", [], [])
         self.update_data_hint()
         self.update_status()
+        if self.upgrade_msg:
+            messagebox.showinfo(TITLE, self.upgrade_msg, parent=self.root)
         if self.load_msg:
             messagebox.showwarning(TITLE, self.load_msg, parent=self.root)
 
@@ -565,36 +629,41 @@ class App(object):
         f = ttk.Frame(self.nb, padding=self.px(6))
         self.nb.add(f, text=" 3. 테스트 케이스 ")
         job_values = lambda: [NONE_JOB] + [r["name"] for r in self.run_cmds if r.get("name")]
-        cols = [dict(key="name", title="케이스 이름", width=230), dict(key="esx", title="ESX 호스트", width=100),
-                dict(key="pvm", title="PVM", width=120), dict(key="svm", title="SVM", width=120),
-                dict(key="pvm_job", title="PVM 잡", width=110, kind="combo", values=job_values),
-                dict(key="svm_job", title="SVM 잡", width=110, kind="combo", values=job_values),
+        cols = [dict(key="name", title="케이스 / VM", width=215), dict(key="esx", title="ESX 호스트", width=100),
+                dict(key="job", title="잡", width=110, values=job_values),
+                dict(key="mon", title="모니터링", width=230, popup=self.edit_monitors, stretch=True),
                 dict(key="interval", title="간격", width=60),
                 dict(key="start", title="잡 시작 (KST)", width=150),
-                dict(key="monitors", title="모니터링", width=220, kind="popup", popup=self.edit_monitors, stretch=True),
-                dict(key="mon_start", title="모니터링 시작", width=105, kind="readonly"),
-                dict(key="mon_stop", title="모니터링 중지", width=150, kind="popup", popup=self.edit_stop)]
-        self.t_case = EditableTable(f, self, cols, height=8,
-                                    check=dict(key="applied", title="적용", width=48, on=self.img_on, off=self.img_off,
-                                               toggle=self.toggle_applied))
-        self.t_case.rows = self.cases
-        self.t_case.on_commit = self.commit_case
-        self.t_case.display = self.case_display
-        self.t_case.before_refresh = self.calc_schedule
+                dict(key="mon_start", title="모니터링 시작", width=105),
+                dict(key="mon_stop", title="모니터링 중지", width=150, popup=self.edit_stop)]
+        t = EditableTable(f, self, cols, height=10,
+                          check=dict(title="적용", width=48, on=self.img_on, off=self.img_off, toggle=self.toggle_applied))
+        self.t_case = t
+        t.rows = self.cases
+        t.row_ids = self.case_row_ids
+        t.cell_value = self.case_value
+        t.cell_kind = self.case_kind
+        t.row_check = self.case_check
+        t.row_tags = self.case_tags
+        t.display = self.case_display
+        t.on_commit = self.commit_case
+        t.before_refresh = self.calc_schedule
+        t.tree.tag_configure("case", font=self.bold)
         self.case_hint = self.hint(f, "")
         self.case_hint.pack(side="bottom", fill="x", pady=(self.px(6), 0))
         b = ttk.Frame(f)
         b.pack(side="bottom", fill="x", pady=(self.px(6), 0))
-        self.t_case.pack(fill="both", expand=True)
+        t.pack(fill="both", expand=True)
         ttk.Button(b, text="+ 케이스 추가", command=self.add_case).pack(side="left")
-        ttk.Button(b, text="삭제", command=self.del_case).pack(side="left", padx=6)
-        ttk.Button(b, text="위로", command=lambda: self.move_case(-1)).pack(side="left")
-        ttk.Button(b, text="아래로", command=lambda: self.move_case(1)).pack(side="left", padx=6)
+        ttk.Button(b, text="+ VM 추가", command=self.add_vm).pack(side="left", padx=(6, 0))
+        ttk.Button(b, text="삭제", command=self.del_row).pack(side="left", padx=6)
+        ttk.Button(b, text="위로", command=lambda: self.move_row(-1)).pack(side="left")
+        ttk.Button(b, text="아래로", command=lambda: self.move_row(1)).pack(side="left", padx=6)
         gen = tk.Button(b, text="  명령어 생성  ", command=self.generate, font=self.bold, bg="#c0392b", fg="white",
                         activebackground="#a93226", activeforeground="white", relief="raised", bd=1)
         gen.pack(side="right")
         self.update_case_hint()
-        self.t_case.refresh()
+        t.refresh()
 
     def build_result_tab(self):
         f = ttk.Frame(self.nb, padding=self.px(6))
@@ -712,20 +781,23 @@ class App(object):
             return None
         return mon, stop
 
+    def vm_prefix(self):
+        return self.settings.get("vm_prefix") or "ev"
+
     def update_case_hint(self):
         ld = self.leads() or (self.settings["mon_lead_min"], self.settings["stop_lead_min"])
-        s = self.settings
+        p = self.vm_prefix()
         self.case_hint.configure(text=(
-            "적용 칸을 누르면(또는 Space) 체크된다. 체크한 케이스는 이미 등록한 것으로 보고 [명령어 생성] 에서 뺀다. "
-            "탭 3 의 표와 체크 상태는 바뀔 때마다 test_cases.json 에 저장되고 다음 실행 때 불러온다.\n"
-            "칸을 두 번 누르면 고친다. ESX 호스트를 입력하면 PVM = 호스트+%s, SVM = 호스트+%s 가 자동 입력된다 (직접 수정 가능). "
-            "잡 칸은 탭 1 의 명령어 명 중에서 고르고, (없음) 이면 모니터링만 등록한다.\n"
-            "+ 케이스 추가: 선택한 줄을 복사해 아래에 넣는다. 간격은 그 줄 간격을 가져오고 잡 시작 = 윗줄 잡 시작 + 간격 (행마다 수정 가능). "
-            "잡 시작이나 간격을 고치면 아래 행이 따라 움직인다. 위로, 아래로는 케이스 순서만 바꾸고 시각은 그 행에 남는다. "
-            "시각 형식: 2026-11-09 10:00:00, 간격 형식: 12:00\n"
-            "모니터링 시작 = 잡 시작 %d분 전 (자동). 모니터링 중지 = 자동 (다음 케이스 잡 시작 %d분 전, 마지막 케이스는 잡 시작 + 간격 - %d분) "
-            "/ 직접 입력 / 중지 없음 중 선택. 모니터링 칸과 모니터링 중지 칸은 두 번 누르면 선택 창이 열린다."
-            % (s.get("pvm_suffix") or "ev01", s.get("svm_suffix") or "ev02", ld[0], ld[1], ld[1])))
+            "케이스 행(굵은 글씨): 적용 체크, 케이스 이름, ESX 호스트, ESX 모니터링, 간격, 잡 시작, 모니터링 중지. "
+            "VM 행(└): VM 이름, 잡, 그 VM 의 모니터링. 칸을 두 번 누르면 고친다. 적용 칸을 누르면(또는 Space) 체크되고, "
+            "체크한 케이스는 [명령어 생성] 에서 빠진다. 표는 바뀔 때마다 test_cases.json 에 저장된다.\n"
+            "새 케이스는 VM %d대(ESX 호스트+%s01, %s02)가 기본. [+ VM 추가] 는 선택한 케이스에 다음 번호 VM(%s03, %s04 …)을 추가. "
+            "ESX 호스트를 바꾸면 자동으로 붙은 VM 이름도 따라 바뀐다. 잡이 (없음) 이면 모니터링만, 잡과 모니터링이 모두 없는 VM 은 등록하지 않는다.\n"
+            "+ 케이스 추가: 선택한 케이스를 VM 구성까지 복사, 잡 시작 = 윗줄 잡 시작 + 간격. 삭제, 위로, 아래로: 케이스 행이면 케이스, "
+            "VM 행이면 그 VM. 위로, 아래로는 케이스 순서만 바꾸고 시각은 그 행에 남는다. 시각 형식: 2026-11-09 10:00:00, 간격 형식: 12:00\n"
+            "모니터링 시작 = 잡 시작 %d분 전. 모니터링 중지 = 자동(다음 케이스 잡 시작 %d분 전, 마지막 케이스는 잡 시작 + 간격 - %d분) "
+            "/ 직접 입력 / 중지 없음. 이 시각은 그 케이스의 모든 VM 과 ESX 에 같이 적용된다."
+            % (int(self.settings.get("default_vms", 2)), p, p, p, p, ld[0], ld[1], ld[1])))
 
     def finish_all_edits(self):
         for t in (getattr(self, n, None) for n in ("t_run", "t_mon", "t_case")):
@@ -875,16 +947,16 @@ class App(object):
         row = {k: "" for k in (core.RUN_FIELDS if kind == "run" else core.MON_FIELDS)}
         if kind == "mon":
             row["where"] = "VM"
-        i = table.selected()
+        i = table.selected_index()
         i = len(table.rows) if i is None else i + 1
         table.rows.insert(i, row)
         self.autosave(kind)
         table.refresh(i)
-        table.start_edit(i, 0)
+        table.start_edit(str(i), 0)
 
     def del_cmd_row(self, table, kind):
         table.finish_edit()
-        i = table.selected()
+        i = table.selected_index()
         if i is None:
             return
         name = table.rows[i].get("name", "")
@@ -902,9 +974,10 @@ class App(object):
     def cases_using(self, kind, name):
         out = []
         for c in self.cases:
-            if kind == "run" and name in (c.get("pvm_job"), c.get("svm_job")):
+            vms = c.get("vms") or []
+            if kind == "run" and any(v.get("job") == name for v in vms):
                 out.append(c.get("name") or "?")
-            if kind == "mon" and any(m["name"] == name for m in core.selected_monitors(c)):
+            if kind == "mon" and (name in (c.get("esx_monitors") or []) or any(name in (v.get("monitors") or []) for v in vms)):
                 out.append(c.get("name") or "?")
         return out
 
@@ -923,7 +996,8 @@ class App(object):
         if errs:
             messagebox.showwarning(TITLE, "\n".join(errs) + "\n\n이대로 두면 [명령어 생성] 에서 오류로 멈춘다.", parent=self.root)
 
-    def commit_run(self, i, key, text):
+    def commit_run(self, iid, key, text):
+        i = int(iid)
         row = self.run_cmds[i]
         if key == "name":
             name = self._name_check(self.t_run, i, text)
@@ -933,9 +1007,9 @@ class App(object):
             row["name"] = name
             if old and name != old:
                 for c in self.cases:
-                    for k in ("pvm_job", "svm_job"):
-                        if c.get(k) == old:
-                            c[k] = name or NONE_JOB
+                    for v in c.get("vms") or []:
+                        if v.get("job") == old:
+                            v["job"] = name or NONE_JOB
         elif key == "cmd":
             row["cmd"] = text.strip()
             self._cmd_warn(row["cmd"], "경로/실행 명령")
@@ -947,7 +1021,8 @@ class App(object):
         self.t_run.refresh(i)
         self.t_case.refresh()
 
-    def commit_mon(self, i, key, text):
+    def commit_mon(self, iid, key, text):
+        i = int(iid)
         row = self.mon_cmds[i]
         if key == "name":
             name = self._name_check(self.t_mon, i, text)
@@ -957,16 +1032,18 @@ class App(object):
             row["name"] = name
             if old and name != old:
                 for c in self.cases:
-                    for m in c.get("monitors") or []:
-                        if m["name"] == old:
-                            m["name"] = name
+                    c["esx_monitors"] = [name if n == old else n for n in (c.get("esx_monitors") or []) if (n != old or name)]
+                    for v in c.get("vms") or []:
+                        v["monitors"] = [name if n == old else n for n in (v.get("monitors") or []) if (n != old or name)]
         elif key == "where":
             old = (row.get("where") or "VM").upper()
             row["where"] = text
             if old != text.upper() and row.get("name"):
                 used = self.cases_using("mon", row["name"])
-                for c in self.cases:
-                    c["monitors"] = [m for m in (c.get("monitors") or []) if m["name"] != row["name"]]
+                for c in self.cases:          # VM 모니터링과 ESX 모니터링은 고르는 곳이 달라 선택을 해제한다
+                    c["esx_monitors"] = [n for n in (c.get("esx_monitors") or []) if n != row["name"]]
+                    for v in c.get("vms") or []:
+                        v["monitors"] = [n for n in (v.get("monitors") or []) if n != row["name"]]
                 if used:
                     messagebox.showinfo(TITLE, "실행 위치가 바뀌어 케이스 %d개에서 '%s' 선택을 해제함: %s"
                                         % (len(used), row["name"], ", ".join(used[:5])), parent=self.root)
@@ -981,23 +1058,92 @@ class App(object):
         self.t_mon.refresh(i)
         self.t_case.refresh()
 
-    # ------------------------------------------------------------ 탭 3
+    # ------------------------------------------------------------ 탭 3 (케이스 행 iid = c<케이스 순번>, VM 행 = c<순번>v<VM 순번>)
     def calc_schedule(self):
         ld = self.leads() or (self.settings["mon_lead_min"], self.settings["stop_lead_min"])
         self.sched = core.case_schedule(self.cases, ld[0], ld[1])
 
-    def case_display(self, i, key):
+    @staticmethod
+    def parse_iid(iid):
+        m = re.match(r"^c(\d+)(?:v(\d+))?$", iid or "")
+        if not m:
+            return None, None
+        return int(m.group(1)), (int(m.group(2)) if m.group(2) is not None else None)
+
+    def case_row_ids(self):
+        out = []
+        for i, c in enumerate(self.cases):
+            out.append("c%d" % i)
+            out += ["c%dv%d" % (i, k) for k in range(len(c.get("vms") or []))]
+        return out
+
+    def _get(self, iid):
+        """iid 의 (케이스 순번, VM 순번 또는 None, 케이스, VM 또는 None). 없는 행이면 케이스가 None."""
+        i, k = self.parse_iid(iid)
+        if i is None or i >= len(self.cases):
+            return None, None, None, None
         c = self.cases[i]
+        if k is None:
+            return i, None, c, None
+        vms = c.get("vms") or []
+        return (i, k, c, vms[k]) if k < len(vms) else (None, None, None, None)
+
+    def case_value(self, iid, key):
+        i, k, c, v = self._get(iid)
+        if c is None:
+            return ""
+        if k is None:
+            return c.get(key, "") if key in ("name", "esx", "interval", "start") else ""
+        return v.get(key, "") if key in ("name", "job") else ""
+
+    def case_kind(self, iid, col):
+        i, k, c, v = self._get(iid)
+        key = col["key"]
+        if c is None:
+            return "readonly"
+        if k is None:
+            return {"name": "entry", "esx": "entry", "job": "readonly", "mon": "popup", "interval": "entry",
+                    "start": "entry", "mon_start": "readonly", "mon_stop": "popup"}[key]
+        return {"name": "entry", "job": "combo", "mon": "popup"}.get(key, "readonly")
+
+    def case_check(self, iid):
+        i, k, c, v = self._get(iid)
+        if c is None or k is not None:
+            return None
+        return bool(c.get("applied"))
+
+    def case_tags(self, iid):
+        i, k, c, v = self._get(iid)
+        if c is None:
+            return ()
+        tags = ["case" if k is None else "vm"]
+        if c.get("applied"):
+            tags.append("applied")
+        return tags
+
+    def case_display(self, iid, key):
+        i, k, c, v = self._get(iid)
+        if c is None:
+            return ""
+        if k is not None:
+            if key == "name":
+                return "   └ " + (v.get("name") or "(이름 없음)")
+            if key == "job":
+                return v.get("job") or NONE_JOB
+            if key == "mon":
+                return ", ".join(v.get("monitors") or []) or NONE_JOB
+            return ""
         s = self.sched[i] if i < len(self.sched) else {}
-        sel = core.selected_monitors(c)
-        if key in ("pvm_job", "svm_job"):
-            return c.get(key) or NONE_JOB
-        if key == "monitors":
-            return core.format_monitors(sel)
+        has_mon = core.case_has_monitors(c)
+        if key == "job":
+            return ""
+        if key == "mon":
+            em = c.get("esx_monitors") or []
+            return (", ".join(em) + " (ESX)") if em else NONE_JOB
         if key == "mon_start":
-            return core.fmt_short(s["mon_start"]) if (sel and s.get("mon_start")) else "-"
+            return core.fmt_short(s["mon_start"]) if (has_mon and s.get("mon_start")) else "-"
         if key == "mon_stop":
-            if not sel:
+            if not has_mon:
                 return "-"
             mode = c.get("stop_mode") or "auto"
             if mode == "none":
@@ -1011,154 +1157,208 @@ class App(object):
         """탭 3 이 바뀔 때마다 test_cases.json 에 저장한다(적용 체크 포함)."""
         self.autosave("cases")
 
-    def toggle_applied(self, i):
+    def toggle_applied(self, iid):
         self.t_case.finish_edit()
-        if i >= len(self.cases):
+        i, k, c, v = self._get(iid)
+        if c is None or k is not None:
             return
-        self.cases[i]["applied"] = not self.cases[i].get("applied")
+        c["applied"] = not c.get("applied")
         self.mark_cases()
-        self.t_case.refresh(i)
+        self.t_case.refresh(iid)
 
-    def commit_case(self, i, key, text):
-        c = self.cases[i]
+    def commit_case(self, iid, key, text):
+        i, k, c, v = self._get(iid)
+        if c is None:
+            return
         t = text.strip()
-        if key in ("name", "pvm", "svm", "esx"):
-            if t and not core.NAME_RE.match(t):
-                messagebox.showerror(TITLE, "영문, 숫자, . _ - 만 사용: '%s'" % t, parent=self.root)
-                return
-            if key == "esx":
-                old = c.get("esx", "")
-                for k, suf in (("pvm", self.settings.get("pvm_suffix") or "ev01"), ("svm", self.settings.get("svm_suffix") or "ev02")):
-                    if not c.get(k) or c.get(k) == old + suf:
-                        c[k] = (t + suf) if t else ""
-            c[key] = t
-        elif key == "interval":
-            try:
-                iv = core.parse_interval(t)
-            except ValueError as e:
-                messagebox.showerror(TITLE, str(e), parent=self.root)
-                return
-            c["interval"] = core.fmt_interval(iv) if iv else ""
-            core.recalc_starts(self.cases, i)
-        elif key == "start":
-            try:
-                d = core.parse_dt(t)
-            except ValueError as e:
-                messagebox.showerror(TITLE, str(e), parent=self.root)
-                return
-            c["start"] = core.fmt_dt(d)
-            core.interval_from_starts(self.cases, i)
-            core.recalc_starts(self.cases, i + 1)
+        if k is None:
+            if key in ("name", "esx"):
+                if t and not core.NAME_RE.match(t):
+                    messagebox.showerror(TITLE, "영문, 숫자, . _ - 만 사용: '%s'" % t, parent=self.root)
+                    return
+                if key == "esx":
+                    core.rename_vms_for_esx(c, c.get("esx", ""), t, self.vm_prefix())
+                c[key] = t
+            elif key == "interval":
+                try:
+                    iv = core.parse_interval(t)
+                except ValueError as e:
+                    messagebox.showerror(TITLE, str(e), parent=self.root)
+                    return
+                c["interval"] = core.fmt_interval(iv) if iv else ""
+                core.recalc_starts(self.cases, i)
+            elif key == "start":
+                try:
+                    d = core.parse_dt(t)
+                except ValueError as e:
+                    messagebox.showerror(TITLE, str(e), parent=self.root)
+                    return
+                c["start"] = core.fmt_dt(d)
+                core.interval_from_starts(self.cases, i)
+                core.recalc_starts(self.cases, i + 1)
         else:
-            c[key] = t
+            if key == "name":
+                if t and not core.NAME_RE.match(t):
+                    messagebox.showerror(TITLE, "VM 이름은 영문, 숫자, . _ - 만 사용: '%s'" % t, parent=self.root)
+                    return
+                v["name"] = t
+            elif key == "job":
+                v["job"] = t or NONE_JOB
         self.mark_cases()
-        self.t_case.refresh(i)
+        self.t_case.refresh(iid)
+
+    def _selected_case(self):
+        sel = self.t_case.selected()
+        i, k, c, v = self._get(sel) if sel else (None, None, None, None)
+        return i, k, c, v
 
     def add_case(self):
         self.t_case.finish_edit()
-        i = self.t_case.selected()
+        i, k, c, v = self._selected_case()
         if not self.cases:
-            row = {"applied": False, "name": "", "esx": "", "pvm": "", "svm": "", "pvm_job": NONE_JOB, "svm_job": NONE_JOB,
-                   "interval": "", "start": next_hour(), "monitors": [], "stop_mode": "auto", "stop_time": ""}
+            row = core.new_case("", next_hour(), count=int(self.settings.get("default_vms", 2)), prefix=self.vm_prefix())
             self.cases.append(row)
             new = 0
         else:
-            src = self.cases[len(self.cases) - 1 if i is None else i]
-            new = (len(self.cases) - 1 if i is None else i) + 1
+            src_i = len(self.cases) - 1 if i is None else i
+            src = self.cases[src_i]
+            new = src_i + 1
             row = copy.deepcopy(src)
-            row["name"] = unique_name(src.get("name", ""), set(c.get("name", "") for c in self.cases))
+            row["name"] = unique_name(src.get("name", ""), set(x.get("name", "") for x in self.cases))
             row["applied"] = False          # 새로 만든 케이스는 아직 등록 전
             if row.get("stop_mode") == "manual":
                 row["stop_mode"], row["stop_time"] = "auto", ""
             self.cases.insert(new, row)
             core.recalc_starts(self.cases, new)
         self.mark_cases()
-        self.t_case.refresh(new)
+        self.t_case.refresh("c%d" % new)
         if not row["name"]:
-            self.t_case.start_edit(new, 0)
+            self.t_case.start_edit("c%d" % new, 0)
 
-    def del_case(self):
+    def add_vm(self):
+        """선택한 케이스(케이스 행이나 그 아래 VM 행)에 다음 번호 VM 을 추가한다."""
         self.t_case.finish_edit()
-        i = self.t_case.selected()
-        if i is None:
+        i, k, c, v = self._selected_case()
+        if c is None:
+            messagebox.showinfo(TITLE, "VM 을 추가할 케이스를 먼저 고를 것 (케이스 행이나 그 아래 VM 행)", parent=self.root)
             return
-        name = self.cases[i].get("name") or "%d행" % (i + 1)
-        if not messagebox.askyesno(TITLE, "케이스 '%s' 를 삭제할까요?\n다른 케이스의 잡 시작 시각은 바뀌지 않는다." % name,
-                                   parent=self.root):
+        p = self.vm_prefix()
+        n = core.next_vm_number(c, p)
+        c.setdefault("vms", []).append({"name": core.vm_name(c.get("esx"), n, p), "job": NONE_JOB, "monitors": []})
+        iid = "c%dv%d" % (i, len(c["vms"]) - 1)
+        self.mark_cases()
+        self.t_case.refresh(iid)
+        if not c["vms"][-1]["name"]:
+            self.t_case.start_edit(iid, 0)
+
+    def del_row(self):
+        """케이스 행이면 케이스, VM 행이면 그 VM 을 삭제한다."""
+        self.t_case.finish_edit()
+        i, k, c, v = self._selected_case()
+        if c is None:
+            return
+        cname = c.get("name") or "%d번째 케이스" % (i + 1)
+        if k is not None:
+            if not messagebox.askyesno(TITLE, "VM '%s' 를 케이스 '%s' 에서 삭제할까요?" % (v.get("name") or "이름 없음", cname),
+                                       parent=self.root):
+                return
+            del c["vms"][k]
+            self.mark_cases()
+            self.t_case.refresh(("c%dv%d" % (i, min(k, len(c["vms"]) - 1))) if c["vms"] else "c%d" % i)
+            return
+        if not messagebox.askyesno(TITLE, "케이스 '%s' 를 삭제할까요? (VM %d대 포함)\n다른 케이스의 잡 시작 시각은 바뀌지 않는다."
+                                   % (cname, len(c.get("vms") or [])), parent=self.root):
             return
         del self.cases[i]
         if i < len(self.cases):
             core.interval_from_starts(self.cases, i)
         self.mark_cases()
-        self.t_case.refresh(i)
+        self.t_case.refresh(("c%d" % min(i, len(self.cases) - 1)) if self.cases else None)
 
-    def move_case(self, step):
-        """케이스 순서만 바꾼다. 잡 시작, 간격, 모니터링 중지 설정은 그 자리(행)에 남는다."""
+    def move_row(self, step):
+        """케이스 행: 케이스 순서만 바꾸고 잡 시작, 간격, 모니터링 중지 설정은 그 자리에 남긴다. VM 행: 케이스 안에서 VM 순서를 바꾼다."""
         self.t_case.finish_edit()
-        i = self.t_case.selected()
-        if i is None or not (0 <= i + step < len(self.cases)):
+        i, k, c, v = self._selected_case()
+        if c is None:
+            return
+        if k is not None:
+            vms = c["vms"]
+            j = k + step
+            if not (0 <= j < len(vms)):
+                return
+            vms[k], vms[j] = vms[j], vms[k]
+            self.mark_cases()
+            self.t_case.refresh("c%dv%d" % (i, j))
             return
         j = i + step
+        if not (0 <= j < len(self.cases)):
+            return
         a, b = self.cases[i], self.cases[j]
-        for k in ("start", "interval", "stop_mode", "stop_time"):
-            a[k], b[k] = b.get(k, ""), a.get(k, "")
+        for key in ("start", "interval", "stop_mode", "stop_time"):
+            a[key], b[key] = b.get(key, ""), a.get(key, "")
         self.cases[i], self.cases[j] = b, a
         self.mark_cases()
-        self.t_case.refresh(j)
+        self.t_case.refresh("c%d" % j)
 
-    def edit_monitors(self, i):
+    def edit_monitors(self, iid):
+        """VM 행: 그 VM 의 모니터링(실행 위치 VM). 케이스 행: ESX 모니터링(실행 위치 ESX)."""
         self.t_case.finish_edit()
-        c = self.cases[i]
-        mons = [m for m in self.mon_cmds if m.get("name")]
-        cur = {m["name"]: list(m["targets"]) for m in core.selected_monitors(c)}
-        missing = [n for n in cur if n not in set(m["name"] for m in mons)]
+        i, k, c, v = self._get(iid)
+        if c is None:
+            return
+        cname = c.get("name") or "%d번째 케이스" % (i + 1)
+        if k is None:
+            def apply(sel):
+                c["esx_monitors"] = sel
+            self._monitor_dialog(iid, "ESX", c.get("esx_monitors") or [], apply,
+                                 "ESX 모니터링 선택 - %s / %s" % (cname, c.get("esx") or "ESX 호스트 없음"),
+                                 "이 케이스의 ESX 호스트에서 실행할 모니터링 (실행 위치가 ESX 인 명령만 보임)")
+        else:
+            def apply(sel):
+                v["monitors"] = sel
+            self._monitor_dialog(iid, "VM", v.get("monitors") or [], apply,
+                                 "VM 모니터링 선택 - %s / %s" % (cname, v.get("name") or "이름 없음"),
+                                 "이 VM 에서 실행할 모니터링 (실행 위치가 VM 인 명령만 보임)")
+
+    def _monitor_dialog(self, iid, where, current, apply, title, head):
+        mons = [m for m in self.mon_cmds if m.get("name") and (m.get("where") or "VM").strip().upper() == where]
+        names = [m["name"] for m in mons]
+        missing = [n for n in current if n not in names]
         if not mons and not missing:
-            messagebox.showinfo(TITLE, "탭 2 에 모니터링 명령을 먼저 등록할 것", parent=self.root)
+            messagebox.showinfo(TITLE, "탭 2 에 실행 위치가 %s 인 모니터링 명령을 먼저 등록할 것" % where, parent=self.root)
             return
         top = tk.Toplevel(self.root)
-        top.title("모니터링 선택 - %s" % (c.get("name") or "%d행" % (i + 1)))
+        top.title(title)
         top.transient(self.root)
         fr = ttk.Frame(top, padding=self.px(10))
         fr.pack(fill="both", expand=True)
-        ttk.Label(fr, text="이 케이스에서 실행할 모니터링과 대상을 고른다 (기본은 모두 선택 안 함).", style="Bold.TLabel").grid(
-            row=0, column=0, columnspan=5, sticky="w", pady=(0, self.px(8)))
+        ttk.Label(fr, text=head + ". 기본은 모두 선택 안 함.", style="Bold.TLabel").grid(
+            row=0, column=0, columnspan=2, sticky="w", pady=(0, self.px(8)))
         vars_ = []
         r = 1
         for m in mons:
-            where = (m.get("where") or "VM").upper()
-            ttk.Label(fr, text="%s / %s" % (m.get("app") or "-", m["name"])).grid(row=r, column=0, sticky="w", padx=(0, 12))
-            ttk.Label(fr, text=where, style="Hint.TLabel").grid(row=r, column=1, sticky="w", padx=(0, 12))
-            targets = ["ESX"] if where == "ESX" else ["PVM", "SVM"]
-            for k, tname in enumerate(targets):
-                v = tk.BooleanVar(value=tname in cur.get(m["name"], []))
-                ttk.Checkbutton(fr, text=tname, variable=v).grid(row=r, column=2 + k, sticky="w", padx=(0, 10))
-                vars_.append((m["name"], tname, v))
-            desc = m.get("desc") or ""
-            if desc:
-                ttk.Label(fr, text=desc, style="Hint.TLabel").grid(row=r, column=4, sticky="w")
+            var = tk.BooleanVar(value=m["name"] in current)
+            ttk.Checkbutton(fr, text="%s / %s" % (m.get("app") or "-", m["name"]), variable=var).grid(
+                row=r, column=0, sticky="w", padx=(0, 16))
+            if m.get("desc"):
+                ttk.Label(fr, text=m["desc"], style="Hint.TLabel").grid(row=r, column=1, sticky="w")
+            vars_.append((m["name"], var))
             r += 1
         for n in missing:
-            ttk.Label(fr, text="%s (탭 2 에 없음)" % n, style="Hint.TLabel").grid(row=r, column=0, sticky="w")
-            for k, tname in enumerate(cur[n]):
-                v = tk.BooleanVar(value=True)
-                ttk.Checkbutton(fr, text=tname, variable=v).grid(row=r, column=2 + k, sticky="w")
-                vars_.append((n, tname, v))
+            var = tk.BooleanVar(value=True)
+            ttk.Checkbutton(fr, text="%s (탭 2 에 없음)" % n, variable=var).grid(row=r, column=0, sticky="w")
+            vars_.append((n, var))
             r += 1
         bf = ttk.Frame(fr)
-        bf.grid(row=r, column=0, columnspan=5, sticky="e", pady=(self.px(10), 0))
+        bf.grid(row=r, column=0, columnspan=2, sticky="e", pady=(self.px(10), 0))
 
         def ok():
-            sel = {}
-            for name, tname, v in vars_:
-                if v.get():
-                    sel.setdefault(name, []).append(tname)
-            order = [m["name"] for m in mons] + missing
-            c["monitors"] = [{"name": n, "targets": sel[n]} for n in order if n in sel]
+            apply([n for n, var in vars_ if var.get()])
             top.destroy()
             self.mark_cases()
-            self.t_case.refresh(i)
+            self.t_case.refresh(iid)
 
-        ttk.Button(bf, text="모두 해제", command=lambda: [v.set(False) for _, _, v in vars_]).pack(side="left", padx=(0, 20))
+        ttk.Button(bf, text="모두 해제", command=lambda: [var.set(False) for _, var in vars_]).pack(side="left", padx=(0, 20))
         ttk.Button(bf, text="확인", command=ok).pack(side="left", padx=4)
         ttk.Button(bf, text="취소", command=top.destroy).pack(side="left")
         top.bind("<Escape>", lambda e: top.destroy())
@@ -1166,17 +1366,20 @@ class App(object):
         self._center(top)
         top.grab_set()
 
-    def edit_stop(self, i):
+    def edit_stop(self, iid):
         self.t_case.finish_edit()
-        c = self.cases[i]
-        if not core.selected_monitors(c):
-            messagebox.showinfo(TITLE, "이 케이스는 모니터링을 고르지 않았음. 먼저 모니터링 칸에서 선택할 것", parent=self.root)
+        i, k, c, v = self._get(iid)
+        if c is None or k is not None:
+            return
+        if not core.case_has_monitors(c):
+            messagebox.showinfo(TITLE, "이 케이스는 모니터링을 고르지 않았음. VM 행이나 케이스 행의 모니터링 칸에서 먼저 선택할 것",
+                                parent=self.root)
             return
         self.calc_schedule()
         s = self.sched[i]
         ld = self.leads() or (self.settings["mon_lead_min"], self.settings["stop_lead_min"])
         top = tk.Toplevel(self.root)
-        top.title("모니터링 중지 - %s" % (c.get("name") or "%d행" % (i + 1)))
+        top.title("모니터링 중지 - %s" % (c.get("name") or "%d번째 케이스" % (i + 1)))
         top.transient(self.root)
         fr = ttk.Frame(top, padding=self.px(10))
         fr.pack(fill="both", expand=True)
@@ -1210,7 +1413,7 @@ class App(object):
             c["stop_mode"] = m
             top.destroy()
             self.mark_cases()
-            self.t_case.refresh(i)
+            self.t_case.refresh(iid)
 
         ttk.Button(bf, text="확인", command=ok).pack(side="left", padx=4)
         ttk.Button(bf, text="취소", command=top.destroy).pack(side="left")
@@ -1240,7 +1443,7 @@ class App(object):
             if all(c.get("applied") for c in self.cases):
                 errors = ["모든 케이스가 적용 체크되어 있어 생성할 케이스가 없음. 새로 등록할 케이스는 적용 체크를 끌 것"]
             else:
-                errors = ["등록할 줄이 없음. 적용 체크를 끈 케이스마다 잡이나 모니터링을 하나 이상 지정할 것"]
+                errors = ["등록할 줄이 없음. 적용 체크를 끈 케이스의 VM 에 잡이나 모니터링을 하나 이상 지정할 것"]
         if errors:
             self.show_messages("오류 %d건. 블록과 기록을 만들지 않았음. 고친 뒤 다시 생성할 것." % len(errors), errors, warnings)
             self.nb.select(3)
@@ -1252,7 +1455,8 @@ class App(object):
                 % (len(warnings), "\n".join(warnings[:12]), "\n..." if len(warnings) > 12 else ""), parent=self.root):
             return
         try:
-            res = core.generate(self.cases, self.run_cmds, self.mon_cmds, paths, write=True)
+            res = core.generate(self.cases, self.run_cmds, self.mon_cmds, paths, write=True,
+                                backup_dir=os.path.join(self.base, "backup"))
         except (OSError, ValueError) as e:
             messagebox.showerror(TITLE, "기록 파일을 저장하지 못해 블록을 만들지 않았음.\n%s\n\n"
                                         "테스트 기록 CSV 를 엑셀 등이 열고 있으면 닫고 다시 생성할 것." % e, parent=self.root)
@@ -1292,9 +1496,9 @@ class App(object):
         t.insert("end", "생성한 케이스 %d개, 적용 체크로 뺀 케이스 %d개\n" % (made, res.get("skipped", 0)))
         t.insert("end", "VM %d대: %s\n" % (len(vm_cnt), ", ".join("%s %d줄" % kv for kv in vm_cnt.items()) or "없음"))
         t.insert("end", "ESX %d대: %s\n" % (len(esx_cnt), ", ".join("%s %d줄" % kv for kv in esx_cnt.items()) or "없음"))
-        if res["record_missing"]:
-            t.insert("end", "기존 테스트 기록 CSV 에 없는 열은 기록하지 않았음 (로그에는 전부 있음): %s\n"
-                     % ", ".join(res["record_missing"]), "warn")
+        if res.get("record_added"):
+            t.insert("end", "기존 테스트 기록 CSV 의 머리글 끝에 새 열을 덧붙였음: %s. 덧붙이기 전 원본: %s\n"
+                     % (", ".join(res["record_added"]), res.get("record_backup")), "warn")
         for w in res["warnings"]:
             t.insert("end", "경고: " + w + "\n", "warn")
         set_text(self.blk_setup, res["setup"])
