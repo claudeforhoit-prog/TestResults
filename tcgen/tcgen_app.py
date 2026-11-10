@@ -321,24 +321,15 @@ def set_text(text, value):
 class App(object):
     def __init__(self, root):
         self.root = root
-        self.base = core.app_dir()
         self.scale = max(1.0, root.winfo_fpixels("1i") / 96.0)
-        self.settings = core.load_settings(self.base)
-        paths = core.resolve_paths(self.base, self.settings)
-        self.run_cmds = core.load_rows(os.path.join(self.base, core.RUN_FILE), core.RUN_FIELDS, core.RUN_HEADERS)
-        self.mon_cmds = core.load_rows(os.path.join(self.base, core.MON_FILE), core.MON_FIELDS, core.MON_HEADERS)
+        self.prog_dir = core.app_dir()          # 생성기 폴더 (실행 파일만, 다시 빌드하면 지워질 수 있음)
+        self.start_msgs = []
+        self.base = self.open_data_dir_at_start()
+        self.loading = False
         self.load_msg = ""
-        try:
-            self.cases = core.load_cases(self.base)
-        except (OSError, ValueError) as e:
-            self.cases = []
-            bad = os.path.join(self.base, core.CASES_FILE)
-            keep = bad + ".bad-" + dt.datetime.now().strftime("%Y%m%d%H%M%S")
-            try:
-                os.replace(bad, keep)
-            except OSError:
-                keep = bad
-            self.load_msg = "%s 를 읽지 못해 빈 표로 시작함 (원래 파일: %s) %s" % (core.CASES_FILE, keep, e)
+        self.run_cmds, self.mon_cmds, self.cases = [], [], []
+        self.read_data()
+        paths = core.resolve_paths(self.base, self.settings)
         self.sched = []
         self.dirty = {"settings": False, "run": False, "mon": False, "cases": False}   # True = 자동 저장 실패
         self.save_warned = {}
@@ -356,10 +347,79 @@ class App(object):
         for v in (self.v_record, self.v_log, self.v_user, self.v_mon, self.v_stop):
             v.trace_add("write", self._settings_changed) if hasattr(v, "trace_add") else v.trace("w", self._settings_changed)
         self.update_status()
+        for m in self.start_msgs:
+            messagebox.showinfo(TITLE, m, parent=root)
         if self.load_msg:
             self.v_status.set(self.load_msg)
             messagebox.showwarning(TITLE, self.load_msg, parent=root)
         root.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    # ------------------------------------------------------------ 데이터 폴더
+    def open_data_dir_at_start(self):
+        """데이터 폴더를 정하고(config.json 또는 기본 위치), 예전 판이 생성기 폴더에 둔 데이터가 있으면 복사해 온다."""
+        base = core.data_dir()
+        try:
+            os.makedirs(base, exist_ok=True)
+        except OSError as e:
+            fallback = os.path.normpath(core.default_data_dir())
+            self.start_msgs.append("데이터 폴더를 쓸 수 없어 기본 위치를 씀\n쓸 수 없는 폴더: %s\n%s\n기본 위치: %s"
+                                   % (base, e, fallback))
+            base = fallback
+            os.makedirs(base, exist_ok=True)
+        try:
+            moved = core.migrate_from(self.prog_dir, base)
+        except OSError as e:
+            moved = []
+            self.start_msgs.append("예전 생성기 폴더의 데이터를 데이터 폴더로 복사하지 못함\n%s\n%s" % (self.prog_dir, e))
+        if moved:
+            self.start_msgs.append("예전 판이 생성기 폴더에 저장한 데이터를 데이터 폴더로 복사함.\n\n%s\n\n생성기 폴더: %s\n데이터 폴더: %s\n\n"
+                                   "이제 설정, 명령, 케이스는 데이터 폴더에 저장되어 생성기를 다시 빌드해도 남는다."
+                                   % ("\n".join(moved), self.prog_dir, base))
+        return base
+
+    def read_data(self):
+        """데이터 폴더에서 설정, 실행 명령, 모니터링 명령, 테스트 케이스 표를 읽는다. 목록 객체는 그대로 두고 내용만 바꾼다."""
+        self.settings = core.load_settings(self.base)
+        self.run_cmds[:] = core.load_rows(os.path.join(self.base, core.RUN_FILE), core.RUN_FIELDS, core.RUN_HEADERS)
+        self.mon_cmds[:] = core.load_rows(os.path.join(self.base, core.MON_FILE), core.MON_FIELDS, core.MON_HEADERS)
+        try:
+            self.cases[:] = core.load_cases(self.base)
+        except (OSError, ValueError) as e:
+            self.cases[:] = []
+            bad = os.path.join(self.base, core.CASES_FILE)
+            keep = bad + ".bad-" + dt.datetime.now().strftime("%Y%m%d%H%M%S")
+            try:
+                os.replace(bad, keep)
+            except OSError:
+                keep = bad
+            self.load_msg = "%s 를 읽지 못해 빈 표로 시작함 (원래 파일: %s) %s" % (core.CASES_FILE, keep, e)
+
+    def reload_data(self):
+        """데이터 폴더를 바꾸거나 백업을 불러온 뒤 화면 전체를 다시 채운다."""
+        self.finish_all_edits()
+        self.load_msg = ""
+        self.loading = True
+        try:
+            self.read_data()
+            paths = core.resolve_paths(self.base, self.settings)
+            self.v_record.set(paths["record_csv"])
+            self.v_log.set(paths["log_dir"])
+            self.v_user.set(self.settings.get("vm_user", ""))
+            self.v_mon.set(str(self.settings["mon_lead_min"]))
+            self.v_stop.set(str(self.settings["stop_lead_min"]))
+        finally:
+            self.loading = False
+        self.dirty = dict((k, False) for k in self.dirty)
+        self.save_warned = {}
+        self.t_run.refresh(0)
+        self.t_mon.refresh(0)
+        self.update_case_hint()
+        self.t_case.refresh(0)
+        self.show_messages("데이터를 다시 읽음. [명령어 생성] 을 누르면 결과가 나온다.", [], [])
+        self.update_data_hint()
+        self.update_status()
+        if self.load_msg:
+            messagebox.showwarning(TITLE, self.load_msg, parent=self.root)
 
     # ------------------------------------------------------------ 모양
     def px(self, n):
@@ -413,7 +473,7 @@ class App(object):
         outer = ttk.Frame(r, padding=self.px(6))
         outer.pack(fill="both", expand=True)
 
-        sf = ttk.LabelFrame(outer, text="설정 (바뀔 때마다 생성기 폴더의 settings.json 에 자동 저장)", padding=self.px(6))
+        sf = ttk.LabelFrame(outer, text="설정 (바뀔 때마다 데이터 폴더의 settings.json 에 자동 저장)", padding=self.px(6))
         sf.pack(fill="x")
         row1 = ttk.Frame(sf)
         row1.pack(fill="x")
@@ -438,11 +498,13 @@ class App(object):
         ttk.Label(row2, text="분 전 (다음 케이스 잡 시작 기준)").pack(side="left")
         row3 = ttk.Frame(sf)
         row3.pack(fill="x", pady=(self.px(6), 0))
-        for text, cmd in (("설정 백업", self.backup), ("설정 폴더 열기", self.open_settings_dir),
+        for text, cmd in (("설정 백업", self.backup), ("백업 불러오기", self.restore_backup),
+                          ("데이터 폴더 열기", self.open_data_dir), ("데이터 폴더 변경", self.change_data_dir),
                           ("테스트 케이스 폴더 열기", self.open_case_dir)):
             ttk.Button(row3, text=text, command=cmd).pack(side="left", padx=(0, 6))
-        self.hint(row3, "설정 폴더 = 생성기 폴더 (settings.json, run_commands.csv, monitor_commands.csv). "
-                        "테스트 케이스 폴더 = 로그 폴더 (testcaselogging-*.csv)").pack(side="left", fill="x", expand=True, padx=8)
+        self.data_hint = self.hint(row3, "")
+        self.data_hint.pack(side="left", fill="x", expand=True, padx=8)
+        self.update_data_hint()
 
         bar = ttk.Frame(outer)
         bar.pack(side="bottom", fill="x", pady=(self.px(4), 0))
@@ -589,6 +651,8 @@ class App(object):
 
     # ------------------------------------------------------------ 상태
     def _settings_changed(self, *a):
+        if self.loading:            # 데이터를 다시 읽는 중에는 저장하지 않는다
+            return
         self.autosave("settings")
         if hasattr(self, "t_case"):
             self.update_case_hint()
@@ -603,10 +667,14 @@ class App(object):
             tail = "   자동 저장 %s" % self.last_saved.strftime("%H:%M:%S")
         if failed:
             tail += "   저장 실패: " + ", ".join(failed)
-        self.v_status.set("생성기 폴더 (설정 폴더): %s%s" % (self.base, tail))
+        self.v_status.set("데이터 폴더: %s%s" % (self.base, tail))
+
+    def update_data_hint(self):
+        self.data_hint.configure(text="데이터 폴더 = %s (설정, 명령, 테스트 케이스 표, 기록 기본 위치). 생성기 폴더와 따로 있어 "
+                                      "다시 빌드해도 남는다. 테스트 케이스 폴더 = 로그 폴더 (testcaselogging-*.csv)" % self.base)
 
     def autosave(self, kind):
-        """설정, 탭 1, 탭 2, 탭 3 을 바뀔 때마다 생성기 폴더에 저장한다. 실패하면 상태 줄과 한 번의 알림으로 알린다."""
+        """설정, 탭 1, 탭 2, 탭 3 을 바뀔 때마다 데이터 폴더에 저장한다. 실패하면 상태 줄과 한 번의 알림으로 알린다."""
         try:
             if kind == "settings":
                 st = self.current_settings(show_error=False)
@@ -627,7 +695,7 @@ class App(object):
             if not self.save_warned.get(kind):
                 self.save_warned[kind] = True
                 name = dict((k, n) for n, k in self.SAVE_NAMES)[kind]
-                messagebox.showerror(TITLE, "%s 을 자동 저장하지 못함\n%s\n%s\n\n생성기 폴더에 쓸 수 있는지 확인할 것"
+                messagebox.showerror(TITLE, "%s 을 자동 저장하지 못함\n%s\n%s\n\n데이터 폴더에 쓸 수 있는지 확인할 것"
                                      % (name, self.base, e), parent=self.root)
         self.update_status()
 
@@ -696,26 +764,102 @@ class App(object):
         if p:
             self.v_log.set(os.path.normpath(p))
 
+    def _backup_start_dir(self):
+        d = (core.load_config().get("backup_dir") or "").strip()
+        return d if d and os.path.isdir(d) else self.base
+
     def backup(self):
+        """데이터 파일 4개와 testcases 폴더를 고른 폴더 아래 tcgen_backup_<년월일시분초> 로 복사한다. 고른 폴더는 다음에도 쓴다."""
         self.save_everything()
-        try:
-            dest, copied = core.backup_settings(self.base)
-        except OSError as e:
-            messagebox.showerror(TITLE, "백업하지 못함\n%s" % e, parent=self.root)
+        parent = filedialog.askdirectory(parent=self.root, mustexist=False, initialdir=self._backup_start_dir(),
+                                         title="백업을 저장할 폴더 선택 (그 안에 tcgen_backup_년월일시분초 폴더를 만든다)")
+        if not parent:
             return
-        if not copied:
+        parent = os.path.normpath(parent)
+        try:
+            dest, done = core.backup_to(self.base, parent)
+        except OSError as e:
+            messagebox.showerror(TITLE, "백업하지 못함\n%s\n%s" % (parent, e), parent=self.root)
+            return
+        if not done:
             try:
                 os.rmdir(dest)
             except OSError:
                 pass
-            messagebox.showinfo(TITLE, "백업할 파일이 없음. 생성기 폴더에 저장된 파일이 없음", parent=self.root)
+            messagebox.showinfo(TITLE, "백업할 파일이 없음. 데이터 폴더에 저장된 파일이 없음\n%s" % self.base, parent=self.root)
             return
-        if messagebox.askyesno(TITLE, "백업함: %s\n\n%s\n\n복원은 이 파일들을 생성기 폴더에 덮어쓰고 생성기를 다시 실행한다.\n백업 폴더를 열까요?"
-                               % (dest, "\n".join(copied)), parent=self.root):
+        try:
+            cfg = core.load_config()
+            cfg["backup_dir"] = parent
+            core.save_config(cfg)
+        except OSError:
+            pass
+        if messagebox.askyesno(TITLE, "백업함: %s\n\n%s\n\n복원은 [백업 불러오기] 에서 이 폴더를 고른다.\n백업 폴더를 열까요?"
+                               % (dest, "\n".join(done)), parent=self.root):
             open_folder(dest)
 
-    def open_settings_dir(self):
+    def restore_backup(self):
+        """고른 백업 폴더의 데이터 파일로 현재 데이터를 바꾼다. 바꾸기 전 현재 파일은 데이터 폴더 backup 아래에 복사한다."""
+        self.save_everything()
+        src = filedialog.askdirectory(parent=self.root, mustexist=True, initialdir=self._backup_start_dir(),
+                                      title="불러올 백업 폴더 선택 (tcgen_backup_년월일시분초 폴더 또는 예전 생성기 폴더)")
+        if not src:
+            return
+        src = os.path.normpath(src)
+        if not core.has_data(src):
+            messagebox.showerror(TITLE, "이 폴더에는 tcgen 데이터 파일이 없음\n%s\n\n필요한 파일: %s"
+                                 % (src, ", ".join(core.DATA_FILES)), parent=self.root)
+            return
+        if not messagebox.askyesno(TITLE, "이 백업으로 현재 데이터를 바꿀까요?\n\n백업 폴더: %s\n데이터 폴더: %s\n\n"
+                                          "바꾸기 전 현재 파일은 데이터 폴더의 backup 아래에 복사해 둔다. 테스트 기록, 로그 파일은 같은 이름이 "
+                                          "없을 때만 복사한다." % (src, self.base), parent=self.root):
+            return
+        try:
+            keep, done = core.restore_from(src, self.base)
+        except (OSError, ValueError) as e:
+            messagebox.showerror(TITLE, "백업을 불러오지 못함\n%s" % e, parent=self.root)
+            return
+        self.reload_data()
+        messagebox.showinfo(TITLE, "불러옴: %s\n\n%s\n\n불러오기 전 데이터: %s" % (src, "\n".join(done), keep), parent=self.root)
+
+    def open_data_dir(self):
         open_folder(self.base)
+
+    def change_data_dir(self):
+        """데이터 폴더를 바꾸고 그 경로를 config.json 에 적는다. 다음 실행부터 그 폴더를 쓴다."""
+        self.save_everything()
+        new = filedialog.askdirectory(parent=self.root, mustexist=False, initialdir=os.path.dirname(self.base),
+                                      title="새 데이터 폴더 선택")
+        if not new:
+            return
+        new = os.path.normpath(new)
+        if core.same_dir(new, self.base):
+            return
+        if core._inside(new, self.prog_dir):
+            messagebox.showerror(TITLE, "생성기 폴더 안은 데이터 폴더로 쓸 수 없음. 다시 빌드할 때 지워질 수 있다.\n%s" % new,
+                                 parent=self.root)
+            return
+        if core.has_data(new):
+            if not messagebox.askyesno(TITLE, "고른 폴더에 이미 tcgen 데이터가 있음.\n%s\n\n그 데이터를 불러와 쓸까요? "
+                                              "지금 데이터는 지금 폴더에 그대로 남는다." % new, parent=self.root):
+                return
+            copy_current = False
+        else:
+            if not messagebox.askyesno(TITLE, "지금 데이터를 새 폴더로 복사하고 새 폴더를 데이터 폴더로 쓸까요?\n\n지금: %s\n새 폴더: %s\n\n"
+                                              "지금 폴더의 파일은 지우지 않는다." % (self.base, new), parent=self.root):
+                return
+            copy_current = True
+        try:
+            done = core.change_data_dir(self.base, new, copy_current=copy_current)
+        except OSError as e:
+            messagebox.showerror(TITLE, "데이터 폴더를 바꾸지 못함\n%s\n%s" % (new, e), parent=self.root)
+            return
+        old = self.base
+        self.base = new
+        self.reload_data()
+        messagebox.showinfo(TITLE, "데이터 폴더를 바꿈\n\n이전: %s\n지금: %s\n%s\n\n위치는 %s 에 저장되어 다음 실행에도 쓴다."
+                            % (old, new, ("\n복사한 항목:\n" + "\n".join(done)) if done else "",
+                               os.path.join(core.config_dir(), core.CONFIG_FILE)), parent=self.root)
 
     def open_case_dir(self):
         s = self.current_settings(show_error=False) or self.settings

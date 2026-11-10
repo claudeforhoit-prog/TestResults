@@ -2,7 +2,8 @@
 """
 tcgen_core.py - 테스트 실행 명령 생성기의 계산과 출력 (화면 코드와 분리)
 
-- 설정, 실행 명령 목록, 모니터링 명령 목록의 저장과 불러오기
+- 설정, 실행 명령 목록, 모니터링 명령 목록, 테스트 케이스 표의 저장과 불러오기 (데이터 폴더, 생성기 폴더와 분리)
+- 백업, 백업 불러오기, 데이터 폴더 변경, 예전 판 데이터 옮기기
 - 테스트 케이스 시각 계산: 잡 시작, 모니터링 시작(잡 시작 N분 전), 모니터링 중지
 - crontab 줄 생성: 변수 <vm이름> <실행시각> 치환, % 처리, 줄 끝 표식
 - 붙여넣기 블록 생성: 점프 VM 최초 설정, VM 등록(점프 VM 에서 ssh), ESX 등록(root SSH 창)
@@ -210,6 +211,162 @@ def backup_settings(base, now=None):
             shutil.copy2(src, os.path.join(dest, fn))
             copied.append(fn)
     return dest, copied
+
+
+# ------------------------------------------------------------------ 데이터 폴더 (생성기 폴더와 분리)
+# 데이터 파일은 생성기 폴더가 아니라 데이터 폴더에 둔다. 생성기를 다시 빌드하거나 폴더를 바꿔도 남게 하려는 것이다.
+# 데이터 폴더 기본 위치: <사용자 폴더>/tcgen_data. 위치를 바꾸면 그 경로를 설정 파일(config.json)에 적는다.
+# 설정 파일 위치: Windows 는 %APPDATA%\tcgen\config.json, 그 밖에는 ~/.config/tcgen/config.json
+DATA_FILES = (SETTINGS_FILE, RUN_FILE, MON_FILE, CASES_FILE)
+CONFIG_FILE = "config.json"
+BACKUP_PREFIX = "tcgen_backup_"
+
+
+def config_dir():
+    d = os.environ.get("TCGEN_CONFIG_DIR")          # 시험용
+    if d:
+        return d
+    if os.name == "nt" and os.environ.get("APPDATA"):
+        return os.path.join(os.environ["APPDATA"], "tcgen")
+    return os.path.join(os.path.expanduser("~"), ".config", "tcgen")
+
+
+def default_data_dir():
+    return os.environ.get("TCGEN_DEFAULT_DATA_DIR") or os.path.join(os.path.expanduser("~"), "tcgen_data")
+
+
+def load_config():
+    try:
+        with open(os.path.join(config_dir(), CONFIG_FILE), encoding="utf-8-sig") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_config(cfg):
+    d = config_dir()
+    os.makedirs(d, exist_ok=True)
+    _atomic_write(os.path.join(d, CONFIG_FILE), json.dumps(cfg, ensure_ascii=False, indent=2) + "\n", "utf-8")
+
+
+def data_dir(cfg=None):
+    cfg = load_config() if cfg is None else cfg
+    d = (cfg.get("data_dir") or "").strip()
+    return os.path.normpath(d) if d else os.path.normpath(default_data_dir())
+
+
+def has_data(d):
+    return any(os.path.isfile(os.path.join(d, f)) for f in DATA_FILES)
+
+
+def same_dir(a, b):
+    return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+
+
+def _inside(path, folder):
+    p, f = os.path.normcase(os.path.abspath(path)), os.path.normcase(os.path.abspath(folder))
+    return p == f or p.startswith(f.rstrip("\\/") + os.sep)
+
+
+def copy_data(src, dst, dirs=(), overwrite=True):
+    """src 의 데이터 파일 4개와 dirs 에 적은 하위 폴더를 dst 로 복사한다. 복사한 항목 이름 목록을 반환한다.
+    하위 폴더(테스트 기록, 로그, 백업) 안의 파일은 dst 에 같은 이름이 없을 때만 복사해 기록을 덮어쓰지 않는다."""
+    os.makedirs(dst, exist_ok=True)
+    done = []
+    for fn in DATA_FILES:
+        s = os.path.join(src, fn)
+        if os.path.isfile(s) and (overwrite or not os.path.exists(os.path.join(dst, fn))):
+            shutil.copy2(s, os.path.join(dst, fn))
+            done.append(fn)
+    for sub in dirs:
+        sd = os.path.join(src, sub)
+        if not os.path.isdir(sd):
+            continue
+        n = skipped = 0
+        for cur, _, files in os.walk(sd):
+            rel = os.path.relpath(cur, src)
+            os.makedirs(os.path.join(dst, rel), exist_ok=True)
+            for fn in files:
+                t = os.path.join(dst, rel, fn)
+                if os.path.exists(t):
+                    skipped += 1
+                    continue
+                shutil.copy2(os.path.join(cur, fn), t)
+                n += 1
+        if n or skipped:
+            done.append("%s%s 파일 %d개%s" % (sub, os.sep, n, (" (같은 이름이 있어 건너뛴 파일 %d개)" % skipped) if skipped else ""))
+    return done
+
+
+def _remap_settings_paths(old, new):
+    """settings.json 의 기록 CSV, 로그 폴더가 예전 폴더 안을 가리키면 새 폴더의 같은 위치로 바꾼다."""
+    if not os.path.isfile(os.path.join(new, SETTINGS_FILE)):
+        return
+    s = load_settings(new)
+    changed = False
+    for key in ("record_csv", "log_dir"):
+        v = (s.get(key) or "").strip()
+        if v and os.path.isabs(v) and _inside(v, old):
+            s[key] = os.path.join(new, os.path.relpath(v, old))
+            changed = True
+    if changed:
+        save_settings(new, resolve_paths(new, s))
+
+
+def migrate_from(old, new, now=None):
+    """예전 판이 생성기 폴더(old)에 저장한 데이터를 데이터 폴더(new)로 복사한다. new 에 데이터가 없을 때만 한다.
+    복사한 뒤 생성기 폴더의 데이터 파일 4개는 old/moved_to_data_folder_<시각> 으로 옮겨, 어느 파일을 쓰는지 헷갈리지 않게 한다
+    (지우지 않는다. 옮기지 못하면 그대로 둔다)."""
+    if same_dir(old, new) or has_data(new) or not has_data(old):
+        return []
+    done = copy_data(old, new, dirs=(DEFAULT_CASE_DIR, "backup"))
+    _remap_settings_paths(old, new)
+    ts = (now or dt.datetime.now()).strftime("%Y%m%d%H%M%S")
+    aside = os.path.join(old, "moved_to_data_folder_" + ts)
+    try:
+        os.makedirs(aside, exist_ok=True)
+        for fn in DATA_FILES:
+            if os.path.isfile(os.path.join(old, fn)):
+                os.replace(os.path.join(old, fn), os.path.join(aside, fn))
+    except OSError:
+        pass
+    return done
+
+
+def change_data_dir(cur, new, copy_current=True):
+    """데이터 폴더를 new 로 바꾸고 config.json 에 적는다. copy_current 이면 현재 데이터를 new 로 복사한다(new 에 데이터가 없을 때)."""
+    os.makedirs(new, exist_ok=True)
+    done = []
+    if copy_current and not has_data(new):
+        done = copy_data(cur, new, dirs=(DEFAULT_CASE_DIR, "backup"))
+        _remap_settings_paths(cur, new)
+    cfg = load_config()
+    cfg["data_dir"] = os.path.normpath(new)
+    save_config(cfg)
+    return done
+
+
+def backup_to(base, parent, now=None):
+    """데이터 폴더(base)의 데이터 파일 4개와 testcases 폴더를 parent 아래 tcgen_backup_<년월일시분초> 폴더로 복사한다."""
+    ts = (now or dt.datetime.now()).strftime("%Y%m%d%H%M%S")
+    dest = os.path.join(parent, BACKUP_PREFIX + ts)
+    return dest, copy_data(base, dest, dirs=(DEFAULT_CASE_DIR,))
+
+
+def restore_from(src, base, now=None):
+    """백업 폴더(src)의 데이터 파일로 데이터 폴더(base)의 파일을 바꾼다. 바꾸기 전 현재 파일은 base/backup/<시각>_before_restore 에
+    복사한다. testcases 폴더 안 파일은 같은 이름이 없을 때만 복사한다. (복원 전 백업 폴더, 복사 항목) 반환."""
+    if same_dir(src, base):
+        raise ValueError("현재 데이터 폴더와 같은 폴더임: %s" % src)
+    if not has_data(src):
+        raise ValueError("이 폴더에는 tcgen 데이터 파일(%s)이 없음: %s" % (", ".join(DATA_FILES), src))
+    ts = (now or dt.datetime.now()).strftime("%Y%m%d%H%M%S")
+    keep = os.path.join(base, "backup", ts + "_before_restore")
+    copy_data(base, keep)
+    done = copy_data(src, base, dirs=(DEFAULT_CASE_DIR,))
+    _remap_settings_paths(src, base)
+    return keep, done
 
 
 # ------------------------------------------------------------------ 시각

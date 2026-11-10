@@ -268,6 +268,103 @@ class AppliedTests(TmpDir):
         self.assertEqual(core.load_cases(os.path.join(self.base, "missing")), [])
 
 
+class DataDirTests(unittest.TestCase):
+    """데이터 폴더 분리, 예전 판 데이터 옮기기, 백업과 불러오기, 데이터 폴더 변경. 실제 사용자 폴더는 건드리지 않는다."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="tcgen_dd_")
+        self.saved_env = {k: os.environ.get(k) for k in ("TCGEN_CONFIG_DIR", "TCGEN_DEFAULT_DATA_DIR")}
+        os.environ["TCGEN_CONFIG_DIR"] = os.path.join(self.tmp, "cfg")
+        os.environ["TCGEN_DEFAULT_DATA_DIR"] = os.path.join(self.tmp, "data")
+        self.prog = os.path.join(self.tmp, "prog")
+        os.makedirs(self.prog)
+
+    def tearDown(self):
+        for k, v in self.saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def write_data(self, d):
+        os.makedirs(d, exist_ok=True)
+        core.save_settings(d, core.resolve_paths(d, dict(core.load_settings(d), vm_user="tester")))
+        core.save_rows(os.path.join(d, core.RUN_FILE), core.RUN_FIELDS, core.RUN_HEADERS, RUN)
+        os.makedirs(os.path.join(d, "testcases"))
+        with open(os.path.join(d, "testcases", "test_record.csv"), "w") as f:
+            f.write("a\n")
+        os.makedirs(os.path.join(d, "backup", "20261101000000"))
+        with open(os.path.join(d, "backup", "20261101000000", core.SETTINGS_FILE), "w") as f:
+            f.write("{}")
+
+    def test_default_and_config(self):
+        self.assertEqual(core.data_dir(), os.path.normpath(os.path.join(self.tmp, "data")))
+        core.save_config({"data_dir": os.path.join(self.tmp, "other")})
+        self.assertEqual(core.data_dir(), os.path.normpath(os.path.join(self.tmp, "other")))
+
+    def test_migrate_old_program_folder(self):
+        self.write_data(self.prog)
+        st = core.load_settings(self.prog)
+        st["log_dir"] = os.path.join(self.prog, "mylogs")             # 생성기 폴더 안을 가리키던 경로
+        core.save_settings(self.prog, core.resolve_paths(self.prog, st))
+        data = core.data_dir()
+        done = core.migrate_from(self.prog, data, now=NOW)
+        self.assertIn(core.SETTINGS_FILE, done)
+        self.assertIn(core.RUN_FILE, done)
+        self.assertTrue(os.path.exists(os.path.join(data, "testcases", "test_record.csv")))
+        self.assertTrue(os.path.exists(os.path.join(data, "backup", "20261101000000", core.SETTINGS_FILE)))
+        self.assertEqual(core.load_settings(data)["vm_user"], "tester")
+        self.assertEqual(core.load_settings(data)["log_dir"], os.path.join(data, "mylogs"))
+        self.assertFalse(core.has_data(self.prog), "복사한 뒤 생성기 폴더의 데이터 파일은 옆 폴더로 옮김")
+        self.assertTrue(core.has_data(os.path.join(self.prog, "moved_to_data_folder_20261109153012")))
+        self.assertEqual(core.migrate_from(self.prog, data), [])
+
+    def test_no_migrate_when_data_exists(self):
+        self.write_data(self.prog)
+        data = core.data_dir()
+        os.makedirs(data)
+        core.save_rows(os.path.join(data, core.MON_FILE), core.MON_FIELDS, core.MON_HEADERS, MON)
+        self.assertEqual(core.migrate_from(self.prog, data), [])
+        self.assertTrue(core.has_data(self.prog))
+
+    def test_backup_and_restore(self):
+        data = core.data_dir()
+        self.write_data(data)
+        dest, done = core.backup_to(data, os.path.join(self.tmp, "bk"), now=NOW)
+        self.assertEqual(os.path.basename(dest), "tcgen_backup_20261109153012")
+        self.assertTrue(os.path.exists(os.path.join(dest, core.RUN_FILE)))
+        self.assertTrue(os.path.exists(os.path.join(dest, "testcases", "test_record.csv")))
+        self.assertFalse(os.path.exists(os.path.join(dest, "backup")), "백업 안에 이전 백업은 넣지 않음")
+        core.save_rows(os.path.join(data, core.RUN_FILE), core.RUN_FIELDS, core.RUN_HEADERS, RUN[:1])
+        with open(os.path.join(data, "testcases", "test_record.csv"), "w") as f:
+            f.write("a\nb\n")                                   # 백업 뒤에 쌓인 기록
+        keep, _ = core.restore_from(dest, data, now=NOW + dt.timedelta(minutes=1))
+        self.assertEqual(len(core.load_rows(os.path.join(data, core.RUN_FILE), core.RUN_FIELDS, core.RUN_HEADERS)), 2)
+        with open(os.path.join(data, "testcases", "test_record.csv")) as f:
+            self.assertEqual(f.read(), "a\nb\n", "기록 파일은 덮어쓰지 않음")
+        self.assertEqual(len(core.load_rows(os.path.join(keep, core.RUN_FILE), core.RUN_FIELDS, core.RUN_HEADERS)), 1,
+                         "불러오기 전 데이터를 따로 복사해 둠")
+        with self.assertRaises(ValueError):
+            core.restore_from(os.path.join(self.tmp, "no_such_backup"), data)
+        with self.assertRaises(ValueError):
+            core.restore_from(data, data)
+
+    def test_change_data_dir(self):
+        data = core.data_dir()
+        self.write_data(data)
+        new = os.path.join(self.tmp, "moved")
+        done = core.change_data_dir(data, new)
+        self.assertIn(core.RUN_FILE, done)
+        self.assertEqual(core.data_dir(), os.path.normpath(new))
+        self.assertTrue(core.has_data(data), "이전 폴더의 파일은 지우지 않음")
+        other = os.path.join(self.tmp, "other_with_data")
+        os.makedirs(other)
+        core.save_rows(os.path.join(other, core.MON_FILE), core.MON_FIELDS, core.MON_HEADERS, MON)
+        self.assertEqual(core.change_data_dir(new, other, copy_current=False), [])
+        self.assertFalse(os.path.exists(os.path.join(other, core.RUN_FILE)), "데이터가 있는 폴더로 바꿀 때는 복사하지 않음")
+
+
 class RecordTests(TmpDir):
     def read(self, path, enc="utf-8-sig"):
         with open(path, encoding=enc, newline="") as f:

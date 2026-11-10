@@ -6,7 +6,9 @@ test_cases.json
 test_cases.json.bad-*
 testcases/
 backup/
+moved_to_data_folder_*/
 # build outputs
+build_olddata/
 .venv/
 build/
 dist/

@@ -18,9 +18,17 @@ HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, HERE)
 import tcgen_core as core  # noqa: E402
 
-BASE = tempfile.mkdtemp(prefix="tcgen_gui_")
-core.app_dir = lambda: BASE
+TMP = tempfile.mkdtemp(prefix="tcgen_gui_")
+BASE = os.path.join(TMP, "data")            # 데이터 폴더 (기본 위치 대신 임시 폴더)
+PROG = os.path.join(TMP, "prog")            # 생성기 폴더
+os.makedirs(PROG)
+os.environ["TCGEN_CONFIG_DIR"] = os.path.join(TMP, "cfg")
+os.environ["TCGEN_DEFAULT_DATA_DIR"] = BASE
+core.app_dir = lambda: PROG
 import tcgen_app as appmod  # noqa: E402
+
+ASK_DIR = []                                # 폴더 선택 창 대답 (차례대로)
+appmod.filedialog.askdirectory = lambda **k: ASK_DIR.pop(0) if ASK_DIR else ""
 
 LOG = []
 mb = appmod.messagebox
@@ -235,15 +243,38 @@ def main():
     check(app.result is None and app.blk_vm.get("1.0", "end-1c") == "", "오류가 있으면 블록 비움")
     app.cases[1]["svm_job"] = "job_b4"
 
-    # 백업, 폴더 열기
+    # 백업(위치 선택), 백업 불러오기, 폴더 열기
+    BK = os.path.join(TMP, "my_backups")
+    ASK_DIR.append(BK)
     app.backup()
-    bdir = os.path.join(BASE, "backup")
-    check(os.path.isdir(bdir) and len(os.listdir(os.path.join(bdir, os.listdir(bdir)[0]))) == 4,
-          "설정 백업 4개 파일 (테스트 케이스 표 포함)")
-    app.open_settings_dir()
+    bks = sorted(d for d in os.listdir(BK) if d.startswith("tcgen_backup_")) if os.path.isdir(BK) else []
+    check(len(bks) == 1 and all(os.path.exists(os.path.join(BK, bks[0], f)) for f in core.DATA_FILES),
+          "설정 백업: 고른 폴더에 tcgen_backup_ 폴더와 데이터 파일 4개")
+    check(os.path.exists(os.path.join(BK, bks[0], "testcases", "test_record.csv")), "백업에 테스트 기록 포함")
+    check(core.load_config().get("backup_dir") == os.path.normpath(BK), "백업 위치를 기억함")
+    before = app.run_cmds[0]["desc"]
+    app.commit_run(0, "desc", "changed after backup")
+    ASK_DIR.append(os.path.join(BK, bks[0]))
+    app.restore_backup()
+    check(app.run_cmds[0]["desc"] == before and app.t_run.tree.item("0", "values")[2] == before,
+          "백업 불러오기: 데이터와 화면이 백업 내용으로 바뀜")
+    check(any(d.endswith("_before_restore") for d in os.listdir(os.path.join(BASE, "backup"))), "불러오기 전 데이터를 따로 복사해 둠")
+    app.open_data_dir()
     app.open_case_dir()
     opened = [x[1] for x in LOG if x[0] == "open"]
-    check(BASE in opened and os.path.join(BASE, "testcases") in opened, "설정 폴더 열기, 테스트 케이스 폴더 열기")
+    check(BASE in opened and os.path.join(BASE, "testcases") in opened, "데이터 폴더 열기, 테스트 케이스 폴더 열기")
+
+    # 데이터 폴더 변경: 지금 데이터를 새 폴더로 복사하고 위치를 config.json 에 기록
+    NEW = os.path.join(TMP, "data_moved")
+    ASK_DIR.append(NEW)
+    app.change_data_dir()
+    check(app.base == os.path.normpath(NEW) and core.has_data(NEW), "데이터 폴더 변경: 새 폴더로 복사하고 새 폴더를 씀")
+    check(core.data_dir() == os.path.normpath(NEW), "데이터 폴더 위치가 config.json 에 기록됨")
+    n_log = len(LOG)
+    ASK_DIR.append(os.path.join(PROG, "sub"))
+    app.change_data_dir()
+    check(app.base == os.path.normpath(NEW) and any(x[0] == "error" and "생성기 폴더 안" in x[1] for x in LOG[n_log:]),
+          "생성기 폴더 안은 데이터 폴더로 쓸 수 없음")
 
     # 삭제
     app.t_case.refresh(1)
@@ -258,6 +289,7 @@ def main():
     root.destroy()
     root2 = tk.Tk()
     app2 = appmod.App(root2)
+    check(app2.base == os.path.normpath(NEW), "다시 실행 시 바꾼 데이터 폴더를 씀")
     check([r["name"] for r in app2.run_cmds] == ["job_a", "job_b4"] and len(app2.mon_cmds) == 2, "다시 실행 시 명령 목록 불러옴")
     check(app2.v_user.get() == "tester" and app2.v_stop.get() == "12", "다시 실행 시 설정 불러옴")
     check(app2.run_cmds[0]["desc"] == "1 job edited" and app2.mon_cmds[0]["stop"] == "/home/tester/mon/stop_mon.sh --all",
@@ -266,11 +298,29 @@ def main():
           "다시 실행 시 테스트 케이스 표와 적용 체크 불러옴")
     check("applied" in app2.t_case.tree.item("0", "tags"), "다시 실행 시 체크한 행 회색 표시")
     root2.destroy()
-    print("GUI smoke OK  base=%s" % BASE)
+
+    # 예전 판 데이터 옮기기: 생성기 폴더에 예전 파일이 있고 데이터 폴더가 비어 있으면 처음 실행 때 복사해 쓴다
+    prog2 = os.path.join(TMP, "prog_old")
+    os.makedirs(prog2)
+    core.save_rows(os.path.join(prog2, core.RUN_FILE), core.RUN_FIELDS, core.RUN_HEADERS,
+                   [{"app": "X", "name": "old_job", "desc": "", "cmd": "/x/old.sh"}])
+    core.save_config({})
+    fresh = os.path.join(TMP, "data_fresh")
+    os.environ["TCGEN_DEFAULT_DATA_DIR"] = fresh
+    core.app_dir = lambda: prog2
+    n_log = len(LOG)
+    root3 = tk.Tk()
+    app3 = appmod.App(root3)
+    check(app3.base == os.path.normpath(fresh) and [r["name"] for r in app3.run_cmds] == ["old_job"],
+          "예전 생성기 폴더의 데이터를 데이터 폴더로 복사해 씀")
+    check(any(x[0] == "info" and "데이터 폴더로 복사" in x[1] for x in LOG[n_log:]), "복사했다는 안내 표시")
+    check(not core.has_data(prog2), "생성기 폴더의 예전 파일은 옆 폴더로 옮김")
+    root3.destroy()
+    print("GUI smoke OK  tmp=%s" % TMP)
 
 
 if __name__ == "__main__":
     try:
         main()
     finally:
-        shutil.rmtree(BASE, ignore_errors=True)
+        shutil.rmtree(TMP, ignore_errors=True)
