@@ -435,31 +435,46 @@ def build_case(path, case, df, chart_dir, date, log=print, roles=None, include_u
     no = 3
     mains = (jobs or {}).get('mains') or []
     conc = (jobs or {}).get('conc') or []
-    # TAT (TAT 측정 잡이 있을 때). VM 여러 대에서 돌렸으면 VM 마다 표를 따로 둔다
+    # 잡 결과 표(TAT 잡별 elapsed · phase 별 소요 시간 · 동시 실행 잡 표)는 Appendix 로 모은다. 본문에는 결과 문장과 그림만 둔다.
+    appx = []                                   # Appendix 에서 그릴 함수 목록 (본문 순서대로)
+    job_letter = 'ABCDEF'[1 if (by_role and include_unassigned and unassigned) else 0]
+    job_appx = f'Appendix {job_letter}'
+
+    def deg_text(m):
+        deg = jobs_mod.degradation(m['tat'], (tat_base or {}).get('value'))
+        if deg is None:
+            return ''
+        b = tat_base['value']
+        return (f' 저하율 ({m["tat"]:,.2f} − {b:,.2f}) ÷ {b:,.2f} × 100 = {deg:+.2f}% (양수 = 비교 기준보다 긺, '
+                f'비교 기준: {tat_base.get("note") or "설명 없음"} {b:,.2f} s).')
+
+    # TAT (TAT 측정 잡이 있을 때). VM 여러 대에서 돌렸으면 VM 마다 따로 적는다
     if mains:
         doc.add_heading(f'{no}. TAT', level=1)
         no += 1
         doc.add_paragraph('잡 TAT 원장에서 VM 마다 케이스 잡 시작 시각에 시작해 실행 구간의 절반 이상 동안 실행된 세트를 TAT 측정 잡으로 판단. '
                           'TAT 는 그 세트 잡들의 elapsed 평균.'
-                          + (f' TAT 측정 잡이 VM {len(mains)}대에 있어 VM 마다 따로 적음.' if len(mains) > 1 else ''))
+                          + (f' TAT 측정 잡이 VM {len(mains)}대에 있어 VM 마다 따로 적음.' if len(mains) > 1 else '')
+                          + f' 잡별 elapsed 표는 {job_appx}.')
         for m in mains:
             form = '개별형(1_of_1 잡을 동시에 실행)' if m['form'] == 'individual' else '일괄형(한 명령으로 여러 잡 실행)'
-            nj = len(m['jobs'])
-            if len(mains) > 1:
-                doc.add_heading(m['label'], level=2)
-            doc.add_paragraph(f'TAT 측정 잡: {m["code"]} · 호스트 {", ".join(m["hosts"]) or "기록 없음"} · {form} 잡 {nj}개.'
-                              + (f' 같은 VM 의 같은 종류 다른 세트 {m["other_sets"]}개는 TAT 에 넣지 않음.' if m['other_sets'] else ''))
-            report_docx._caption(doc, f'표. {m["label"]} 잡별 elapsed')
             sp = m['max'] - m['min']
-            report_docx._table(doc, ['잡', '호스트', '시작', '종료', 'elapsed (s)'],
-                               [[n, h, a, z, f'{e:,.2f}'] for n, h, a, z, e in m['jobs']]
-                               + [[f'잡 {nj}개 평균 (TAT)', '', '', '', f'{m["tat"]:,.2f}'],
-                                  ['최대 − 최소', '', '', '', f'{sp:,.2f} (평균 대비 {sp / m["tat"] * 100:.2f}%)']])
-            deg = jobs_mod.degradation(m['tat'], (tat_base or {}).get('value'))
-            if deg is not None:
-                b = tat_base['value']
-                doc.add_paragraph(f'저하율: ({m["tat"]:,.2f} − {b:,.2f}) ÷ {b:,.2f} × 100 = {deg:+.2f}% (양수 = 비교 기준보다 긺). '
-                                  f'비교 기준: {tat_base.get("note") or "설명 없음"} {b:,.2f} s.')
+            doc.add_paragraph(f'{m["label"]}: TAT {m["tat"]:,.2f} s (호스트 {", ".join(m["hosts"]) or "기록 없음"} · {form} 잡 {len(m["jobs"])}개 평균, '
+                              f'최대 − 최소 {sp:,.2f} s · 평균 대비 {sp / m["tat"] * 100:.2f}%).'
+                              + deg_text(m)
+                              + (f' 같은 VM 의 같은 종류 다른 세트 {m["other_sets"]}개는 TAT 에 넣지 않음.' if m['other_sets'] else ''))
+
+        def tat_tables():
+            doc.add_heading('TAT 측정 잡', level=2)
+            for m in mains:
+                nj = len(m['jobs'])
+                sp = m['max'] - m['min']
+                report_docx._caption(doc, f'표. {m["label"]} 잡별 elapsed')
+                report_docx._table(doc, ['잡', '호스트', '시작', '종료', 'elapsed (s)'],
+                                   [[n, h, a, z, f'{e:,.2f}'] for n, h, a, z, e in m['jobs']]
+                                   + [[f'잡 {nj}개 평균 (TAT)', '', '', '', f'{m["tat"]:,.2f}'],
+                                      ['최대 − 최소', '', '', '', f'{sp:,.2f} (평균 대비 {sp / m["tat"] * 100:.2f}%)']])
+        appx.append(tat_tables)
 
     # phase 소요 시간 (phase 소요 시간 CSV 가 연결된 케이스만)
     if phase:
@@ -470,11 +485,8 @@ def build_case(path, case, df, chart_dir, date, log=print, roles=None, include_u
                           + (f' (동시 실행 {exp}잡 중 {phase["jobs"]}잡분 기록)' if exp and exp > phase['jobs'] else '')
                           + '. self 시간은 그 단계만의 소요 시간이고, 단계의 시작과 종료는 잡 시작 기준으로 self 시간을 차례로 더한 값.'
                           + (f' Load 는 {phase_mod.LOAD_STAGE} 단계 끝까지의 누적 시간({phase_mod.LOAD_STAGE}_total) 평균, Compute 는 전체에서 Load 를 뺀 값.'
-                             if phase.get('load') else ''))
-        report_docx._caption(doc, '표. phase 별 소요 시간')
-        report_docx._table(doc, ['단계 (phase)', '시작 (s)', '종료 (s)', 'self 시간 (s)', '비율 (%)'],
-                           [[n, f'{a:,.0f}', f'{z:,.0f}', f'{v:,.0f}', f'{r:.1f}' if r is not None else '']
-                            for n, a, z, v, r in phase_mod.table_rows(phase)])
+                             if phase.get('load') else '')
+                          + f' phase 별 소요 시간 표는 {job_appx}.')
         state['n'] += 1
         report_docx._caption(doc, '그림. phase 별 self 시간 누적')
         doc.add_picture(_phase_stack(os.path.join(chart_dir, 'phase_stack.png'), [(cid, phase)]), width=Cm(width_cm))
@@ -489,6 +501,14 @@ def build_case(path, case, df, chart_dir, date, log=print, roles=None, include_u
                               f'(phase 소요 시간 CSV 의 단계 합계 잡 {phase["jobs"]}개 평균, 잡 TAT 원장 {main["label"]} 의 elapsed 잡 {len(main["jobs"])}개 평균).'
                               + (' 두 기록의 잡 수가 다름.' if phase['jobs'] != len(main['jobs']) else ''))
 
+        def phase_tables():
+            doc.add_heading('phase 소요 시간', level=2)
+            report_docx._caption(doc, '표. phase 별 소요 시간')
+            report_docx._table(doc, ['단계 (phase)', '시작 (s)', '종료 (s)', 'self 시간 (s)', '비율 (%)'],
+                               [[n, f'{a:,.0f}', f'{z:,.0f}', f'{v:,.0f}', f'{r:.1f}' if r is not None else '']
+                                for n, a, z, v, r in phase_mod.table_rows(phase)])
+        appx.append(phase_tables)
+
     # 동시 실행 잡 (잡 TAT 원장에 TAT 측정 잡이 아닌 잡이 있을 때)
     if conc:
         doc.add_heading(f'{no}. 동시 실행 잡', level=1)
@@ -496,37 +516,45 @@ def build_case(path, case, df, chart_dir, date, log=print, roles=None, include_u
         ref = 'TAT 측정 잡 실행 구간' if mains else '케이스 실행 구간'
         doc.add_paragraph(f'세트는 같은 잡 종류 · 같은 호스트에서 시작 시각이 10초 안인 잡 묶음. 기준 구간은 {ref} '
                           f'({jobs["window"][0]} ~ {jobs["window"][1]}). 기준 구간 중 시작한 세트는 기준 구간 시작 10초 전에 시작한 세트부터 '
-                          '기준 구간 끝까지 시작한 세트이고, 끝난 뒤 시작한 세트는 넣지 않음.')
+                          f'기준 구간 끝까지 시작한 세트이고, 끝난 뒤 시작한 세트는 넣지 않음. 잡 요약 · 가동 구간 · 세트별 · 잡별 표는 {job_appx}.')
         for g in conc:
             doc.add_heading(g['label'], level=2)
-            report_docx._caption(doc, f'표. {g["label"]} 잡 요약')
-            report_docx._table(doc, ['항목', '값'], [
-                [f'{ref} 중 시작한 세트', f'{g["sets_in_window"]}회'],
-                ['총 세트 / 총 잡', f'{g["sets"]}세트 / {g["jobs"]}잡 (세트당 {g["jobs_per_set"]:g}잡)'],
-                ['잡 elapsed 평균 / 최소 / 최대', f'{g["mean"]:,.2f} / {g["min"]:,.2f} / {g["max"]:,.2f} s'],
-                ['첫 세트 시작 / 마지막 세트 종료', f'{g["first_start"]} / {g["last_end"]}']])
-            report_docx._caption(doc, f'표. {g["label"]} 의 {ref} 대비 가동 구간')
-            report_docx._table(doc, ['항목', '값'], [
-                ['기준 구간', f'{g["window_s"]:,.0f} s'],
-                ['가동 구간 (기준 구간 안, 세트 간 겹침 제거)', f'{g["busy_s"]:,.0f} s (기준 구간의 {g["coverage_pct"]:.1f}%)'],
-                ['기준 구간 밖 가동 시간', f'{g["outside_s"]:,.0f} s'],
-                ['세트 간 겹침으로 중복 제거한 시간', f'{g["overlap_s"]:,.0f} s'],
-                ['최대 공백 (기준 구간 시작 전 · 끝난 뒤 포함)', f'{g["max_gap_s"]:,.0f} s'],
-                ['첫 세트 시작 전 / 마지막 세트 종료 후 공백', f'{g["head_gap_s"]:,.0f} s / {g["tail_gap_s"]:,.0f} s']])
+            doc.add_paragraph(f'{ref} 중 시작한 세트 {g["sets_in_window"]}회 (총 {g["sets"]}세트 · {g["jobs"]}잡). '
+                              f'잡 elapsed 평균 {g["mean"]:,.2f} s (최소 {g["min"]:,.2f} · 최대 {g["max"]:,.2f}). '
+                              f'기준 구간 안 가동 구간 {g["coverage_pct"]:.1f}%.')
             state['n'] += 1
             report_docx._caption(doc, f'그림. {g["label"]} 잡별 elapsed (세트 시작 시각 기준)')
             gpath = os.path.join(chart_dir, f'jobs_{state["n"]:03d}.png')
             doc.add_picture(_conc_chart(gpath, g, jobs_mod.COLORS['dot'], *ph_args), width=Cm(width_cm))
             doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
-            doc.add_paragraph('점 하나는 잡 하나, 선은 세트 평균, 세트마다 적은 숫자는 세트 평균. 잡마다의 elapsed 는 아래 잡별 표. '
+            doc.add_paragraph('점 하나는 잡 하나, 선은 세트 평균, 세트마다 적은 숫자는 세트 평균. '
                               '가로축은 기준 구간 시작을 0초로 둔 세트 시작 경과 시간' + (', 배경은 phase 구간.' if phase else '.'))
-            report_docx._caption(doc, f'표. {g["label"]} 세트별 실측')
-            report_docx._table(doc, ['세트', '세트 시작 (s)', '잡 수', '잡 elapsed 평균 (s)', '최소 (s)', '최대 (s)'],
-                               [[i, f'{a:,.0f}', n, f'{m:,.2f}', f'{lo:,.2f}', f'{hi:,.2f}']
-                                for i, (a, n, m, lo, hi) in enumerate(g['set_rows'], 1)])
-            report_docx._caption(doc, f'표. {g["label"]} 잡별 elapsed')
-            report_docx._table(doc, ['세트', '잡', '시작', '종료', 'elapsed (s)'],
-                               [[i, n, a, z, f'{e:,.2f}'] for i, js in enumerate(g['set_jobs'], 1) for n, a, z, e in js])
+
+        def conc_tables():
+            doc.add_heading('동시 실행 잡', level=2)
+            for g in conc:
+                report_docx._caption(doc, f'표. {g["label"]} 잡 요약')
+                report_docx._table(doc, ['항목', '값'], [
+                    [f'{ref} 중 시작한 세트', f'{g["sets_in_window"]}회'],
+                    ['총 세트 / 총 잡', f'{g["sets"]}세트 / {g["jobs"]}잡 (세트당 {g["jobs_per_set"]:g}잡)'],
+                    ['잡 elapsed 평균 / 최소 / 최대', f'{g["mean"]:,.2f} / {g["min"]:,.2f} / {g["max"]:,.2f} s'],
+                    ['첫 세트 시작 / 마지막 세트 종료', f'{g["first_start"]} / {g["last_end"]}']])
+                report_docx._caption(doc, f'표. {g["label"]} 의 {ref} 대비 가동 구간')
+                report_docx._table(doc, ['항목', '값'], [
+                    ['기준 구간', f'{g["window_s"]:,.0f} s'],
+                    ['가동 구간 (기준 구간 안, 세트 간 겹침 제거)', f'{g["busy_s"]:,.0f} s (기준 구간의 {g["coverage_pct"]:.1f}%)'],
+                    ['기준 구간 밖 가동 시간', f'{g["outside_s"]:,.0f} s'],
+                    ['세트 간 겹침으로 중복 제거한 시간', f'{g["overlap_s"]:,.0f} s'],
+                    ['최대 공백 (기준 구간 시작 전 · 끝난 뒤 포함)', f'{g["max_gap_s"]:,.0f} s'],
+                    ['첫 세트 시작 전 / 마지막 세트 종료 후 공백', f'{g["head_gap_s"]:,.0f} s / {g["tail_gap_s"]:,.0f} s']])
+                report_docx._caption(doc, f'표. {g["label"]} 세트별 실측')
+                report_docx._table(doc, ['세트', '세트 시작 (s)', '잡 수', '잡 elapsed 평균 (s)', '최소 (s)', '최대 (s)'],
+                                   [[i, f'{a:,.0f}', n, f'{m:,.2f}', f'{lo:,.2f}', f'{hi:,.2f}']
+                                    for i, (a, n, m, lo, hi) in enumerate(g['set_rows'], 1)])
+                report_docx._caption(doc, f'표. {g["label"]} 잡별 elapsed')
+                report_docx._table(doc, ['세트', '잡', '시작', '종료', 'elapsed (s)'],
+                                   [[i, n, a, z, f'{e:,.2f}'] for i, js in enumerate(g['set_jobs'], 1) for n, a, z, e in js])
+        appx.append(conc_tables)
 
     # 본문: 역할별 절(역할 지정이 있을 때) 또는 분류별 절(기본 양식). 번호는 TAT · phase · 동시 실행 잡 절 다음부터
     body = role_groups if by_role else groups
@@ -549,6 +577,12 @@ def build_case(path, case, df, chart_dir, date, log=print, roles=None, include_u
             for m in ms:
                 metric_block(m)
             stats_block(f'{cat} 지표', ms)
+
+    if appx:                                 # 잡 결과 표: TAT · phase 소요 시간 · 동시 실행 잡 (본문 순서)
+        letter = next(letters)
+        doc.add_heading(f'Appendix {letter}. 잡 결과 표', level=1)
+        for fn in appx:
+            fn()
 
     doc.add_heading(f'Appendix {next(letters)}. 데이터 출처', level=1)
     rows = []
