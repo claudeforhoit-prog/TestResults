@@ -20,6 +20,11 @@ Python 표준 라이브러리만 쓴다. 추가 패키지는 필요 없다.
 - Python 3.9 이상이 있는 PC: `run_gui.bat` 을 실행한다. `python tcgen_app.py` 와 같다.
 - Python 이 없는 PC: Python 과 인터넷이 있는 PC 에서 `build_windows.bat` 을 실행한다. 만들어진 `dist\tcgen` 폴더를 통째로 복사해 `tcgen.exe` 를 실행한다.
 
+PyInstaller 설치 단계에서 내려받기가 실패하면, 빌드 스크립트가 pypi.org 와 files.pythonhosted.org 의 인증서 확인을 생략하는 옵션(`--trusted-host`)으로 한 번 더 시도한다.
+회사망 보안 장비가 HTTPS 를 검사하면 pip 가 인증서를 확인하지 못해 이렇게 실패한다. 이 옵션은 그 실행에만 적용되고 PC 설정에 남지 않는다.
+그래도 `FAILED while installing PyInstaller` 가 나오면 인터넷 연결이나 회사망 프록시를 확인한다.
+회사에 Python 패키지 저장소가 있으면 `py -3 -m pip config --user set global.index-url https://<저장소 주소>/simple` 로 한 번 지정한 뒤 빌드한다.
+
 설정, 명령 목록, 테스트 케이스 표는 생성기 폴더(`tcgen.exe` 또는 `tcgen_app.py` 가 있는 폴더)가 아니라 데이터 폴더에 저장한다. 데이터 폴더 기본 위치는 `C:\Users\<계정>\tcgen_data` 이다. 생성기를 다시 빌드하거나 다른 폴더로 옮겨도 데이터 폴더는 그대로 남는다. 네 파일 모두 바뀔 때마다 자동 저장되고, 생성기를 다시 열면 불러온다. 저장 버튼은 없다.
 
 | 파일 (데이터 폴더 기준) | 내용 |
@@ -133,8 +138,13 @@ Python 표준 라이브러리만 쓴다. 추가 패키지는 필요 없다.
 | A. 점프 VM 최초 1회 설정 | 점프 VM 터미널 (처음 한 번) | 자동 로그인용 `~/.tcgen/vmssh`, `~/.tcgen/askpass` 와 비밀번호 입력용 `~/.tcgen/setpw` 를 만들고, VM 비밀번호를 입력받아 `~/.tcgen/vmpw` 에 저장(권한 600) |
 | B. VM 등록 블록 | 점프 VM 터미널 (생성할 때마다) | 잡이나 모니터링이 있는 VM 마다 ssh 로 접속해 crontab 에 줄을 등록하고, 등록된 줄을 출력한다. VM 이 몇 대든 한 번 붙여넣으면 된다 |
 | C. ESX 블록 | 그 ESX 의 root SSH 창 | `/var/spool/cron/crontabs/root` 에 줄을 추가하고 `cron.update` 로 crond 에 알린다 (Broadcom KB 323138 절차) |
+| D. VM crontab 전체 삭제 | 점프 VM 터미널 (필요할 때만, B 보다 먼저) | B 블록과 같은 VM 에 같은 계정으로 접속해 crontab 을 모두 지운다(`crontab -r`). 지우기 전 내용은 그 VM 홈 폴더의 `tcgen_crontab_backup-년월일시분초.txt` 에 저장한다 |
 
 ESX 가 여러 대이면 C 블록의 호스트 목록에서 하나씩 골라 복사한다.
+
+- D 블록은 tcgen 이 등록하지 않은 줄도 지운다. [복사] 를 누르면 지울 VM 목록을 보여 주고 확인을 받는다.
+- ESX 의 crontab 은 지우지 않는다. ESX root crontab 에는 시스템 작업 줄이 있다.
+- 적용 체크한 케이스가 D 블록의 VM 을 쓰고 아직 실행할 시각이 남아 있으면, 결과 글과 [복사] 확인 창에 그 케이스 이름이 나온다. D 블록을 붙여넣으면 그 케이스의 줄도 지워지므로, 그 케이스도 다시 등록하려면 적용 체크를 끄고 다시 생성한다.
 
 ### 3.6 기록 파일
 
@@ -176,6 +186,7 @@ ESX 가 여러 대이면 C 블록의 호스트 목록에서 하나씩 골라 복
 2. 탭 3 에 케이스를 입력한다. 케이스 행에 이름, ESX 호스트, 간격, 잡 시작을 넣고, VM 행마다 잡과 모니터링을 고른다. VM 이 더 필요하면 [+ VM 추가] 를 누른다. [명령어 생성] 을 누른다. 이미 등록한 케이스는 적용 칸을 체크해 두면 생성에서 빠진다.
 3. 점프 VM 에서 처음 한 번만 A 블록을 붙여넣는다. 약 1초 뒤 `VM password:` 가 나오면 VM 비밀번호를 입력한다. A 블록은 다른 블록과 함께 붙여넣지 않는다. 붙여넣은 뒤 아무 출력이 없으면 Enter 를 한 번 누른다(bash 5.1 이상은 붙여넣은 글을 Enter 를 누를 때 실행한다).
 4. 점프 VM 에 B 블록을 붙여넣는다. VM 마다 `---- VM이름`, `== hostname 시각`, 등록된 `# tcgen` 줄이 출력된다.
+   VM 의 crontab 을 모두 지우고 새로 등록하려면 B 블록 전에 D 블록을 붙여넣는다. VM 마다 `crontab deleted` 와 백업 파일 경로가 출력된다.
 5. ESX 의 root SSH 창에 C 블록을 붙여넣는다. 마지막에 그 ESX 에 등록된 `# tcgen` 줄이 출력된다.
 6. 시험이 끝나면 탭 3 에서 [리포트용 CSV 저장] 으로 리포트할 케이스를 저장하고(3.7), 성능 리포트 생성기의 `케이스 정보 파일` 에서 그 파일을 고른다.
 
@@ -207,6 +218,8 @@ grep ' # tcgen ' /var/spool/cron/crontabs/root                  # ESX: 등록된
 ```
 
 ESX 에서 줄을 지운 뒤에는 `/bin/echo root >> /var/spool/cron/crontabs/cron.update` 를 실행한다.
+
+VM 의 crontab 을 모두 지울 때는 탭 4 의 D 블록을 쓴다. D 블록으로 지운 내용을 되돌리려면 그 VM 에서 `crontab ~/tcgen_crontab_backup-년월일시분초.txt` 를 실행한다.
 
 ## 7. 제한과 주의
 

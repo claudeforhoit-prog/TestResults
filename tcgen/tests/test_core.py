@@ -6,6 +6,7 @@ import datetime as dt
 import io
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -149,7 +150,7 @@ class EntryTests(TmpDir):
         self.assertNotIn(("C", "esx01ev01", "모니터링 중지"), kinds)          # 중지 없음
         self.assertNotIn(("C", "esx01ev02", "모니터링 시작"), kinds)          # C 는 PVM 만 모니터링
         self.assertEqual(sorted(res["esx"]), ["esx01"])
-        for text in [res["vm"], res["setup"]] + list(res["esx"].values()):
+        for text in [res["vm"], res["setup"], res["vm_wipe"]] + list(res["esx"].values()):
             self.assertTrue(all(ord(ch) < 127 for ch in text), "블록은 ASCII 만")
             self.assertNotIn("!", text)
             for ln in text.splitlines():
@@ -161,6 +162,30 @@ class EntryTests(TmpDir):
         self.assertTrue(res["setup"].startswith("sh << TCSETUP\n"))
         self.assertTrue(res["setup"].endswith("\nTCSETUP\nsh ~/.tcgen/setpw\n"))
         self.assertIn("/bin/echo root >> /var/spool/cron/crontabs/cron.update", res["esx"]["esx01"])
+
+    def test_wipe_block_and_conflicts(self):
+        cs = [case("OLD", "2026-11-01 00:00:00", stop_mode="none"), case("PEND", "2026-11-20 00:00:00"),
+              case("NEW", "2026-11-21 00:00:00")]
+        cs.append(core._clean_case({"name": "OTHER", "esx": "esx02", "start": "2026-11-22 00:00:00", "applied": True,
+                                    "vms": [{"name": "esx02ev01", "job": "job_a", "monitors": []}]}))
+        cs[0]["applied"] = cs[1]["applied"] = True
+        self.settings["vm_user"] = "tester"
+        res = core.generate(cs, RUN, MON, self.settings, now=NOW, write=False)
+        self.assertEqual(res["errors"], [])
+        self.assertEqual(res["wipe_hosts"], ["esx01ev01", "esx01ev02"], "B 블록과 같은 VM")
+        self.assertEqual(res["wipe_conflicts"], ["PEND"],
+                         "실행할 시각이 남은 적용 체크 케이스만 (끝난 케이스, 다른 VM 케이스는 제외)")
+        w = core.hd_unescape(res["vm_wipe"])
+        self.assertEqual(re.findall(r"^sh ~/\.tcgen/vmssh (\S+) << TCEOF$", w, re.M), ["tester@esx01ev01", "tester@esx01ev02"])
+        self.assertEqual(w.count("\nTCEOF\n"), 2)
+        self.assertEqual(w.count("crontab -r &&"), 2)
+        self.assertEqual(w.count("tcgen_crontab_backup-`date +%Y%m%d%H%M%S`.txt"), 2, "지우기 전 내용을 백업")
+        self.assertNotIn("esx01\n", w, "ESX crontab 은 지우지 않음")
+        self.assertNotIn("!", res["vm_wipe"])
+        self.assertTrue(all(ord(ch) < 127 for ch in res["vm_wipe"]))
+        self.assertTrue(all(len(ln) <= 160 for ln in res["vm_wipe"].splitlines()))
+        res2 = core.generate(cs[2:3], RUN, MON, self.settings, now=NOW, write=False)
+        self.assertEqual(res2["wipe_conflicts"], [], "적용 체크한 케이스가 없으면 주의 없음")
 
     def test_vm_user(self):
         self.settings["vm_user"] = "tester"

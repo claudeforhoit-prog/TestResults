@@ -28,7 +28,7 @@ import re
 import shutil
 import sys
 
-VERSION = "1.3"
+VERSION = "1.4"
 KST_TO_UTC = dt.timedelta(hours=9)
 CHUNK = 100            # 붙여넣는 글 한 줄에 담는 명령 조각 길이(문자 수)
 NONE_JOB = "(없음)"
@@ -912,6 +912,41 @@ def vm_block(host, user, lines, cases):
     return "\n".join(out) + "\n"
 
 
+# VM crontab 전체 삭제 (VM 에서 sh 로 실행). 지우기 전 내용은 임시 파일에 받은 뒤, 받기에 성공했을 때만
+# VM 홈 폴더의 실행 시각 이름 파일로 옮긴다(앞서 만든 백업을 덮어쓰거나 지우지 않게).
+WIPE_LINES = [
+    "T=$HOME/.tcgen_crontab.tmp",
+    "if crontab -l > $T 2>/dev/null; then",
+    "  B=$HOME/tcgen_crontab_backup-`date +%Y%m%d%H%M%S`.txt; mv $T $B",
+    "  crontab -r && echo \"== `hostname -s`  crontab deleted\" || echo \"==== `hostname -s`  crontab -r FAILED\"",
+    "  echo \"   backup: $B (`wc -l < $B` lines)\"",
+    "else",
+    "  rm -f $T; echo \"== `hostname -s`  no crontab\"",
+    "fi",
+    "crontab -l 2>&1 | head -2",
+]
+
+
+def wipe_block(host, user):
+    """VM crontab 전체 삭제 블록 한 대분. B 블록과 같은 계정, 같은 방법(~/.tcgen/vmssh)으로 접속한다."""
+    target = "%s@%s" % (user, host) if user else host
+    out = ["sh ~/.tcgen/vmssh %s << TCEOF" % target] + [_hd(x) for x in WIPE_LINES] + ["TCEOF"]
+    return "\n".join(out) + "\n"
+
+
+def wipe_conflicts(cases, sched, hosts, now):
+    """VM crontab 전체 삭제로 줄이 지워지는, 적용 체크한 케이스 가운데 아직 실행할 시각이 남은 케이스 이름."""
+    hs, out = set(hosts), []
+    for i, c in enumerate(cases):
+        if not c.get("applied") or not (set(report_vms(c)) & hs):
+            continue
+        s = sched[i] if i < len(sched) else {}
+        times = [t for t in (s.get("job"), s.get("mon_start"), s.get("mon_stop")) if t]
+        if times and max(times) > now:
+            out.append((c.get("name") or "").strip() or "%d번째 케이스" % (i + 1))
+    return out
+
+
 def esx_block(host, lines, cases):
     out = ["# tcgen ESX %s : paste into the root SSH session of this host" % host,
            "CT=/var/spool/cron/crontabs/root; N=/tmp/tcgen_cron.new; P=/tmp/tcgen_cron.pat",
@@ -931,7 +966,8 @@ def esx_block(host, lines, cases):
 
 
 def build_blocks(entries, settings):
-    """VM 등록 블록(전 VM 을 하나로)과 ESX 호스트별 블록을 만든다. 같은 호스트 안에서는 시각 순서."""
+    """VM 등록 블록(전 VM 을 하나로), ESX 호스트별 블록, VM crontab 전체 삭제 블록(등록 블록과 같은 VM)을 만든다.
+    같은 호스트 안에서는 시각 순서. (VM 등록 블록, ESX 블록 사전, 삭제 블록, VM 목록) 반환."""
     vm_hosts, esx_hosts = [], []
     by_host = {}
     for e in entries:
@@ -945,7 +981,8 @@ def build_blocks(entries, settings):
     user = (settings.get("vm_user") or "").strip()
     vm_text = "".join(vm_block(h, user, by_host[(False, h)]["lines"], by_host[(False, h)]["cases"]) for h in vm_hosts)
     esx = {h: esx_block(h, by_host[(True, h)]["lines"], by_host[(True, h)]["cases"]) for h in esx_hosts}
-    return vm_text, esx
+    wipe = "".join(wipe_block(h, user) for h in vm_hosts)
+    return vm_text, esx, wipe, vm_hosts
 
 
 # ------------------------------------------------------------------ 기록
@@ -1156,7 +1193,8 @@ def generate(cases, run_cmds, mon_cmds, settings, now=None, write=True, backup_d
     entries, errors, warnings, sched = build_entries(cases, run_cmds, mon_cmds, settings, now)
     res = {"errors": errors, "warnings": warnings, "entries": entries, "sched": sched,
            "vm": "", "esx": {}, "setup": setup_block(), "record": "", "log": "", "record_rows": 0,
-           "record_added": [], "record_backup": None, "gen_time": now}
+           "record_added": [], "record_backup": None, "gen_time": now,
+           "vm_wipe": "", "wipe_hosts": [], "wipe_conflicts": []}
     res["skipped"] = sum(1 for c in cases if c.get("applied"))
     if errors or not entries:
         if not entries and not errors:
@@ -1165,7 +1203,8 @@ def generate(cases, run_cmds, mon_cmds, settings, now=None, write=True, backup_d
             else:
                 res["errors"] = ["등록할 줄이 없음. 적용 체크를 끈 케이스의 VM 에 잡이나 모니터링을 하나 이상 지정할 것"]
         return res
-    res["vm"], res["esx"] = build_blocks(entries, settings)
+    res["vm"], res["esx"], res["vm_wipe"], res["wipe_hosts"] = build_blocks(entries, settings)
+    res["wipe_conflicts"] = wipe_conflicts(cases, sched, res["wipe_hosts"], now)
     if write:
         res["record"], res["log"], res["record_rows"], res["record_added"], res["record_backup"] = write_records(
             settings, cases, sched, entries, run_cmds, now, backup_dir=backup_dir)

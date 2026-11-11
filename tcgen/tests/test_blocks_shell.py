@@ -59,6 +59,7 @@ FAKE_CRONTAB = r"""#!/bin/sh
 F=${FAKE_CRONTAB:?}
 case "$1" in
   -l) if [ -f "$F" ]; then cat "$F"; else echo "no crontab for user" >&2; exit 1; fi ;;
+  -r) if [ -f "$F" ]; then rm -f "$F"; else echo "no crontab for user" >&2; exit 1; fi ;;
   -*) echo "crontab: bad option" >&2; exit 1 ;;
   *) awk 'NF && $1 !~ /^#/ && NF < 6 { bad = 1 } END { exit bad }' "$1" || { echo "crontab: errors in crontab file" >&2; exit 1; }
      cat "$1" > "$F" ;;
@@ -338,6 +339,63 @@ class ShellBlockTests(unittest.TestCase):
         a_log = [n for n in logs if n.startswith("run_a-")][0]
         with open(os.path.join(self.log, a_log)) as f:
             self.assertIn("|-o x%y", f.read())
+
+    def backups(self, host):
+        d = os.path.join(self.vms, host)
+        return sorted(n for n in os.listdir(d) if n.startswith("tcgen_crontab_backup-"))
+
+    def wipe_flow(self, shell, crlf):
+        """D 블록: B 블록과 같은 VM 의 crontab 을 모두 지우고(백업 후), 다시 B 블록을 붙여넣으면 tcgen 줄만 남는다."""
+        res = self.gen(self.cases)
+        self.setup_jump(res, shell, crlf)
+        os.makedirs(os.path.join(self.vms, "esx01ev01"))
+        with open(os.path.join(self.vms, "esx01ev01", "crontab.txt"), "w") as f:
+            f.write("30 9 * * 1 /home/tester/existing.sh > /tmp/x.log 2>&1\n")
+        self.paste(shell, [(None, 0, res["vm"])], crlf)
+        hosts = ["esx01ev01", "esx01ev02"]
+        before = dict((h, self.vm_crontab(h)) for h in hosts)
+        out = self.paste(shell, [(None, 0, res["vm_wipe"])], crlf)
+        with open(os.path.join(self.vms, "ssh_calls.txt")) as f:
+            self.assertEqual(f.read().split()[-2:], hosts, out[-3000:])
+        for h in hosts:
+            self.assertFalse(os.path.exists(os.path.join(self.vms, h, "crontab.txt")), "%s crontab 이 지워져야 함\n%s" % (h, out[-3000:]))
+            baks = self.backups(h)
+            self.assertEqual(len(baks), 1, (h, baks))
+            self.assertRegex(baks[0], r"^tcgen_crontab_backup-\d{14}\.txt$")
+            with open(os.path.join(self.vms, h, baks[0])) as f:
+                self.assertEqual(f.read().splitlines(), before[h], "지우기 전 내용(tcgen 이 등록하지 않은 줄 포함)을 백업")
+            self.assertFalse(os.path.exists(os.path.join(self.vms, h, ".tcgen_crontab.tmp")))
+        done = r"== [^`\r\n]*  crontab deleted"            # 출력 줄만 (붙여넣은 글의 echo 문구는 ` 가 있어 제외)
+        self.assertEqual(len(re.findall(done, out)), 2, out[-3000:])
+        # 다시 붙여넣으면 지울 것이 없고 앞서 만든 백업은 그대로 남는다
+        out2 = self.paste(shell, [(None, 0, res["vm_wipe"])], crlf)
+        self.assertEqual(len(re.findall(r"== [^`\r\n]*  no crontab", out2)), 2, out2[-3000:])
+        self.assertEqual(out2.count("no crontab for user"), 2, out2[-3000:])
+        for h in hosts:
+            baks = self.backups(h)
+            self.assertEqual(len(baks), 1, (h, baks))
+            with open(os.path.join(self.vms, h, baks[0])) as f:
+                self.assertEqual(f.read().splitlines(), before[h])
+        # 지운 뒤 B 블록을 붙여넣으면 tcgen 줄만 등록된다
+        self.paste(shell, [(None, 0, res["vm"])], crlf)
+        expect = {}
+        for e in res["entries"]:
+            if not e["esx"]:
+                expect.setdefault(e["host"], []).append(e["line"])
+        for h in hosts:
+            self.assertEqual(self.vm_crontab(h), expect[h], h)
+        # 백업으로 되돌리기: crontab <백업 파일>
+        home = os.path.join(self.vms, "esx01ev01")
+        subprocess.run([os.path.join(self.fakebin, "crontab"), os.path.join(home, self.backups("esx01ev01")[0])],
+                       env={"FAKE_CRONTAB": os.path.join(home, "crontab.txt"), "PATH": "/usr/bin:/bin"}, check=True)
+        self.assertEqual(self.vm_crontab("esx01ev01"), before["esx01ev01"])
+
+    def test_wipe_tcsh_lf(self):
+        self.wipe_flow("tcsh", False)
+
+    @unittest.skipUnless(os.path.exists("/bin/bash"), "bash 없음")
+    def test_wipe_bash_crlf(self):
+        self.wipe_flow("bash", True)
 
     def test_vm_blocks_tcsh_lf(self):
         self.vm_flow("tcsh", False)

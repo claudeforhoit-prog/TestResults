@@ -306,6 +306,20 @@ def main():
     check(root.clipboard_get() == res["vm"], "B 블록 복사")
     app.copy_block("esx")
     check(root.clipboard_get() == res["esx"]["esx01"], "C 블록 복사")
+    check(app.blk_wipe.get("1.0", "end-1c") == res["vm_wipe"], "D 블록 (VM crontab 전체 삭제) 표시")
+    b_hosts = [ln.split()[2].split("@")[-1] for ln in core.hd_unescape(res["vm"]).splitlines() if ln.startswith("sh ~/.tcgen/vmssh ")]
+    d_hosts = [ln.split()[2].split("@")[-1] for ln in core.hd_unescape(res["vm_wipe"]).splitlines() if ln.startswith("sh ~/.tcgen/vmssh ")]
+    check(d_hosts == b_hosts == res["wipe_hosts"] and sorted(d_hosts) == ["esx01ev01", "esx01ev02", "esx01ev03"],
+          "D 블록은 B 블록과 같은 VM 3대, 같은 순서 %s" % d_hosts)
+    n_log = len(LOG)
+    app.copy_block("wipe")
+    check(root.clipboard_get() == res["vm_wipe"] and any(x[0] == "ask" and "모두 지워진다" in x[1] for x in LOG[n_log:]),
+          "D 블록은 확인 창에서 예를 누른 뒤 복사")
+    app.copy_block("vm")
+    mb.askyesno = lambda *a, **k: (LOG.append(("ask",) + a[1:2]), False)[1]
+    app.copy_block("wipe")
+    mb.askyesno = lambda *a, **k: (LOG.append(("ask",) + a[1:2]), True)[1]
+    check(root.clipboard_get() == res["vm"], "확인 창에서 아니오를 누르면 D 블록을 복사하지 않음")
     rec = core.resolve_paths(BASE, core.load_settings(BASE))["record_csv"]
     check(os.path.exists(rec) and os.path.exists(res["log"]), "테스트 기록 CSV, 로그 저장")
     with open(rec, encoding="utf-8-sig") as f:
@@ -334,6 +348,11 @@ def main():
     made = set(e["case"] for e in res2["entries"]) if res2 else set()
     check(res2 is not None and res2["skipped"] == 1 and "TC-base-a" not in made and made, "체크한 케이스는 생성에서 빠짐 %s" % sorted(made))
     check("적용 체크로 뺀 케이스 1개" in app.res_text.get("1.0", "end"), "생성 결과에 뺀 케이스 수 표시")
+    check(res2["wipe_conflicts"] == ["TC-base-a"] and "주의: 적용 체크한 케이스 TC-base-a" in app.res_text.get("1.0", "end"),
+          "적용 체크한 케이스(실행 전)가 같은 VM 을 쓰면 D 블록 주의 표시")
+    n_log = len(LOG)
+    app.copy_block("wipe")
+    check(any(x[0] == "ask" and "TC-base-a 의 줄도 지워진다" in x[1] for x in LOG[n_log:]), "D 블록 확인 창에 그 케이스 이름")
     check([c["applied"] for c in core.load_cases(BASE)] == [True, False, False], "체크 상태가 test_cases.json 에 저장됨")
 
     # 리포트용 CSV 저장: 케이스 고르기, 비교 기준(첫 줄), 저장 위치

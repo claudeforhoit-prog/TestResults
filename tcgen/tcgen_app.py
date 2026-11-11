@@ -745,6 +745,11 @@ class App(object):
         "등록하고 등록된 줄을 출력한다. 다시 붙여넣어도 줄이 늘지 않는다.",
         "C. ESX 블록: ESX 호스트를 고른 뒤 복사해 그 ESX 의 root SSH 창에 붙여넣는다. crontab 시각은 UTC (KST - 9시간)이다. "
         "ESX 를 재부팅하면 등록한 줄이 지워진다.",
+        "D. VM crontab 전체 삭제: 필요할 때만 B 보다 먼저 점프 VM 터미널에 붙여넣는다. B 블록과 같은 VM 에 같은 계정으로 접속해 "
+        "crontab 을 모두 지운다(crontab -r). tcgen 이 등록하지 않은 줄도 지워진다. 지우기 전 내용은 각 VM 홈 폴더의 "
+        "tcgen_crontab_backup-<시각>.txt 에 저장되고, 그 VM 에서 crontab <그 파일> 을 실행하면 되돌릴 수 있다. ESX 의 crontab 은 지우지 않는다.",
+        "적용 체크한 케이스가 같은 VM 을 쓰고 아직 실행할 시각이 남아 있으면, D 블록이 그 케이스의 줄도 지운다. 이때는 결과 글과 "
+        "D 블록 [복사] 확인 창에 케이스 이름이 나온다. 그 케이스도 다시 등록하려면 적용 체크를 끄고 다시 생성한다.",
         "[복사] 를 누르면 그 블록 전체가 클립보드에 들어간다. 점프 VM 터미널에서는 마우스 오른쪽 또는 Shift+Insert 로 붙여넣는다.",
         "생성할 때마다 테스트 기록 CSV 에 케이스 행이 추가되고, 로그 폴더에 생성 로그가 남는다.",
     ]
@@ -869,7 +874,8 @@ class App(object):
         tb = self.toolbar(f)
         self.help_button(tb, "4. 생성 결과", self.RESULT_HELP)
         self.hint(tb, "블록마다 [복사] 를 누른 뒤 붙여넣을 창에 붙여넣는다. A 는 점프 VM 에서 처음 한 번만 붙여넣고, "
-                      "VM password: 가 나오면 VM 비밀번호를 입력한다.").pack(side="left", fill="x", expand=True)
+                      "VM password: 가 나오면 VM 비밀번호를 입력한다. D 는 VM 의 crontab 을 모두 지울 때만 B 보다 먼저 "
+                      "점프 VM 에 붙여넣는다.").pack(side="left", fill="x", expand=True)
         self.res_text = self.text_box(f, height=5, wrap="word", font=self.small)
         self.res_text.pack(fill="x")
         make_readonly(self.res_text)
@@ -883,6 +889,7 @@ class App(object):
         self.blk_vm = self._block_panel(pw, "B. VM 등록 블록 (점프 VM 터미널)", lambda: self.copy_block("vm"))
         self.blk_esx = self._block_panel(pw, "C. ESX 블록 (root SSH 창, 시각은 UTC)", lambda: self.copy_block("esx"),
                                          esx=True)
+        self.blk_wipe = self._block_panel(pw, "D. VM crontab 전체 삭제", lambda: self.copy_block("wipe"))
 
     def _block_panel(self, pw, title, copy_cmd, esx=False):
         px = self.px
@@ -890,7 +897,7 @@ class App(object):
         pw.add(lf, weight=1)
         hb = ttk.Frame(lf)
         hb.pack(fill="x")
-        ttk.Button(hb, text="복사", style="Red.TButton", command=copy_cmd).pack(side="right")
+        ttk.Button(hb, text="복사", style="Red.TButton", command=copy_cmd, width=-4).pack(side="right")   # 칸이 좁아도 호스트 선택 칸이 보이게
         if esx:
             ttk.Label(hb, text="ESX 호스트").pack(side="left")
             self.cb_esx = ttk.Combobox(hb, textvariable=self.v_esx_host, state="readonly", width=14)
@@ -1810,7 +1817,7 @@ class App(object):
             t.insert("end", "오류: " + e + "\n", "err")
         for w in warnings:
             t.insert("end", "경고: " + w + "\n", "warn")
-        for blk in (self.blk_setup, self.blk_vm, self.blk_esx):
+        for blk in (self.blk_setup, self.blk_vm, self.blk_esx, self.blk_wipe):
             set_text(blk, "")
         self.cb_esx.configure(values=[])
         self.v_esx_host.set("")
@@ -1834,8 +1841,13 @@ class App(object):
                      % (", ".join(res["record_added"]), res.get("record_backup")), "warn")
         for w in res["warnings"]:
             t.insert("end", "경고: " + w + "\n", "warn")
+        if res.get("wipe_conflicts"):
+            t.insert("end", "주의: 적용 체크한 케이스 %s 는 실행할 시각이 남아 있고 D 블록의 VM 을 쓴다. D 블록을 붙여넣으면 그 케이스의 "
+                            "crontab 줄도 지워진다. 그 케이스도 다시 등록하려면 적용 체크를 끄고 다시 생성할 것\n"
+                     % ", ".join(res["wipe_conflicts"]), "warn")
         set_text(self.blk_setup, res["setup"])
         set_text(self.blk_vm, res["vm"] or "(VM 에 등록할 줄 없음)\n")
+        set_text(self.blk_wipe, res.get("vm_wipe") or "(VM 없음)\n")
         hosts = list(res["esx"].keys())
         self.cb_esx.configure(values=hosts)
         self.v_esx_host.set(hosts[0] if hosts else "")
@@ -1858,6 +1870,17 @@ class App(object):
             text, label = res["setup"], "A. 점프 VM 최초 1회 설정"
         elif which == "vm":
             text, label = res["vm"], "B. VM 등록 블록"
+        elif which == "wipe":
+            text, label = res.get("vm_wipe", ""), "D. VM crontab 전체 삭제"
+            hosts = res.get("wipe_hosts") or []
+            if text:
+                msg = ("D 블록을 점프 VM 터미널에 붙여넣으면 VM %d대(%s)의 crontab 줄이 모두 지워진다. tcgen 이 등록하지 않은 줄도 "
+                       "지워진다.\n\n지우기 전 내용은 각 VM 홈 폴더의 tcgen_crontab_backup-<시각>.txt 에 저장된다. "
+                       "그 VM 에서 crontab <그 파일> 을 실행하면 되돌릴 수 있다." % (len(hosts), ", ".join(hosts)))
+                if res.get("wipe_conflicts"):
+                    msg += "\n\n적용 체크한 케이스 %s 의 줄도 지워진다." % ", ".join(res["wipe_conflicts"])
+                if not messagebox.askyesno(TITLE, msg + "\n\n복사할까요?", parent=self.root):
+                    return
         else:
             h = self.v_esx_host.get()
             text, label = res["esx"].get(h, ""), "C. ESX 블록 %s" % h

@@ -4,13 +4,19 @@ rem tcgen keeps settings, commands and test cases in the data folder (default C:
 rem PyInstaller deletes dist\tcgen on every build. Step 4 keeps data files that an older tcgen saved in dist\tcgen.
 cd /d %~dp0
 set PY=.venv\Scripts\python.exe
+rem Retry option for company networks whose proxy re-signs HTTPS (pip then fails the SSL certificate check)
+set TRUST=--trusted-host pypi.org --trusted-host files.pythonhosted.org
 if not exist %PY% (
   echo [1/5] Creating Python environment .venv
   py -3 -m venv .venv || goto :err
 )
 echo [2/5] Installing PyInstaller
-%PY% -m pip install --upgrade pip
-%PY% -m pip install pyinstaller || goto :neterr
+%PY% -m pip install --upgrade pip >nul 2>&1 || %PY% -m pip install --upgrade pip %TRUST% >nul 2>&1
+%PY% -m pip install pyinstaller && goto :tests
+echo NOTE: download failed. On company networks this is often the SSL certificate check.
+echo       Retrying without the certificate check for pypi.org and files.pythonhosted.org ...
+%PY% -m pip install pyinstaller %TRUST% || goto :neterr
+:tests
 echo [3/5] Running self tests
 %PY% -m unittest discover -s tests || goto :testerr
 echo [4/5] Checking dist\tcgen for data files of an older version
@@ -39,6 +45,8 @@ goto :eof
 :neterr
 echo.
 echo FAILED while installing PyInstaller. Check the internet connection or proxy, then run this file again.
+echo If your company has its own Python package repository, set it once and run this file again:
+echo   py -3 -m pip config --user set global.index-url https://YOUR-REPOSITORY/simple
 pause
 exit /b 1
 :testerr
