@@ -14,7 +14,8 @@
   - TAT 측정 잡 = VM(Job_code · hostname)마다, 케이스 잡 시작 시각 앞뒤 10분 안에 시작한 세트 가운데 잡 elapsed 평균이 가장 긴 세트.
     그 평균이 케이스 실행 구간의 절반 이상일 때만 TAT 측정 잡으로 본다. TAT = 그 세트 잡들의 elapsed 평균.
     여러 VM 에서 돌렸으면(예: 같은 잡을 VM 두 대에서 실행) TAT 측정 잡이 VM 마다 하나씩 생기고 TAT 도 VM 마다 낸다.
-  - 동시 실행 잡 = TAT 측정 잡이 아닌 나머지 잡. Job_code · hostname 마다 세트로 묶어 정리한다.
+  - 동시 실행 잡 = TAT 측정 잡과 잡 종류(Job_code)가 다른 잡. Job_code · hostname 마다 세트로 묶어 정리한다.
+    TAT 측정 잡과 같은 종류의 다른 실행(앞 · 뒤 케이스의 잡 등)은 동시 실행 잡에 넣지 않고 TAT 절에 '제외한 실행' 으로 적는다.
     기준 구간 = TAT 측정 잡 전체의 실행 구간(첫 잡 시작 ~ 마지막 잡 종료). TAT 측정 잡이 없으면 케이스 실행 구간.
     기준 구간 중 시작한 세트: 기준 구간 시작 10초 전에 시작한 세트(동시 시작)부터 기준 구간 끝까지 시작한 세트. 끝난 뒤 시작한 세트는 뺀다.
 """
@@ -152,7 +153,8 @@ def classify(case, jobs):
                       'jobs': [[j['info'] or j['code'], j['host'], _iso(j['start']), _iso(j['end']), round(j['elapsed'], 2)] for j in js],
                       'tat': round(statistics.mean(els), 2), 'min': round(min(els), 2), 'max': round(max(els), 2),
                       'start': _iso(min(j['start'] for j in js)), 'end': _iso(max(j['end'] for j in js)),
-                      'other_sets': len(by[k]) - 1})
+                      'other_sets': len(by[k]) - 1,
+                      'other_starts': [_iso(st[0]['start']) for n, st in enumerate(by[k]) if n != i]})
     mains.sort(key=lambda m: (m['hosts'], m['code']))
     w0 = min(pd.Timestamp(m['start']) for m in mains) if mains else cs
     w1 = max(pd.Timestamp(m['end']) for m in mains) if mains else ce
@@ -161,7 +163,10 @@ def classify(case, jobs):
     for (code, host) in by:
         hosts_per_code.setdefault(code, set()).add(host)
     conc = []
+    main_codes = {k[0] for k in picked}
     for (code, host), sets in by.items():
+        if code in main_codes:                  # TAT 측정 잡과 같은 종류의 다른 실행(앞 · 뒤 케이스 등)은 동시 실행 잡이 아니다
+            continue
         sets = [st for i, st in enumerate(sets) if picked.get((code, host)) != i]
         if not sets:
             continue

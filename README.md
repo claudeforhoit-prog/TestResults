@@ -131,13 +131,21 @@ perfreport.exe run <케이스정보.xlsx> <원본폴더> --split <정리폴더> 
 - `case.txt` 에 케이스 정보, 저장 구간, 남긴 VM과 호스트, 정리한 날짜, 구간 안에서 뺀 행 수를 적는다.
 - 같은 TC를 다시 정리하면 폴더를 새로 만든다(덮어쓰기).
 
+### 2.6.1 로그 수집 시스템에서 내보낸 Key:Value 로그
+
+- 로그 수집 시스템(예: VCF Operations for Logs)에서 내보낸 CSV 는 `text` 열의 `Key:Value` 기록(`Timestamp:…, Hostname:…, 지표:값`)을 읽는다.
+  지표 수집 시스템(VCF Operations)으로 보낸 지표를 내보낸 CSV(`Name`, `timestamp` 열)는 VCF Operations 형식으로 읽는다.
+- 같은 VM · 같은 시각에 NUMA 노드마다 한 줄씩 기록된 로그(`NumaNode:node0` 키)는 노드별 지표로 나눈다. 지표 이름 앞에 노드를 붙인다(예: `node0 · AnonHugePages_kB`).
+- `AnonHugePages` 와 `AnonPages` 가 있으면 `THP Coverage (%)` 를 계산한다(3.8). 노드별 coverage 지표만 있는 경우에도 VM 전체 값을 계산하고, VM 전체 coverage 지표가 이미 있는 케이스 · VM 은 계산하지 않는다.
+
 ### 2.7 phase 소요 시간 CSV (선택)
 
 잡의 단계(phase)별 소요 시간을 리포트에 넣으려면, 단계 추출 스크립트가 만든 CSV 를 데이터 폴더에 함께 넣는다. 머리글을 보고 자동으로 찾는다.
 
 - 형식: 한 행 = 잡 1개. 열 `Hostname`, `Workload`, `JobStart_KST`(예: `2026-07-15T02-05-02`), `JobIdx`, `JobTotal`, `Stage_Count`,
   단계마다 `<단계>_self`(그 단계만의 소요 초)와 `<단계>_total`(잡 시작부터 그 단계 끝까지 누적 초), `TotalElapsed_Sec`, `SrcFile`.
-  단계 순서는 열 순서다. 값 `-1` 은 그 단계가 기록되지 않았다는 뜻이다.
+  단계 순서는 추출 스크립트의 단계 순서(netlist → parsing → license → elaboration → … → transient)를 따른다. 그 밖의 단계 이름은 누적 시간 크기순이다. 값 `-1` 은 그 단계가 기록되지 않았다는 뜻이다.
+  로그 수집 시스템에서 내보낸 파일(열이 알파벳순, `text` · `hostname` 열 포함)도 읽는다. 이때 VM 이름은 `…Phase-Hostname` 열에서 읽는다(`hostname` 열은 로그를 보낸 호스트).
 - 케이스 연결: `JobStart_KST` 가 케이스의 잡 시작 시각 앞뒤 10분 안인 잡을 그 케이스의 잡으로 본다.
   `Hostname` 이 케이스의 VM 이름과 맞는 잡이 있으면 그 잡만 쓴다. 같은 시각에 시작한 케이스가 여럿이고 `Hostname` 이 어느 VM 이름과도 맞지 않으면 쓰지 않고 로그에 알린다.
 - 계산: 단계 값은 연결된 잡들의 self 시간 평균(동시 실행 잡 평균)이다. 단계의 시작과 종료는 잡 시작 기준으로 self 시간을 차례로 더한 값이다.

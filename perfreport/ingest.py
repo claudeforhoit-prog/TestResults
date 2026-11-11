@@ -171,13 +171,19 @@ def read_kv_text(path, prof):
     t = parse_time(df[tkey], prof.get('time_format'), prof.get('timezone'))
     ent = df[ekey] if ekey and ekey in df else pd.Series([prof.get('entity', 'host')] * len(df))
     hkey = next(iter(host_columns(df.columns, prof, exclude=[tkey, ekey])), None)   # 상위 호스트 키 (예: ESXHost:esx01)
-    skip = {tkey, ekey, hkey, *where.keys()}
+    # 하위 단위 키(예: NumaNode:node0): 같은 VM · 같은 시각에 노드마다 한 줄씩 기록된다. 지표 이름 앞에 노드를 붙여 노드별 지표로 나눈다
+    gkey = next((k for k in prof.get('subgroup_keys', ['NumaNode']) if k in df.columns), None)
+    skip = {tkey, ekey, hkey, gkey, *where.keys()}
     rows = []
     for c in _select_metrics([c for c in df.columns if c not in skip], prof):
         v = to_number(df[c])
         if v.notna().sum() == 0:
             continue
-        part = pd.DataFrame({'t': t, 'entity': ent, 'metric': c, 'value': v})
+        name = c
+        if gkey:
+            g = df[gkey].fillna('').astype(str).str.strip()
+            name = pd.Series([f'{x} · {c}' if x else c for x in g], index=df.index)
+        part = pd.DataFrame({'t': t, 'entity': ent, 'metric': name, 'value': v})
         if hkey:
             part['_host'] = df[hkey].fillna('').values
         rows.append(part)

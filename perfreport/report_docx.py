@@ -23,12 +23,42 @@ def _style(doc):
 
 
 def _caption(doc, text):
+    """그림 제목: 그림 바로 아래, 가운데 정렬."""
     p = doc.add_paragraph()
     r = p.add_run(text)
     r.bold = True
     r.font.size = Pt(9.5)
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     return p
+
+
+def _tcaption(doc, text):
+    """표 제목: 표 바로 위, 왼쪽 정렬."""
+    p = doc.add_paragraph()
+    r = p.add_run(text)
+    r.bold = True
+    r.font.size = Pt(9.5)
+    p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    p.paragraph_format.space_after = Pt(2)
+    p.paragraph_format.keep_with_next = True
+    return p
+
+
+def _sub(doc, text, level=2):
+    """소제목. 앞에 빈 줄을 하나 두어 앞 내용과 구분한다."""
+    doc.add_paragraph()
+    return doc.add_heading(text, level=level)
+
+
+def _notes(doc, lines, small=False):
+    """설명: 한 줄에 한 항목씩 글머리표로. small 이면 그림 아래 설명처럼 작은 글자."""
+    for t in lines:
+        if not t:
+            continue
+        p = doc.add_paragraph(style='List Bullet')
+        r = p.add_run(t)
+        if small:
+            r.font.size = Pt(9)
 
 
 def _table(doc, header, rows, header2=None):

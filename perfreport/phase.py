@@ -2,6 +2,7 @@
 
 입력 CSV (단계 추출 스크립트의 파일 출력, 한 행 = 잡 1개). 데이터 폴더에 함께 넣으면 머리글을 보고 찾는다.
   공통 열: Hostname, Workload, JobStart_KST (예: 2026-07-15T02-05-02), JobIdx, JobTotal, Stage_Count
+  로그 수집 시스템에서 내보낸 파일도 읽는다: VM 이름은 '…Phase-Hostname' 열, 단계 열은 알파벳순이어도 누적 시간으로 실행 순서를 정한다.
   단계 열: <단계>_self (그 단계만의 소요 초), <단계>_total (잡 시작부터 그 단계 끝까지 누적 초).
            단계 순서 = 열 순서. 값 -1 은 그 단계가 기록되지 않았다는 뜻이다.
   끝 열: TotalElapsed_Sec, SrcFile
@@ -30,6 +31,9 @@ _STAGE = re.compile(r'^([A-Za-z][A-Za-z0-9]*)_(self|total)$')
 _TIME_FORMATS = ('%Y-%m-%dT%H-%M-%S', '%Y-%m-%d %H:%M:%S', '%Y-%m-%d_%H:%M:%S', '%Y-%m-%dT%H:%M:%S',
                  '%Y-%m-%d_%H-%M-%S', '%Y-%m-%d %H-%M-%S')
 LOAD_STAGE = 'init'
+# 단계 추출 스크립트(v4.4)의 단계 순서 = 로그 출력 순서
+STAGE_ORDER = ['netlist', 'parsing', 'license', 'elaboration', 'vsrcbegin', 'vsrcend', 'mosmodel', 'reduction',
+               'connectivity', 'dbbuild', 'init', 'outputprep', 'matrixbuild', 'dcinit', 'transient']
 
 # 그래프 색: 이전 phase 누적 막대그래프와 같은 색. 주요 단계는 색, 나머지는 회색 계열 (실행 순서대로 돌려 쓴다)
 BIG = {'elaboration': '#5B9E4D', 'reduction': '#9CC490', 'parsing': '#4E8C8A', 'transient': '#4A87A8', 'dcinit': '#8FB6CC'}
@@ -74,6 +78,19 @@ def _num(v):
     return x if x >= 0 else None          # -1 = 기록 없음
 
 
+def _host_column(cols):
+    """잡을 실행한 VM 이름이 든 열. '…phase…hostname' 형태 열(로그 수집 시스템에서 내보낸 파일: 태그에 담긴 VM 이름)을 먼저,
+    없으면 Hostname(추출 스크립트가 직접 저장한 CSV). 로그 수집 시스템 파일의 hostname 은 로그를 보낸 호스트라 쓰지 않는다."""
+    for c in cols:
+        if re.search(r'phase.*host', c, re.I):
+            return c
+    if 'Hostname' in cols:
+        return 'Hostname'
+    if 'text' not in cols:                         # 직접 저장한 CSV 인데 열 이름만 소문자인 경우
+        return next((c for c in cols if c.lower() == 'hostname'), None)
+    return None
+
+
 def read_jobs(path):
     """CSV 1개 → 잡 목록 [{host, start, idx, total_jobs, order, self, total, file}]."""
     with io.open(path, encoding='utf-8-sig', errors='replace', newline='') as f:
@@ -86,10 +103,19 @@ def read_jobs(path):
         m = _STAGE.match(c)
         if m and m.group(2) == 'self' and m.group(1) not in order:
             order.append(m.group(1))
+    # 실행 순서: 로그 수집 시스템에서 내보낸 파일은 열이 알파벳순이라 열 순서를 쓸 수 없다.
+    # 단계 이름이 추출 스크립트의 단계 목록(STAGE_ORDER)에 모두 있으면 그 순서, 아니면 단계 누적 시간(<단계>_total) 크기순
+    if all(s in STAGE_ORDER for s in order):
+        order.sort(key=STAGE_ORDER.index)
+    else:
+        tot = {s: sorted(v for v in (_num(r.get(f'{s}_total')) for r in rows) if v is not None) for s in order}
+        pos = {s: i for i, s in enumerate(order)}
+        order.sort(key=lambda s: (tot[s][len(tot[s]) // 2] if tot[s] else float('inf'), pos[s]))
+    hcol = _host_column(cols)
     jobs = []
     for r in rows:
         r = {(k or '').strip(): v for k, v in r.items()}
-        jobs.append({'row': r, 'host': str(r.get('Hostname') or '').strip(), 'start': _when(r.get('JobStart_KST')),
+        jobs.append({'row': r, 'host': str(r.get(hcol) or '').strip() if hcol else '', 'start': _when(r.get('JobStart_KST')),
                      'idx': str(r.get('JobIdx') or '').strip(), 'total_jobs': _num(r.get('JobTotal')),
                      'order': order, 'self': {s: _num(r.get(f'{s}_self')) for s in order},
                      'total': {s: _num(r.get(f'{s}_total')) for s in order}, 'file': path})

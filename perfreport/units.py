@@ -164,7 +164,7 @@ def thp_pairs(names):
 def thp_names(names):
     """역할 지정 목록용: 만들어질 THP Coverage 이름을 덧붙인 목록."""
     names = list(names)
-    if any(_is_coverage(m) for m in names):
+    if any(_is_coverage(m) and ' · ' not in m for m in names):
         return names
     return names + [c for _, _, c in thp_pairs(names) if c not in names]
 
@@ -177,7 +177,9 @@ def derive_thp(df):
     pairs = thp_pairs(names)
     if not pairs:
         return df
-    has_cov = set(df.loc[df['metric'].map(_is_coverage), 'entity'])     # 이미 coverage 지표가 있는 VM 은 만들지 않는다
+    vm_level = ~df['metric'].str.contains(' · ', regex=False)            # 'node0 · …' 같은 노드별 지표는 VM 전체 값이 아니다
+    cov = df.loc[df['metric'].map(_is_coverage) & vm_level]
+    has_cov = set(zip(cov['case'], cov['entity'])) if 'case' in df else set(cov['entity'])   # 케이스 · VM 마다 판단
     units = df.drop_duplicates('metric').set_index('metric')['unit'].to_dict() if 'unit' in df else {}
     keys = ['case', 'entity', 't']
     add = []
@@ -186,7 +188,10 @@ def derive_thp(df):
         ea = size_exp(_anon_parts(ap)[2] or units.get(ap, ''))
         if eh is None or ea is None:                 # 한쪽만 단위를 알면 같은 단위로 본다
             eh = ea = eh if eh is not None else (ea if ea is not None else 0)
-        a = df[(df['metric'] == hp) & ~df['entity'].isin(has_cov)]
+        a = df[df['metric'] == hp]
+        if has_cov:
+            key = list(zip(a['case'], a['entity'])) if 'case' in df else list(a['entity'])
+            a = a[[k not in has_cov for k in key]]
         b = df.loc[df['metric'] == ap, keys + ['value']].drop_duplicates(keys).rename(columns={'value': '_ap'})
         j = a.merge(b, on=keys, how='inner')
         if j.empty:
