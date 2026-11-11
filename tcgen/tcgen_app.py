@@ -616,7 +616,7 @@ class App(object):
         r = self.root
         r.title(TITLE)
         sw, sh = r.winfo_screenwidth(), r.winfo_screenheight()
-        w, h = min(self.px(1480), int(sw * 0.95)), min(self.px(900), int(sh * 0.9))
+        w, h = min(self.px(1600), int(sw * 0.95)), min(self.px(900), int(sh * 0.9))
         r.geometry("%dx%d" % (w, h))
         r.minsize(min(self.px(1000), w), min(self.px(640), h))
         C, px = COLORS, self.px
@@ -754,17 +754,26 @@ class App(object):
         p = self.vm_prefix()
         n = int(self.settings.get("default_vms", 2))
         return [
-            "케이스 행(옅은 파란 바탕, 굵은 글씨): 적용 체크, 케이스 이름, ESX 호스트, ESX 모니터링, 간격, 잡 시작, 모니터링 중지",
-            "VM 행(└): VM 이름, 잡, 그 VM 의 모니터링",
+            "케이스 행(옅은 파란 바탕, 굵은 글씨): 적용 체크, 케이스 이름, 설명, ESX 호스트, ESX 모니터링, 간격, 잡 시작, "
+            "모니터링 중지, 테스트 그룹, 잡 종료 (리포트)",
+            "VM 행(└): VM 이름, 잡, 그 VM 의 모니터링, 종료 기준 VM",
             "칸을 두 번 누르면 고친다. 적용 칸을 누르면(또는 Space) 체크되고, 체크한 케이스는 [명령어 생성] 에서 빠진다. "
             "표는 바뀔 때마다 데이터 폴더의 test_cases.json 에 저장된다.",
             "새 케이스는 VM %d대(ESX 호스트 + %s01, %s02)가 기본이다. [+ VM 추가] 는 선택한 케이스에 다음 번호 VM(%s03, %s04 …)을 추가한다. "
             "ESX 호스트를 바꾸면 자동으로 붙은 VM 이름도 따라 바뀐다." % (n, p, p, p, p),
             "잡이 (없음) 이면 모니터링만 등록한다. 잡과 모니터링이 모두 없는 VM 은 등록하지 않는다.",
-            "+ 케이스 추가: 선택한 케이스를 VM 구성까지 복사한다. 잡 시작 = 윗줄 잡 시작 + 간격",
+            "+ 케이스 추가: 선택한 케이스를 VM 구성까지 복사한다. 잡 시작 = 윗줄 잡 시작 + 간격. 설명, 테스트 그룹, 종료 기준 VM 은 "
+            "복사하고 잡 종료 (리포트) 는 비운다.",
             "삭제, 위로, 아래로: 케이스 행을 고르면 케이스를, VM 행을 고르면 그 VM 을 대상으로 한다. "
             "위로, 아래로는 순서만 바꾸고 시각은 그 행에 남는다.",
             "시각 형식: 2026-11-09 10:00:00, 간격 형식: 12:00",
+            "설명: 케이스 행에 시험 조건을 적는다(한글 가능). 테스트 기록 CSV 와 리포트용 CSV 에 들어가고, 붙여넣기 블록과 "
+            "crontab 줄에는 들어가지 않는다.",
+            "테스트 그룹, 잡 종료 (리포트), 종료 기준 VM: 성능 리포트 생성기에 넘기는 값이다. crontab 에는 쓰지 않는다. "
+            "테스트 그룹이 같은 케이스는 리포트 생성기가 HTML 하나에 모은다. 잡 종료를 비우면 '자동' 으로 보이고 리포트 생성기가 "
+            "종료 시각을 정한다. 종료 기준 VM 은 VM 행의 칸을 두 번 누르면 '기준' 이 되고 다시 누르면 해제된다. 여러 대를 지정할 수 있다.",
+            "[리포트용 CSV 저장]: 저장할 케이스와 비교 기준(첫 줄) 케이스를 고르고 저장 위치를 정한다. 성능 리포트 생성기의 "
+            "'케이스 정보 파일' 에서 이 파일을 고른다. VM 열에는 잡이나 모니터링을 지정한 VM 이 들어간다.",
             "모니터링 시작 = 잡 시작 %d분 전. 모니터링 중지 = 자동(다음 케이스 잡 시작 %d분 전, 마지막 케이스는 잡 시작 + 간격 - %d분), "
             "직접 입력, 중지 없음 중 하나. 이 시각은 그 케이스의 모든 VM 과 ESX 에 같이 적용된다." % (ld[0], ld[1], ld[1]),
         ]
@@ -811,13 +820,17 @@ class App(object):
     def build_case_tab(self):
         f = self.tab_page("3. 테스트 케이스")
         job_values = lambda: [NONE_JOB] + [r["name"] for r in self.run_cmds if r.get("name")]
-        cols = [dict(key="name", title="케이스 / VM", width=215), dict(key="esx", title="ESX 호스트", width=100),
-                dict(key="job", title="잡", width=110, values=job_values),
-                dict(key="mon", title="모니터링", width=230, popup=self.edit_monitors, stretch=True),
-                dict(key="interval", title="간격", width=60),
-                dict(key="start", title="잡 시작 (KST)", width=150),
-                dict(key="mon_start", title="모니터링 시작", width=105),
-                dict(key="mon_stop", title="모니터링 중지", width=150, popup=self.edit_stop)]
+        cols = [dict(key="name", title="케이스 / VM", width=205), dict(key="desc", title="설명", width=160, edit_width=420),
+                dict(key="esx", title="ESX 호스트", width=85),
+                dict(key="job", title="잡", width=95, values=job_values),
+                dict(key="mon", title="모니터링", width=180, popup=self.edit_monitors, stretch=True),
+                dict(key="interval", title="간격", width=50),
+                dict(key="start", title="잡 시작 (KST)", width=140),
+                dict(key="mon_start", title="모니터링 시작", width=95),
+                dict(key="mon_stop", title="모니터링 중지", width=135, popup=self.edit_stop),
+                dict(key="group", title="테스트 그룹", width=90),
+                dict(key="end_time", title="잡 종료 (리포트)", width=140),
+                dict(key="end_ref", title="종료 기준 VM", width=95, popup=self.toggle_end_ref)]
         px = self.px
         tb = self.toolbar(f)
         ttk.Button(tb, text="+ 케이스 추가", style="Green.TButton", command=self.add_case).pack(side="left")
@@ -828,6 +841,7 @@ class App(object):
         ttk.Button(tb, text="명령어 생성", style="Red.TButton", command=self.generate).pack(side="right", ipadx=px(10),
                                                                                     padx=(px(8), 0))
         self.help_button(tb, "3. 테스트 케이스", self.case_help)
+        ttk.Button(tb, text="리포트용 CSV 저장", style="Blue.TButton", command=self.export_report).pack(side="right")
         t = EditableTable(f, self, cols, height=10,
                           check=dict(title="적용", width=48, on=self.img_on, off=self.img_off, toggle=self.toggle_applied))
         self.t_case = t
@@ -843,7 +857,8 @@ class App(object):
         t.tree.tag_configure("case", background=COLORS["case"], font=self.bold)
         t.tree.tag_configure("vm", background="white")
         self.hint(f, "칸을 두 번 누르면 고친다. 케이스 행(옅은 파란 바탕)은 케이스 설정, VM 행(└)은 그 VM 의 잡과 모니터링. "
-                     "적용 체크한 케이스는 [명령어 생성] 에서 빠진다. 자세한 설명은 [도움말].").pack(
+                     "적용 체크한 케이스는 [명령어 생성] 에서 빠진다. 테스트 그룹, 잡 종료 (리포트), 종료 기준 VM 은 "
+                     "리포트용 CSV 에만 들어간다. 자세한 설명은 [도움말].").pack(
             side="bottom", fill="x", pady=(px(6), 0))
         t.pack(fill="both", expand=True)
         t.refresh()
@@ -1250,7 +1265,7 @@ class App(object):
         if c is None:
             return ""
         if k is None:
-            return c.get(key, "") if key in ("name", "esx", "interval", "start") else ""
+            return c.get(key, "") if key in ("name", "desc", "esx", "interval", "start", "group", "end_time") else ""
         return v.get(key, "") if key in ("name", "job") else ""
 
     def case_kind(self, iid, col):
@@ -1259,9 +1274,9 @@ class App(object):
         if c is None:
             return "readonly"
         if k is None:
-            return {"name": "entry", "esx": "entry", "job": "readonly", "mon": "popup", "interval": "entry",
-                    "start": "entry", "mon_start": "readonly", "mon_stop": "popup"}[key]
-        return {"name": "entry", "job": "combo", "mon": "popup"}.get(key, "readonly")
+            return {"name": "entry", "desc": "entry", "esx": "entry", "mon": "popup", "interval": "entry", "start": "entry",
+                    "mon_stop": "popup", "group": "entry", "end_time": "entry"}.get(key, "readonly")
+        return {"name": "entry", "job": "combo", "mon": "popup", "end_ref": "popup"}.get(key, "readonly")
 
     def case_check(self, iid):
         i, k, c, v = self._get(iid)
@@ -1289,11 +1304,15 @@ class App(object):
                 return v.get("job") or NONE_JOB
             if key == "mon":
                 return ", ".join(v.get("monitors") or []) or NONE_JOB
+            if key == "end_ref":
+                return "기준" if v.get("end_ref") else ""
             return ""
         s = self.sched[i] if i < len(self.sched) else {}
         has_mon = core.case_has_monitors(c)
-        if key == "job":
+        if key in ("job", "end_ref"):
             return ""
+        if key == "end_time":
+            return c.get("end_time") or "자동"
         if key == "mon":
             em = c.get("esx_monitors") or []
             return (", ".join(em) + " (ESX)") if em else NONE_JOB
@@ -1320,6 +1339,16 @@ class App(object):
         if c is None or k is not None:
             return
         c["applied"] = not c.get("applied")
+        self.mark_cases()
+        self.t_case.refresh(iid)
+
+    def toggle_end_ref(self, iid):
+        """VM 행의 종료 기준 VM 칸: 누를 때마다 지정, 해제."""
+        self.t_case.finish_edit()
+        i, k, c, v = self._get(iid)
+        if c is None or k is None:
+            return
+        v["end_ref"] = not v.get("end_ref")
         self.mark_cases()
         self.t_case.refresh(iid)
 
@@ -1353,6 +1382,21 @@ class App(object):
                 c["start"] = core.fmt_dt(d)
                 core.interval_from_starts(self.cases, i)
                 core.recalc_starts(self.cases, i + 1)
+            elif key in ("desc", "group"):
+                c[key] = " ".join(t.split())          # 줄바꿈, 탭은 빈칸 하나로
+            elif key == "end_time":
+                try:
+                    e = core.parse_end(t)
+                except ValueError as ex:
+                    messagebox.showerror(TITLE, str(ex), parent=self.root)
+                    return
+                self.calc_schedule()
+                job = self.sched[i].get("job") if i < len(self.sched) else None
+                if e is not None and job is not None and e <= job:
+                    messagebox.showerror(TITLE, "잡 종료 %s 가 잡 시작 %s 보다 빠르거나 같음" % (core.fmt_dt(e), core.fmt_dt(job)),
+                                         parent=self.root)
+                    return
+                c["end_time"] = core.fmt_dt(e) if e is not None else ""
         else:
             if key == "name":
                 if t and not core.NAME_RE.match(t):
@@ -1383,6 +1427,7 @@ class App(object):
             row = copy.deepcopy(src)
             row["name"] = unique_name(src.get("name", ""), set(x.get("name", "") for x in self.cases))
             row["applied"] = False          # 새로 만든 케이스는 아직 등록 전
+            row["end_time"] = ""            # 잡 종료는 케이스마다 다르므로 복사하지 않음 (자동)
             if row.get("stop_mode") == "manual":
                 row["stop_mode"], row["stop_time"] = "auto", ""
             self.cases.insert(new, row)
@@ -1401,7 +1446,7 @@ class App(object):
             return
         p = self.vm_prefix()
         n = core.next_vm_number(c, p)
-        c.setdefault("vms", []).append({"name": core.vm_name(c.get("esx"), n, p), "job": NONE_JOB, "monitors": []})
+        c.setdefault("vms", []).append(core.new_vm(core.vm_name(c.get("esx"), n, p)))
         iid = "c%dv%d" % (i, len(c["vms"]) - 1)
         self.mark_cases()
         self.t_case.refresh(iid)
@@ -1433,7 +1478,8 @@ class App(object):
         self.t_case.refresh(("c%d" % min(i, len(self.cases) - 1)) if self.cases else None)
 
     def move_row(self, step):
-        """케이스 행: 케이스 순서만 바꾸고 잡 시작, 간격, 모니터링 중지 설정은 그 자리에 남긴다. VM 행: 케이스 안에서 VM 순서를 바꾼다."""
+        """케이스 행: 케이스 순서만 바꾸고 잡 시작, 간격, 모니터링 중지 설정, 잡 종료 (리포트) 는 그 자리에 남긴다.
+        VM 행: 케이스 안에서 VM 순서를 바꾼다."""
         self.t_case.finish_edit()
         i, k, c, v = self._selected_case()
         if c is None:
@@ -1451,7 +1497,7 @@ class App(object):
         if not (0 <= j < len(self.cases)):
             return
         a, b = self.cases[i], self.cases[j]
-        for key in ("start", "interval", "stop_mode", "stop_time"):
+        for key in ("start", "interval", "stop_mode", "stop_time", "end_time"):
             a[key], b[key] = b.get(key, ""), a.get(key, "")
         self.cases[i], self.cases[j] = b, a
         self.mark_cases()
@@ -1578,6 +1624,136 @@ class App(object):
         top.bind("<Return>", lambda e: ok())
         self._center(top)
         top.grab_set()
+
+    def export_report(self):
+        """[리포트용 CSV 저장]: 저장할 케이스와 비교 기준(첫 줄) 케이스를 고르게 한 뒤 성능 리포트 생성기용 케이스 CSV 를 쓴다."""
+        self.finish_all_edits()
+        if not self.cases:
+            messagebox.showinfo(TITLE, "탭 3 에 테스트 케이스를 먼저 추가할 것", parent=self.root)
+            return
+        self.calc_schedule()
+        C, px = COLORS, self.px
+        top = tk.Toplevel(self.root, bg=C["card"])
+        top.title("리포트용 CSV 저장")
+        top.transient(self.root)
+        fr = ttk.Frame(top, padding=(px(14), px(10), px(14), px(12)))
+        fr.pack(fill="both", expand=True)
+        ttk.Label(fr, text="성능 리포트 생성기의 케이스 정보 파일로 저장할 케이스를 고른다.", style="Bold.TLabel").pack(anchor="w")
+        ttk.Label(fr, text="저장 칸을 누르면(또는 Space) 체크된다. 표 순서대로 저장하고, 비교 기준 케이스는 첫 줄에 둔다. "
+                           "리포트 생성기는 첫 줄 케이스를 비교 기준으로 쓴다.", style="Hint.TLabel").pack(anchor="w", pady=(px(2), px(8)))
+        rows = []
+        for i, c in enumerate(self.cases):
+            s = self.sched[i] if i < len(self.sched) else {}
+            rows.append({"sel": False, "i": i, "name": c.get("name") or "(이름 없음)", "desc": c.get("desc", ""),
+                         "esx": c.get("esx", ""), "start": core.fmt_dt(s["job"]) if s.get("job") else "확인 필요",
+                         "vms": ", ".join(core.report_vms(c)) or "(없음)", "applied": "예" if c.get("applied") else ""})
+        cols = [dict(key="name", title="케이스", width=210, kind="readonly"),
+                dict(key="desc", title="설명", width=170, kind="readonly"),
+                dict(key="esx", title="ESX 호스트", width=85, kind="readonly"),
+                dict(key="start", title="잡 시작 (KST)", width=140, kind="readonly"),
+                dict(key="vms", title="리포트 VM", width=300, kind="readonly", stretch=True),
+                dict(key="applied", title="적용", width=50, kind="readonly")]
+        v_base = tk.StringVar()
+        v_count = tk.StringVar()
+        chosen = {"base": False}            # 비교 기준을 직접 고르기 전에는 고른 케이스 가운데 표 순서 첫 케이스
+
+        def picked():
+            return [r for r in rows if r["sel"]]
+
+        def update():
+            names = [r["name"] for r in picked()]
+            cb.configure(values=names)
+            if not chosen["base"] or v_base.get() not in names:
+                chosen["base"] = False
+                v_base.set(names[0] if names else "")
+            v_count.set("고른 케이스 %d개" % len(names))
+
+        def toggle(iid):
+            r = rows[int(iid)]
+            r["sel"] = not r["sel"]
+            table.refresh(iid)
+            update()
+
+        def set_all(on):
+            for r in rows:
+                r["sel"] = on
+            table.refresh()
+            update()
+
+        table = EditableTable(fr, self, cols, height=min(12, max(5, len(rows))),
+                              check=dict(title="저장", width=48, on=self.img_on, off=self.img_off, toggle=toggle, key="sel"))
+        table.rows = rows
+        table.row_tags = lambda iid: ("pick",) if rows[int(iid)]["sel"] else (("odd",) if int(iid) % 2 else ())
+        table.tree.tag_configure("pick", background=C["case"])
+        table.pack(fill="both", expand=True)
+        table.refresh(0)
+        self.report_table = table
+        opt = ttk.Frame(fr)
+        opt.pack(fill="x", pady=(px(8), 0))
+        ttk.Button(opt, text="모두 선택", command=lambda: set_all(True)).pack(side="left")
+        ttk.Button(opt, text="모두 해제", command=lambda: set_all(False)).pack(side="left", padx=(px(6), px(16)))
+        ttk.Label(opt, textvariable=v_count).pack(side="left")
+        cb = ttk.Combobox(opt, textvariable=v_base, state="readonly", width=32)
+        cb.pack(side="right")
+        cb.bind("<<ComboboxSelected>>", lambda e: chosen.update(base=True))
+        ttk.Label(opt, text="비교 기준 (첫 줄)").pack(side="right", padx=(0, px(6)))
+        bf = ttk.Frame(fr)
+        bf.pack(fill="x", pady=(px(12), 0))
+
+        def save():
+            sel = picked()
+            if not sel:
+                messagebox.showinfo(TITLE, "저장할 케이스를 하나 이상 고를 것", parent=top)
+                return
+            base_i = next((r["i"] for r in sel if r["name"] == v_base.get()), sel[0]["i"])
+            out, errors, warnings = core.report_rows(self.cases, self.sched, [r["i"] for r in sel], base_i)
+            if errors:
+                messagebox.showerror(TITLE, "오류 %d건. 저장하지 않았음. 탭 3 에서 고친 뒤 다시 저장할 것.\n\n%s"
+                                     % (len(errors), "\n".join(errors[:12])), parent=top)
+                return
+            if warnings and not messagebox.askyesno(TITLE, "경고 %d건\n\n%s\n\n이대로 저장할까요?"
+                                                    % (len(warnings), "\n".join(warnings[:12])), parent=top):
+                return
+            cfg = core.load_config()
+            st = self.current_settings(show_error=False) or self.settings
+            start_dir = cfg.get("report_dir") or ""
+            if not os.path.isdir(start_dir):
+                start_dir = core.resolve_paths(self.base, st)["log_dir"]
+                try:
+                    os.makedirs(start_dir, exist_ok=True)
+                except OSError:
+                    start_dir = self.base
+            now = dt.datetime.now()
+            path = filedialog.asksaveasfilename(parent=top, title="리포트용 CSV 저장 위치", initialdir=start_dir,
+                                                initialfile=core.REPORT_PREFIX + now.strftime("%Y%m%d_%H%M") + ".csv",
+                                                defaultextension=".csv", filetypes=[("CSV", "*.csv")])
+            if not path:
+                return
+            try:
+                keep = core.write_report_csv(path, out, backup_dir=os.path.join(self.base, "backup"), now=now)
+            except OSError as e:
+                messagebox.showerror(TITLE, "리포트용 CSV 를 저장하지 못함\n%s\n%s\n\n엑셀 등이 이 파일을 열고 있으면 닫고 다시 저장할 것"
+                                     % (path, e), parent=top)
+                return
+            cfg["report_dir"] = os.path.dirname(os.path.abspath(path))
+            try:
+                core.save_config(cfg)
+            except OSError:
+                pass
+            top.destroy()
+            self.v_status.set("리포트용 CSV 저장: %s (케이스 %d개, 첫 줄 %s)" % (path, len(out), out[0][1]))
+            messagebox.showinfo(TITLE, "리포트용 CSV 를 저장했다. 성능 리포트 생성기의 '케이스 정보 파일' 에서 이 파일을 고른다.\n\n"
+                                       "%s\n케이스 %d개, 첫 줄(비교 기준): %s%s"
+                                % (path, len(out), out[0][1], ("\n\n같은 이름의 이전 파일을 복사해 둠: %s" % keep) if keep else ""),
+                                parent=self.root)
+
+        ttk.Button(bf, text="취소", command=top.destroy).pack(side="right")
+        ttk.Button(bf, text="저장", style="Blue.TButton", command=save).pack(side="right", padx=(0, px(6)))
+        update()
+        top.bind("<Escape>", lambda e: top.destroy())
+        self._center(top)
+        top.grab_set()
+        table.tree.focus_set()
 
     def _center(self, top):
         top.update_idletasks()

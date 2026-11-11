@@ -5,6 +5,7 @@
 임시 생성기 폴더에서 화면을 띄워 버튼과 선택 창을 코드로 눌러 본다. 대화 상자는 자동으로 '예' 로 답한다.
 그림 저장 폴더를 주면 macOS 에서는 탭마다 화면을 저장한다. 자동 시험(unittest discover)에는 포함하지 않는다.
 """
+import csv
 import datetime as dt
 import json
 import os
@@ -30,6 +31,8 @@ import tcgen_app as appmod  # noqa: E402
 
 ASK_DIR = []                                # 폴더 선택 창 대답 (차례대로)
 appmod.filedialog.askdirectory = lambda **k: ASK_DIR.pop(0) if ASK_DIR else ""
+ASK_SAVE = []                               # 저장 위치 창 대답 (차례대로)
+appmod.filedialog.asksaveasfilename = lambda **k: ASK_SAVE.pop(0) if ASK_SAVE else ""
 
 LOG = []
 mb = appmod.messagebox
@@ -59,6 +62,15 @@ def walk(w):
 def last_toplevel(root):
     tops = [w for w in root.winfo_children() if isinstance(w, tk.Toplevel)]
     return tops[-1] if tops else None
+
+
+def cell_of(table, iid, key):
+    """표 칸에 보이는 글자 (열 이름으로 찾음)."""
+    return table.tree.item(iid, "values")[[c["key"] for c in table.columns].index(key)]
+
+
+def col_of(table, key):
+    return [c["key"] for c in table.columns].index(key)
 
 
 def press(top, text):
@@ -190,13 +202,45 @@ def main():
     press(top, "확인")
     check(c0["esx_monitors"] == ["host_pmu"], "ESX 모니터링은 케이스 행에서 선택")
     t.refresh("c0")
-    v0, v2 = tree.item("c0", "values"), tree.item("c0v2", "values")
-    check(v0[3] == "host_pmu (ESX)", "케이스 행 모니터링 칸에 ESX 모니터링 표시")
-    check(v2[0].strip() == "└ esx01ev03" and v2[2] == "job_b4" and v2[3] == "guest_perf, guest_gpu", "VM 행 표시 %s" % (v2[:4],))
+    check(cell_of(t, "c0", "mon") == "host_pmu (ESX)", "케이스 행 모니터링 칸에 ESX 모니터링 표시")
+    v2 = [cell_of(t, "c0v2", k) for k in ("name", "job", "mon")]
+    check(v2[0].strip() == "└ esx01ev03" and v2[1:] == ["job_b4", "guest_perf, guest_gpu"], "VM 행 표시 %s" % (v2,))
     check("case" in tree.item("c0", "tags") and "vm" in tree.item("c0v1", "tags"), "케이스 행과 VM 행 구분")
+
+    # 리포트용 칸: 설명, 테스트 그룹, 잡 종료 (리포트), 종료 기준 VM
+    t.start_edit("c0", col_of(t, "desc"))
+    check(t.editor is not None and t.editor[3] == "desc", "케이스 행 설명 칸 편집")
+    t.editor[1].set("기준, 기본 설정  (THP\tnever)")
+    t.finish_edit()
+    check(c0["desc"] == "기준, 기본 설정 (THP never)" and cell_of(t, "c0", "desc") == c0["desc"], "설명 입력과 표시 (탭, 겹친 빈칸 정리)")
+    t.start_edit("c0v0", col_of(t, "desc"))
+    check(t.editor is None, "VM 행 설명 칸은 고칠 수 없음")
+    app.commit_case("c0", "group", "tuning")
+    check(cell_of(t, "c0", "end_time") == "자동", "잡 종료를 비우면 자동 표시")
+    n_log = len(LOG)
+    app.commit_case("c0", "end_time", "2030-01-14 23:00")
+    check(c0["end_time"] == "" and any(x[0] == "error" and "잡 시작" in x[1] for x in LOG[n_log:]), "잡 시작보다 빠른 잡 종료 거부")
+    app.commit_case("c0", "end_time", "2030-01-15 11:40:30")
+    check(c0["end_time"] == "2030-01-15 11:40:30" and cell_of(t, "c0", "end_time") == "2030-01-15 11:40:30", "잡 종료 입력 (초까지)")
+    app.commit_case("c0", "end_time", "자동")
+    check(c0["end_time"] == "", "자동 입력 시 비움")
+    app.commit_case("c0", "end_time", "2030/01/15 11:40")
+    t.start_edit("c0v2", col_of(t, "end_ref"))
+    check(c0["vms"][2]["end_ref"] is True and cell_of(t, "c0v2", "end_ref") == "기준", "VM 행 종료 기준 VM 칸을 두 번 누르면 지정")
+    t.start_edit("c0v2", col_of(t, "end_ref"))
+    check(c0["vms"][2]["end_ref"] is False and cell_of(t, "c0v2", "end_ref") == "", "다시 누르면 해제")
+    t.start_edit("c0v2", col_of(t, "end_ref"))
+    t.start_edit("c0", col_of(t, "end_ref"))
+    check(t.editor is None and cell_of(t, "c0", "end_ref") == "", "케이스 행 종료 기준 VM 칸은 고칠 수 없음")
+    saved = core.load_cases(BASE)[0]
+    check(saved["desc"] == c0["desc"] and saved["group"] == "tuning" and saved["end_time"] == "2030-01-15 11:40:00"
+          and saved["vms"][2]["end_ref"] is True, "리포트용 칸도 test_cases.json 에 자동 저장")
     t.refresh("c0")
     app.add_case()
     app.add_case()
+    check(all(c["desc"] == c0["desc"] and c["group"] == "tuning" and c["vms"][2]["end_ref"] for c in app.cases[1:]),
+          "+ 케이스 추가: 설명, 테스트 그룹, 종료 기준 VM 복사")
+    check([c["end_time"] for c in app.cases] == ["2030-01-15 11:40:00", "", ""], "+ 케이스 추가: 잡 종료는 복사하지 않음 (자동)")
     names = [c["name"] for c in app.cases]
     check(names == ["TC-base-a", "TC-base-a-r2", "TC-base-a-r3"], "+ 케이스 추가: 선택한 케이스 복사, 이름 중복 피함 %s" % names)
     check([c["start"] for c in app.cases] == ["2030-01-15 00:00:00", "2030-01-15 12:00:00", "2030-01-16 00:00:00"],
@@ -224,9 +268,9 @@ def main():
     press(top, "확인")
     check(app.cases[2]["stop_mode"] == "none", "마지막 케이스 모니터링 중지: 중지 없음")
     t.refresh("c1")
-    vals = tree.item("c0", "values")
-    check(vals[6] == "01-14 23:55" and vals[7] == "01-15 12:50 (자동)", "모니터링 시작 5분 전, 중지 다음 케이스 10분 전 %s" % (vals[6:],))
-    check(tree.item("c2", "values")[7] == "중지 없음", "중지 없음 표시")
+    vals = [cell_of(t, "c0", "mon_start"), cell_of(t, "c0", "mon_stop")]
+    check(vals == ["01-14 23:55", "01-15 12:50 (자동)"], "모니터링 시작 5분 전, 중지 다음 케이스 10분 전 %s" % (vals,))
+    check(cell_of(t, "c2", "mon_stop") == "중지 없음", "중지 없음 표시")
 
     # 위로, 아래로 (케이스 행)
     t.refresh("c2")
@@ -291,6 +335,66 @@ def main():
     check(res2 is not None and res2["skipped"] == 1 and "TC-base-a" not in made and made, "체크한 케이스는 생성에서 빠짐 %s" % sorted(made))
     check("적용 체크로 뺀 케이스 1개" in app.res_text.get("1.0", "end"), "생성 결과에 뺀 케이스 수 표시")
     check([c["applied"] for c in core.load_cases(BASE)] == [True, False, False], "체크 상태가 test_cases.json 에 저장됨")
+
+    # 리포트용 CSV 저장: 케이스 고르기, 비교 기준(첫 줄), 저장 위치
+    app.nb.select(2)
+    root.update()
+    app.export_report()
+    top = last_toplevel(root)
+    rt = app.report_table
+    check([r["name"] for r in rt.rows] == ["TC-base-a", "TC-base-b4", "TC-base-a-r3"] and not any(r["sel"] for r in rt.rows),
+          "저장 창: 케이스 전부 표시, 처음에는 고른 케이스 없음")
+    check([r["applied"] for r in rt.rows] == ["예", "", ""], "저장 창에 적용 체크 표시")
+    n_log = len(LOG)
+    press(top, "저장")
+    check(any(x[0] == "info" and "하나 이상" in x[1] for x in LOG[n_log:]) and top.winfo_exists(), "고르지 않고 저장하면 안내만")
+    root.update()
+    bx, by, bw, bh = rt.tree.bbox("2", "#0")
+    rt.tree.event_generate("<Button-1>", x=bx + bw // 2, y=by + bh // 2)
+    root.update()
+    rt.check["toggle"]("0")
+    check([r["sel"] for r in rt.rows] == [True, False, True], "저장 칸을 눌러 케이스 고르기")
+    check("pick" in rt.tree.item("0", "tags") and "pick" not in rt.tree.item("1", "tags"), "고른 행 바탕색")
+    cb = [w for w in walk(top) if isinstance(w, ttk.Combobox)][0]
+    check(list(cb.cget("values")) == ["TC-base-a", "TC-base-a-r3"] and cb.get() == "TC-base-a",
+          "비교 기준 후보는 고른 케이스, 기본은 표 순서 첫 케이스")
+    cb.set("TC-base-a-r3")
+    cb.event_generate("<<ComboboxSelected>>")
+    rt.check["toggle"]("1")
+    check(cb.get() == "TC-base-a-r3", "직접 고른 비교 기준은 다른 케이스를 골라도 유지")
+    rt.check["toggle"]("1")
+    REP = os.path.join(TMP, "reports", "cases_for_report.csv")
+    ASK_SAVE.append(REP)
+    press(top, "저장")
+    check(os.path.exists(REP) and not top.winfo_exists(), "저장하고 창 닫힘")
+    with open(REP, encoding="utf-8-sig", newline="") as f:
+        rrows = list(csv.reader(f))
+    check(rrows[0] == core.REPORT_HEADER, "리포트 생성기 케이스 정보 파일의 열 %s" % rrows[0])
+    check([r[1] for r in rrows[1:]] == ["TC-base-a-r3", "TC-base-a"], "비교 기준 케이스를 첫 줄에")
+    ra = dict(zip(core.REPORT_HEADER, rrows[2]))
+    check(ra["설명"] == "기준, 기본 설정 (THP never)" and ra["테스트 그룹"] == "tuning" and ra["호스트 이름"] == "esx01"
+          and ra["잡 시작 시각"] == "2030-01-15 00:00:00" and ra["잡 종료 시각"] == "2030-01-15 11:40:00", "케이스 칸 %s" % ra)
+    check(ra["VM"] == "esx01ev01;esx01ev02;esx01ev03" and ra["종료 기준 VM"] == "esx01ev03", "VM, 종료 기준 VM 칸")
+    check(rrows[1][5] == "", "잡 종료를 비운 케이스는 빈칸 (리포트 생성기가 자동으로 정함)")
+    check(core.load_config().get("report_dir") == os.path.dirname(REP), "저장 위치를 기억함")
+    check("리포트용 CSV 저장" in app.v_status.get(), "상태 줄에 저장 결과")
+    ASK_SAVE.append(REP)
+    app.export_report()
+    top = last_toplevel(root)
+    press(top, "모두 선택")
+    press(top, "저장")
+    with open(REP, encoding="utf-8-sig", newline="") as f:
+        check(len(list(csv.reader(f))) == 4, "모두 선택: 케이스 3개 저장")
+    check(any(d.endswith("_before_overwrite_cases_for_report.csv") for d in os.listdir(os.path.join(BASE, "backup"))),
+          "같은 이름 파일은 덮어쓰기 전에 backup 에 복사")
+    ASK_SAVE.append("")
+    app.export_report()
+    top = last_toplevel(root)
+    press(top, "모두 선택")
+    press(top, "저장")
+    check(top.winfo_exists(), "저장 위치 창에서 취소하면 저장 창이 남음")
+    press(top, "취소")
+    check(not top.winfo_exists(), "취소로 닫힘")
 
     # 오류가 있으면 만들지 않음
     app.cases[1]["vms"][2]["job"] = "nojob"
@@ -368,8 +472,8 @@ def main():
     n_log = len(LOG)
     root4 = tk.Tk()
     app4 = appmod.App(root4)
-    check(app4.cases[0]["vms"] == [{"name": "esx09ev01", "job": "job_a", "monitors": ["guest_perf"]},
-                                   {"name": "esx09ev02", "job": "(없음)", "monitors": ["guest_perf"]}],
+    check(app4.cases[0]["vms"] == [{"name": "esx09ev01", "job": "job_a", "monitors": ["guest_perf"], "end_ref": False},
+                                   {"name": "esx09ev02", "job": "(없음)", "monitors": ["guest_perf"], "end_ref": False}],
           "예전 PVM, SVM 케이스를 VM 2대로 변환")
     check(any(x[0] == "info" and "VM 행 형식으로 바꿨다" in x[1] for x in LOG[n_log:]), "변환했다는 안내 표시")
     check(any(d.endswith("_before_vm_format") for d in os.listdir(os.path.join(old_dir, "backup"))), "변환 전 원본을 backup 에 복사")

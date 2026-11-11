@@ -28,7 +28,7 @@ import re
 import shutil
 import sys
 
-VERSION = "1.2"
+VERSION = "1.3"
 KST_TO_UTC = dt.timedelta(hours=9)
 CHUNK = 100            # 붙여넣는 글 한 줄에 담는 명령 조각 길이(문자 수)
 NONE_JOB = "(없음)"
@@ -42,9 +42,13 @@ CASES_VERSION = 2                     # 2: 케이스마다 VM 목록 (1: PVM, SV
 CASE_DEFAULTS = {
     "applied": False,      # 적용 체크: 이미 등록한 케이스. [명령어 생성] 에서 빠진다
     "name": "", "esx": "",
-    "vms": [],             # VM 목록: {"name": VM 이름, "job": 탭 1 명령어 명 또는 (없음), "monitors": [탭 2 명령어 명]}
+    "vms": [],             # VM 목록: {"name": VM 이름, "job": 탭 1 명령어 명 또는 (없음), "monitors": [탭 2 명령어 명],
+                           #           "end_ref": 리포트 생성기의 종료 기준 VM 이면 True}
     "esx_monitors": [],    # ESX 호스트에서 실행할 모니터링 (탭 2 명령어 명)
     "interval": "", "start": "", "stop_mode": "auto", "stop_time": "",
+    "desc": "",            # 케이스 설명 (리포트용 CSV 의 '설명')
+    "group": "",           # 리포트용 CSV 의 '테스트 그룹'. 같은 그룹의 케이스를 리포트 생성기가 HTML 하나에 모은다
+    "end_time": "",        # 리포트용 CSV 의 '잡 종료 시각'. 비우면 리포트 생성기가 자동으로 정한다
 }
 DEFAULT_CASE_DIR = "testcases"
 DEFAULT_RECORD = "test_record.csv"
@@ -187,12 +191,12 @@ def _names(items):
 def _clean_vm(v):
     job = "" if v.get("job") is None else str(v.get("job")).strip()
     return {"name": "" if v.get("name") is None else str(v.get("name")).strip(),
-            "job": job or NONE_JOB, "monitors": _names(v.get("monitors"))}
+            "job": job or NONE_JOB, "monitors": _names(v.get("monitors")), "end_ref": bool(v.get("end_ref", False))}
 
 
 def _clean_case(c):
     d = {"applied": bool(c.get("applied", False))}
-    for k in ("name", "esx", "interval", "start", "stop_mode", "stop_time"):
+    for k in ("name", "esx", "interval", "start", "stop_mode", "stop_time", "desc", "group", "end_time"):
         v = c.get(k, CASE_DEFAULTS[k])
         d[k] = "" if v is None else str(v)
     if d["stop_mode"] not in ("auto", "manual", "none"):
@@ -204,7 +208,7 @@ def _clean_case(c):
         # 예전 형식(PVM, SVM 칸): VM 2대로 바꾼다. 모니터링 대상 PVM, SVM 은 그 VM 의 모니터링, ESX 는 ESX 모니터링
         mons = [m for m in (c.get("monitors") or []) if isinstance(m, dict) and m.get("name")]
         d["vms"] = [{"name": str(c.get(nk) or "").strip(), "job": str(c.get(jk) or "").strip() or NONE_JOB,
-                     "monitors": _names([m for m in mons if role in (m.get("targets") or [])])}
+                     "monitors": _names([m for m in mons if role in (m.get("targets") or [])]), "end_ref": False}
                     for role, nk, jk in (("PVM", "pvm", "pvm_job"), ("SVM", "svm", "svm_job"))]
         d["esx_monitors"] = _names([m for m in mons if "ESX" in (m.get("targets") or [])])
     return d
@@ -280,10 +284,14 @@ def next_vm_number(c, prefix="ev"):
     return max(nums) + 1 if nums else len(c.get("vms") or []) + 1
 
 
+def new_vm(name=""):
+    return {"name": name, "job": NONE_JOB, "monitors": [], "end_ref": False}
+
+
 def new_case(esx="", start="", count=2, prefix="ev"):
-    return {"applied": False, "name": "", "esx": esx,
-            "vms": [{"name": vm_name(esx, k + 1, prefix), "job": NONE_JOB, "monitors": []} for k in range(count)],
-            "esx_monitors": [], "interval": "", "start": start, "stop_mode": "auto", "stop_time": ""}
+    return {"applied": False, "name": "", "esx": esx, "vms": [new_vm(vm_name(esx, k + 1, prefix)) for k in range(count)],
+            "esx_monitors": [], "interval": "", "start": start, "stop_mode": "auto", "stop_time": "",
+            "desc": "", "group": "", "end_time": ""}
 
 
 def rename_vms_for_esx(c, old, new, prefix="ev"):
@@ -511,6 +519,23 @@ def parse_dt(text):
 
 def fmt_dt(d):
     return d.strftime("%Y-%m-%d %H:%M:%S")
+
+
+AUTO_WORDS = ("", "자동", "auto", "-")
+
+
+def parse_end(text):
+    """리포트용 잡 종료 시각. 비우거나 '자동' 이면 None(리포트 생성기가 정함). 초까지 쓸 수 있다."""
+    t = (text or "").strip()
+    if t.lower() in AUTO_WORDS:
+        return None
+    t = t.replace("/", "-")
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+        try:
+            return dt.datetime.strptime(t, fmt)
+        except ValueError:
+            continue
+    raise ValueError("시각 형식이 맞지 않음: '%s' (예: 2026-11-09 21:30:00, 비우면 자동)" % text)
 
 
 def fmt_short(d):
@@ -925,7 +950,7 @@ def build_blocks(entries, settings):
 
 # ------------------------------------------------------------------ 기록
 RECORD_HEADER = ["테스트 케이스 이름", "생성 시각", "ESX 호스트", "VM 구성", "잡 시작(KST)", "간격", "모니터링",
-                 "모니터링 시작(KST)", "모니터링 중지(KST)"]
+                 "모니터링 시작(KST)", "모니터링 중지(KST)", "설명", "테스트 그룹", "잡 종료(리포트)", "종료 기준 VM"]
 LOG_HEADER = ["테스트 케이스 이름", "생성 시각", "구분", "대상", "실행 위치", "명령어 명", "App명", "설명", "실행 시각(KST)",
               "crontab 시각 기준", "명령", "crontab 줄", "ESX 호스트", "VM 구성", "잡 시작(KST)", "간격", "모니터링",
               "모니터링 시작(KST)", "모니터링 중지(KST)"]
@@ -999,6 +1024,93 @@ def append_csv(path, header, rows, backup_dir=None, now=None):
     return added, keep
 
 
+# ------------------------------------------------------------------ 리포트용 케이스 CSV (성능 리포트 생성기의 케이스 정보 파일)
+REPORT_HEADER = ["테스트 그룹", "케이스명", "설명", "호스트 이름", "잡 시작 시각", "잡 종료 시각", "VM", "종료 기준 VM"]
+REPORT_PREFIX = "perfreport_cases_"
+
+
+def report_vms(c):
+    """리포트에 넣을 VM: 잡이나 모니터링을 지정한 VM. crontab 에 등록하는 VM 과 같다."""
+    return [v["name"] for v in (c.get("vms") or [])
+            if v.get("name") and ((v.get("job") or NONE_JOB) != NONE_JOB or v.get("monitors"))]
+
+
+def report_end_refs(c):
+    """종료 기준 VM: 종료 기준으로 지정한 VM 가운데 리포트에 넣는 VM."""
+    names = set(report_vms(c))
+    return [v["name"] for v in (c.get("vms") or []) if v.get("end_ref") and v.get("name") in names]
+
+
+def report_rows(cases, sched, picks, baseline=None):
+    """리포트용 케이스 CSV 의 행. picks: 저장할 케이스 순번(표 순서). baseline: 첫 줄(리포트 생성기의 비교 기준)에 둘 순번.
+    (행 목록, 오류 목록, 경고 목록) 반환. 오류가 있으면 저장하지 않는다."""
+    order = list(picks)
+    if baseline in order:
+        order.remove(baseline)
+        order.insert(0, baseline)
+    rows, errors, warnings = [], [], []
+    names = [(cases[i].get("name") or "").strip() for i in order]
+    for n in sorted(set(x for x in names if x and names.count(x) > 1)):
+        errors.append("케이스 이름 중복 '%s'. 리포트 생성기는 같은 이름의 케이스를 읽지 못한다" % n)
+    for i in order:
+        c, s = cases[i], (sched[i] if i < len(sched) else {})
+        name = (c.get("name") or "").strip()
+        label = name or "%d번째 케이스" % (i + 1)
+        if not name:
+            errors.append("%s: 케이스 이름이 비어 있음" % label)
+        if not (c.get("esx") or "").strip():
+            errors.append("%s: ESX 호스트가 비어 있음 (리포트 생성기의 필수 열 '호스트 이름')" % label)
+        job = s.get("job")
+        if job is None:
+            errors.append("%s: 잡 시작 시각을 알 수 없음 %s" % (label, s.get("start_error") or ""))
+        end = ""
+        try:
+            e = parse_end(c.get("end_time"))
+        except ValueError as ex:
+            errors.append("%s: 잡 종료 %s" % (label, ex))
+            e = None
+        if e is not None:
+            if job is not None and e <= job:
+                errors.append("%s: 잡 종료 %s 가 잡 시작 %s 보다 빠르거나 같음" % (label, fmt_dt(e), fmt_dt(job)))
+            end = fmt_dt(e)
+        vms = report_vms(c)
+        if not vms:
+            warnings.append("%s: 잡이나 모니터링을 지정한 VM 이 없어 VM 열을 비움. 리포트 생성기가 호스트 이름으로 VM 을 찾는다" % label)
+        left = [v["name"] for v in (c.get("vms") or []) if v.get("end_ref") and v.get("name") and v["name"] not in vms]
+        if left:
+            warnings.append("%s: 종료 기준 VM %s 는 잡과 모니터링이 없어 리포트 VM 에 들어가지 않으므로 종료 기준에서도 뺌"
+                            % (label, ", ".join(left)))
+        rows.append([c.get("group", ""), name, c.get("desc", ""), (c.get("esx") or "").strip(),
+                     fmt_dt(job) if job else "", end, ";".join(vms), ";".join(report_end_refs(c))])
+    return rows, errors, warnings
+
+
+def write_report_csv(path, rows, backup_dir=None, now=None):
+    """리포트용 케이스 CSV 를 UTF-8(BOM) 으로 저장한다. 같은 이름의 파일이 있으면 backup_dir 에
+    <시각>_before_overwrite_<파일 이름> 으로 복사한 뒤 쓴다. 복사한 경로 또는 None 반환."""
+    d = os.path.dirname(os.path.abspath(path))
+    os.makedirs(d, exist_ok=True)
+    keep = None
+    if os.path.exists(path) and backup_dir:
+        os.makedirs(backup_dir, exist_ok=True)
+        keep = os.path.join(backup_dir, "%s_before_overwrite_%s" % ((now or dt.datetime.now()).strftime("%Y%m%d%H%M%S"),
+                                                                    os.path.basename(path)))
+        shutil.copy2(path, keep)
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(REPORT_HEADER)
+    w.writerows(rows)
+    try:
+        _atomic_write(os.path.abspath(path), buf.getvalue(), "utf-8-sig")
+    except OSError:
+        try:                                # 엑셀이 파일을 열고 있어 바꾸지 못하면 임시 파일을 남기지 않는다
+            os.remove(os.path.abspath(path) + ".tmp")
+        except OSError:
+            pass
+        raise
+    return keep
+
+
 def write_records(settings, cases, sched, entries, run_cmds, gen_time, backup_dir=None):
     """테스트 기록 CSV 에 케이스마다 한 행 추가, 로그 폴더에 testcaselogging-<년월일시분초>.csv 저장."""
     gen_text = fmt_dt(gen_time)
@@ -1014,7 +1126,8 @@ def write_records(settings, cases, sched, entries, run_cmds, gen_time, backup_di
         has_mon = case_has_monitors(c)
         rec_rows.append([name, gen_text, c.get("esx", ""), format_vms(c), fmt_dt(s["job"]) if s["job"] else "",
                          c.get("interval", ""), format_case_monitors(c) if has_mon else "",
-                         fmt_dt(s["mon_start"]) if (has_mon and s["mon_start"]) else "", _stop_text(c, s)])
+                         fmt_dt(s["mon_start"]) if (has_mon and s["mon_start"]) else "", _stop_text(c, s),
+                         c.get("desc", ""), c.get("group", ""), c.get("end_time", ""), ";".join(report_end_refs(c))])
     added, keep = append_csv(settings["record_csv"], RECORD_HEADER, rec_rows, backup_dir=backup_dir, now=gen_time)
     log_rows = []
     for e in entries:

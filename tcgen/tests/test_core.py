@@ -266,8 +266,8 @@ class AppliedTests(TmpDir):
                                                 "stop_mode": "odd"}]}, f)
         got = core.load_cases(self.base)
         self.assertEqual(got[0]["applied"], True)
-        self.assertEqual(got[0]["vms"][0], {"name": "h1ev01", "job": "(없음)", "monitors": ["m"]})
-        self.assertEqual(got[0]["vms"][1], {"name": "", "job": "(없음)", "monitors": []})
+        self.assertEqual(got[0]["vms"][0], {"name": "h1ev01", "job": "(없음)", "monitors": ["m"], "end_ref": False})
+        self.assertEqual(got[0]["vms"][1], {"name": "", "job": "(없음)", "monitors": [], "end_ref": False})
         self.assertEqual(got[0]["stop_mode"], "auto")
         dest, copied = core.backup_settings(self.base, now=NOW)
         self.assertIn(core.CASES_FILE, copied)
@@ -455,8 +455,8 @@ class VmTests(TmpDir):
         self.assertTrue(os.path.exists(os.path.join(dest, core.CASES_FILE)), "바꾸기 전 원본을 복사해 둠")
         self.assertEqual(core.cases_file_version(self.base), core.CASES_VERSION)
         c = core.load_cases(self.base)[0]
-        self.assertEqual(c["vms"], [{"name": "esx01ev01", "job": "job_a", "monitors": []},
-                                    {"name": "esx01ev02", "job": "job_b4", "monitors": ["guest_perf"]}])
+        self.assertEqual(c["vms"], [{"name": "esx01ev01", "job": "job_a", "monitors": [], "end_ref": False},
+                                    {"name": "esx01ev02", "job": "job_b4", "monitors": ["guest_perf"], "end_ref": False}])
         self.assertEqual(c["esx_monitors"], ["host_mon"])
         self.assertIsNone(core.upgrade_cases_file(self.base), "이미 새 형식이면 다시 바꾸지 않음")
 
@@ -475,6 +475,8 @@ class RecordTests(TmpDir):
         self.assertEqual(rows[1][1], "2026-11-09 15:30:12")
         self.assertEqual(rows[1][3], "esx01ev01=job_a, esx01ev02=(없음)")
         self.assertEqual(rows[1][6], "esx01ev01:guest_perf, esx01ev02:guest_perf, esx01:host_mon")
+        h = core.RECORD_HEADER
+        self.assertEqual([rows[1][h.index(k)] for k in ("설명", "테스트 그룹", "잡 종료(리포트)", "종료 기준 VM")], ["", "", "", ""])
         self.assertTrue(os.path.basename(r1["log"]) == "testcaselogging-20261109153012.csv")
         log = self.read(r1["log"])
         self.assertEqual(log[0], core.LOG_HEADER)
@@ -513,6 +515,119 @@ class RecordTests(TmpDir):
             f.write(b"DRM\x00\x01\x02binary")
         with self.assertRaises(ValueError):
             core.generate([case("A", "2026-11-20 00:00:00")], RUN, MON, self.settings, now=NOW)
+
+
+class ReportTests(TmpDir):
+    """성능 리포트 생성기용 케이스 CSV."""
+
+    def make(self):
+        def vm(name, job="(없음)", monitors=(), end_ref=False):
+            return {"name": name, "job": job, "monitors": list(monitors), "end_ref": end_ref}
+        a = core._clean_case({"name": "TC-a", "esx": "esx01", "start": "2026-11-20 00:00:00", "interval": "12:00",
+                              "desc": "기준, \"기본\" 설정", "group": "tuning",
+                              "vms": [vm("esx01ev01", "job_a", end_ref=True), vm("esx01ev02", "job_a"),
+                                      vm("esx01ev03", monitors=["guest_perf"]), vm("esx01ev04", end_ref=True)]})
+        b = core._clean_case({"name": "TC-b", "esx": "esx01", "start": "", "interval": "12:00", "desc": "튜닝 적용",
+                              "group": "tuning", "end_time": "2026-11-20 21:30:15",
+                              "vms": [vm("esx01ev01", "job_b4"), vm("esx01ev02", "job_b4")]})
+        c = core._clean_case({"name": "TC-c", "esx": "esx02", "start": "", "interval": "12:00", "vms": [vm("esx02ev01")]})
+        cs = [a, b, c]
+        core.recalc_starts(cs)
+        return cs, core.case_schedule(cs, 5, 10)
+
+    def test_defaults_for_old_data(self):
+        c = core._clean_case({"name": "X", "esx": "esx01", "vms": [{"name": "esx01ev01", "job": "job_a", "monitors": []}]})
+        self.assertEqual((c["desc"], c["group"], c["end_time"]), ("", "", ""))
+        self.assertIs(c["vms"][0]["end_ref"], False)
+        n = core.new_case("esx01", "2026-11-20 00:00:00")
+        self.assertEqual([v["end_ref"] for v in n["vms"]], [False, False])
+        self.assertEqual((n["desc"], n["group"], n["end_time"]), ("", "", ""))
+
+    def test_parse_end(self):
+        for t in ("", "  ", "자동", "auto", "AUTO", "-"):
+            self.assertIsNone(core.parse_end(t))
+        self.assertEqual(core.parse_end("2026/11/20 21:30"), dt.datetime(2026, 11, 20, 21, 30))
+        self.assertEqual(core.parse_end("2026-11-20 21:30:15"), dt.datetime(2026, 11, 20, 21, 30, 15), "초까지 쓸 수 있음")
+        with self.assertRaises(ValueError):
+            core.parse_end("11-20 21:30")
+
+    def test_rows_order_columns(self):
+        cs, sched = self.make()
+        rows, errors, warnings = core.report_rows(cs, sched, [0, 1], baseline=1)
+        self.assertEqual(errors, [])
+        self.assertEqual([r[1] for r in rows], ["TC-b", "TC-a"], "비교 기준 케이스를 첫 줄에, 나머지는 표 순서")
+        a = dict(zip(core.REPORT_HEADER, rows[1]))
+        self.assertEqual(a, {"테스트 그룹": "tuning", "케이스명": "TC-a", "설명": "기준, \"기본\" 설정", "호스트 이름": "esx01",
+                             "잡 시작 시각": "2026-11-20 00:00:00", "잡 종료 시각": "",
+                             "VM": "esx01ev01;esx01ev02;esx01ev03", "종료 기준 VM": "esx01ev01"})
+        b = dict(zip(core.REPORT_HEADER, rows[0]))
+        self.assertEqual((b["잡 시작 시각"], b["잡 종료 시각"]), ("2026-11-20 12:00:00", "2026-11-20 21:30:15"),
+                         "잡 시작은 계산한 시각, 잡 종료는 입력한 시각")
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("esx01ev04", warnings[0], "잡과 모니터링이 없는 VM 은 종료 기준에서 빼고 경고")
+        rows, errors, warnings = core.report_rows(cs, sched, [0, 1, 2])
+        self.assertEqual([r[1] for r in rows], ["TC-a", "TC-b", "TC-c"], "비교 기준을 고르지 않으면 표 순서")
+        self.assertEqual(rows[2][6], "")
+        self.assertTrue(any("TC-c" in w and "VM 열을 비움" in w for w in warnings))
+
+    def test_rows_errors(self):
+        cs, sched = self.make()
+        cs[1]["end_time"] = "2026-11-20 11:00:00"
+        cs[2]["esx"] = ""
+        _, errors, _ = core.report_rows(cs, sched, [1, 2])
+        self.assertTrue(any("TC-b" in e and "잡 시작" in e for e in errors), "잡 종료가 잡 시작보다 빠르면 오류")
+        self.assertTrue(any("TC-c" in e and "ESX 호스트" in e for e in errors), "호스트 이름이 없으면 오류")
+        cs, sched = self.make()
+        cs[2]["name"] = "TC-a"
+        _, errors, _ = core.report_rows(cs, sched, [0, 2])
+        self.assertTrue(any("중복" in e for e in errors), "같은 이름 케이스는 오류")
+        cs[0]["start"] = "bad"
+        _, errors, _ = core.report_rows(cs, core.case_schedule(cs, 5, 10), [0])
+        self.assertTrue(any("잡 시작 시각을 알 수 없음" in e for e in errors))
+
+    def test_write_and_backup(self):
+        cs, sched = self.make()
+        rows, _, _ = core.report_rows(cs, sched, [0, 1])
+        p = os.path.join(self.base, "out", "perfreport_cases_x.csv")
+        bk = os.path.join(self.base, "backup")
+        self.assertIsNone(core.write_report_csv(p, rows, backup_dir=bk, now=NOW))
+        with open(p, "rb") as f:
+            self.assertTrue(f.read().startswith(b"\xef\xbb\xbf"), "UTF-8 BOM")
+        with open(p, encoding="utf-8-sig", newline="") as f:
+            got = list(csv.reader(f))
+        self.assertEqual(got[0], core.REPORT_HEADER)
+        self.assertEqual(got[1:], rows, "쉼표와 따옴표가 든 설명도 그대로 읽힘")
+        keep = core.write_report_csv(p, rows[:1], backup_dir=bk, now=NOW)
+        self.assertTrue(os.path.basename(keep).startswith("20261109153012_before_overwrite_"), "덮어쓰기 전 파일을 복사해 둠")
+        with open(keep, encoding="utf-8-sig", newline="") as f:
+            self.assertEqual(len(list(csv.reader(f))), 3)
+        locked = os.path.join(self.base, "out", "locked.csv")
+        os.makedirs(locked)                 # 바꿀 수 없는 대상 (엑셀이 연 파일 대신 폴더로 시험)
+        with self.assertRaises(OSError):
+            core.write_report_csv(locked, rows)
+        self.assertFalse(os.path.exists(locked + ".tmp"), "쓰지 못하면 임시 파일을 남기지 않음")
+
+    def test_record_has_report_fields(self):
+        cs, _ = self.make()
+        core.generate(cs[:2], RUN, MON, self.settings, now=NOW)
+        with open(self.settings["record_csv"], encoding="utf-8-sig", newline="") as f:
+            rows = list(csv.reader(f))
+        h = rows[0]
+        a, b = rows[1], rows[2]
+        self.assertEqual([a[h.index(k)] for k in ("설명", "테스트 그룹", "잡 종료(리포트)", "종료 기준 VM")],
+                         ["기준, \"기본\" 설정", "tuning", "", "esx01ev01"])
+        self.assertEqual(b[h.index("잡 종료(리포트)")], "2026-11-20 21:30:15")
+
+    def test_blocks_unchanged_by_report_fields(self):
+        cs, _ = self.make()
+        plain = copy.deepcopy(cs)
+        for c in plain:
+            c.update(desc="", group="", end_time="")
+            for v in c["vms"]:
+                v["end_ref"] = False
+        r1 = core.generate(cs[:2], RUN, MON, self.settings, now=NOW, write=False)
+        r2 = core.generate(plain[:2], RUN, MON, self.settings, now=NOW, write=False)
+        self.assertEqual((r1["vm"], r1["esx"]), (r2["vm"], r2["esx"]), "리포트용 칸은 붙여넣기 블록에 영향 없음")
 
 
 class FileTests(TmpDir):
