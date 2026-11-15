@@ -142,6 +142,80 @@ class ProfileTextTests(unittest.TestCase):
         finally:
             shutil.rmtree(d, ignore_errors=True)
 
+    def test_default_profiles(self):
+        """기본 프로파일 12개: 이름과 순서, 내용이 오류 없이 읽힘, 적용 프로파일과 삭제 프로파일은 같은 키."""
+        rows = core.default_profiles()
+        self.assertEqual([r["name"] for r in rows],
+                         ["lpage_1g_on", "lpage_1g_off", "halt_in_monitor_on", "halt_in_monitor_off", "latency_high", "latency_normal",
+                          "vpmc_on", "vpmc_off", "kstats_on", "kstats_off", "ht_wholecore_1", "ht_wholecore_800"])
+        self.assertEqual(len(rows), len(core.DEFAULT_PROFILES))
+        items = {}
+        for r in rows:
+            self.assertTrue(core.NAME_RE.match(r["name"]), r["name"])
+            self.assertEqual(sorted(r), ["desc", "name", "target", "text"])
+            self.assertTrue(r["desc"], r["name"])
+            got, errs = core.parse_profile_text(r["text"], r["target"])
+            self.assertEqual(errs, [], r["name"])
+            self.assertTrue(got, r["name"])
+            items[r["name"]] = got
+        self.assertEqual(items["lpage_1g_on"], [("sched.mem.lpage.enable1GPage", "TRUE"), ("sched.mem.pin", "TRUE"),
+                                                ("sched.mem.prealloc", "TRUE"), ("sched.mem.prealloc.pinnedMainMem", "TRUE"),
+                                                ("sched.swap.vmxSwapEnabled", "FALSE")])
+        self.assertEqual(items["halt_in_monitor_on"], [("monitor_control.halt_in_monitor", "TRUE"), ("monitor.idleLoopSpinBeforeHalt", "TRUE"),
+                                                       ("monitor.idleLoopMinSpinUS", "50"),
+                                                       ("monitor_control.disable_pause_loop_exiting", "TRUE")])
+        self.assertEqual(items["latency_high"], [("sched.cpu.latencySensitivity", "high")])
+        self.assertEqual(items["latency_normal"], [("sched.cpu.latencySensitivity", "normal")])
+        self.assertEqual(items["vpmc_on"], [("vpmc.enable", "TRUE")])
+        self.assertEqual(items["kstats_on"], [("vmx.buildType", "stats"), ("vmx.log.keepOld", "20")])
+        self.assertEqual(items["ht_wholecore_1"], [("/Cpu/HTWholeCoreThreshold", "1")])
+        self.assertEqual(items["ht_wholecore_800"], [("/Cpu/HTWholeCoreThreshold", "800")])
+        for on, off in (("lpage_1g_on", "lpage_1g_off"), ("halt_in_monitor_on", "halt_in_monitor_off"), ("vpmc_on", "vpmc_off"),
+                        ("kstats_on", "kstats_off")):
+            self.assertEqual([k for k, _ in items[on]], [k for k, _ in items[off]], "적용과 삭제는 같은 키: %s" % on)
+            self.assertTrue(all(v == "" for _, v in items[off]), "삭제 프로파일의 값은 모두 비어 있음: %s" % off)
+            self.assertTrue(all(v != "" for _, v in items[on]), on)
+        self.assertEqual([r["name"] for r in rows if r["target"] == "ESX"], ["ht_wholecore_1", "ht_wholecore_800"])
+        self.assertIsNot(core.default_profiles()[0], rows[0], "호출할 때마다 새 사전")
+
+    def test_default_profiles_seed_and_add(self):
+        d = tempfile.mkdtemp(prefix="tcgen_prof_")
+        try:
+            self.assertEqual(core.load_profiles(d), [], "seed 를 주지 않으면 빈 목록")
+            self.assertFalse(os.path.exists(os.path.join(d, core.PROFILES_FILE)), "seed 를 주지 않으면 파일을 만들지 않음")
+            self.assertEqual(core.load_profiles(d, seed=True), core.default_profiles(), "처음 실행: 기본 프로파일로 채움")
+            self.assertEqual(core.load_profiles(d), core.default_profiles(), "채운 내용을 profiles.json 에 저장")
+            core.save_profiles(d, [])
+            self.assertEqual(core.load_profiles(d, seed=True), [], "파일이 있으면 비어 있어도 다시 채우지 않음")
+            rows = [dict(PROF[1]), {"name": "vpmc_on", "target": "VM", "text": "vpmc.enable = FALSE", "desc": "고친 내용"}]
+            added = core.add_default_profiles(rows)
+            self.assertEqual(len(added), len(core.DEFAULT_PROFILES) - 1)
+            self.assertNotIn("vpmc_on", added)
+            self.assertEqual([r["name"] for r in rows[:2]], ["pin", "vpmc_on"], "있던 행은 자리 그대로")
+            self.assertEqual(rows[1]["text"], "vpmc.enable = FALSE", "이름이 같은 행은 내용을 덮어쓰지 않음")
+            self.assertEqual([r["name"] for r in rows[2:]], added, "없는 이름만 끝에 추가")
+            self.assertEqual(core.add_default_profiles(rows), [], "두 번째에는 추가할 것이 없음")
+            self.assertEqual(len(rows), len(core.DEFAULT_PROFILES) + 1)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_default_profiles_go_into_a_plan(self):
+        """기본 프로파일을 케이스에 고르면 plan 의 AH, AV 줄에 키와 값이 그대로 들어간다(삭제는 빈 값)."""
+        c = case("d1", vms=[vm("esx01ev01", "job_a", profiles=["lpage_1g_on", "halt_in_monitor_off", "latency_normal", "vpmc_on",
+                                                                 "kstats_off"])], esx_profiles=["ht_wholecore_800"])
+        res = gen([c], prof=core.default_profiles())
+        self.assertEqual(res["errors"], [])
+        for line in ("AH 001 /Cpu/HTWholeCoreThreshold=800", "AV 001 esx01ev01 sched.mem.lpage.enable1GPage=TRUE",
+                     "AV 001 esx01ev01 sched.mem.pin=TRUE", "AV 001 esx01ev01 sched.swap.vmxSwapEnabled=FALSE",
+                     "AV 001 esx01ev01 monitor_control.halt_in_monitor=", "AV 001 esx01ev01 monitor.idleLoopMinSpinUS=",
+                     "AV 001 esx01ev01 sched.cpu.latencySensitivity=normal", "AV 001 esx01ev01 vpmc.enable=TRUE",
+                     "AV 001 esx01ev01 vmx.buildType=", "AV 001 esx01ev01 vmx.log.keepOld="):
+            self.assertIn(line + "\n", res["plan"])
+        self.assertEqual(len([x for x in res["plan"].split("\n") if x.startswith("AV 001 ")]), 5 + 4 + 1 + 1 + 2)
+        on_off = gen([case("d2", vms=[vm("esx01ev01", "job_a", profiles=["lpage_1g_on", "lpage_1g_off"])])], prof=core.default_profiles())
+        self.assertEqual(on_off["errors"], [])
+        self.assertIn("AV 001 esx01ev01 sched.mem.pin=\n", on_off["plan"], "적용과 삭제를 함께 고르면 표에서 아래쪽인 삭제 프로파일의 값")
+
 
 class ProcNameTests(unittest.TestCase):
     def test_pattern_escapes_regex_characters(self):
@@ -326,7 +400,7 @@ class PlanTests(unittest.TestCase):
         res = gen(self.two(), st=settings(vm_user="tester", esx_addr="esx01=10.0.0.11;esx09=10.0.0.19", jump_log_dir="/data/log"))
         self.assertEqual(res["errors"], [])
         want = """TCGEN-PLAN 2
-VER 2.0
+VER 2.1
 RUNID 20261116-143000
 LOGDIR /data/log
 GEN 2026-11-16 14:30:00
@@ -408,7 +482,7 @@ END 002
             self.assertEqual(core.gz_b64_decode(lines[a + 1:b]), data)
             self.assertIn(hashlib.sha256(data).hexdigest(), res[key])
             self.assertIn("sh \\$D/tcrun %s \\$R/plan < /dev/null" % action, res[key])
-            self.assertIn('if [ "\\$V" = "2.0" ]; then', res[key])
+            self.assertIn('if [ "\\$V" = "2.1" ]; then', res[key])
         self.assertEqual(gen(self.two())["run"], res["run"], "같은 입력이면 블록이 매번 같음")
         self.assertEqual(gen(self.two())["setup"], res["setup"])
 
@@ -538,7 +612,7 @@ class SettingsAndDataTests(unittest.TestCase):
         return snap
 
     def test_names_differ_from_v1(self):
-        self.assertEqual(core.VERSION, "2.0")
+        self.assertEqual(core.VERSION, "2.1")
         for k in self.keys:
             os.environ.pop(k, None)
         self.assertEqual(os.path.basename(core.default_data_dir()), "tcgen2_data")

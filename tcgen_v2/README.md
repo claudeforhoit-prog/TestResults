@@ -1,15 +1,20 @@
-# 테스트 실행 명령 생성기 (tcgen) v2.0
+# 테스트 실행 명령 생성기 (tcgen) v2.1
 
 > 이 생성기를 고치거나 AI 로 다시 만들 때는 `DEVELOPER.md`(구조, 설계 규칙, plan 형식, 시험)를 먼저 읽는다.
 
 테스트 케이스 표를 입력하면 점프 VM 터미널에 붙여넣을 블록을 만든다.
 사용자는 명령과 케이스를 화면에 입력하고 [명령어 생성] 을 누른 뒤, 만들어진 블록을 복사해 붙여넣는다.
 
-v2.0 은 v1.4 와 따로 설치하고 따로 실행한다. 프로그램 이름, 데이터 폴더, 설정 폴더가 모두 다르다. v1.4 는 지우지 않고 그대로 둔다(13절).
+v2 는 v1.4 와 따로 설치하고 따로 실행한다. 프로그램 이름, 데이터 폴더, 설정 폴더가 모두 다르다. v1.4 는 지우지 않고 그대로 둔다(13절).
+
+| 판 | 달라진 것 |
+| :-- | :-- |
+| v2.0 | 순서 실행, 설정 프로파일 적용, 점프 VM 로그 |
+| v2.1 | 탭 3 에 기본 프로파일 12개와 [기본 프로파일 추가] 버튼 추가(7.4절). 진행 방식과 블록의 동작은 v2.0 과 같다. 판 번호가 바뀌었으므로 점프 VM 에 A 블록을 한 번 다시 붙여넣는다 |
 
 ## 1. v1.4 와 달라진 것
 
-| 항목 | v1.4 | v2.0 |
+| 항목 | v1.4 | v2 |
 | :-- | :-- | :-- |
 | 진행 방식 | 시각 지정 한 가지 | 순서 실행(기본값)과 시각 지정 중에서 고른다 |
 | 다음 케이스로 넘어가는 시점 | 사용자가 케이스마다 잡 시작 시각과 간격을 입력한다 | 순서 실행: 점프 VM 이 잡의 프로세스가 끝난 것을 확인한 뒤 다음 케이스를 시작한다. 시각을 입력하지 않는다 |
@@ -57,7 +62,7 @@ PyInstaller 설치 단계에서 내려받기가 실패하면, 빌드 스크립�
 | `settings.json` | 설정 영역의 값(5.1절, 7.1절)과 화면에 없는 값(7.1절의 두 번째 표) |
 | `run_commands.csv` | 탭 1 실행 명령 목록 |
 | `monitor_commands.csv` | 탭 2 모니터링 명령 목록 |
-| `profiles.json` | 탭 3 설정 프로파일 |
+| `profiles.json` | 탭 3 설정 프로파일. 파일이 없으면 처음 실행 때 기본 프로파일 12개로 만든다(7.4절) |
 | `test_cases.json` | 탭 4 테스트 케이스 표와 적용 체크 상태 |
 | `testcases\test_record.csv` | 테스트 기록 CSV 기본 위치 |
 | `testcases\testcaselogging-년월일시분초.csv` | 생성할 때마다 만드는 로그 (기본 위치) |
@@ -73,13 +78,13 @@ PyInstaller 설치 단계에서 내려받기가 실패하면, 빌드 스크립�
 
 ### 3.2 v1 의 데이터 가져오기
 
-v2.0 을 처음 실행할 때 `tcgen2_data` 에 데이터가 없고 v1 의 데이터 폴더에 데이터가 있으면, 아래 네 파일을 `tcgen2_data` 로 복사하고 안내 창을 한 번 보인다.
+v2 를 처음 실행할 때 `tcgen2_data` 에 데이터가 없고 v1 의 데이터 폴더에 데이터가 있으면, 아래 네 파일을 `tcgen2_data` 로 복사하고 안내 창을 한 번 보인다.
 
 - 복사하는 파일: `settings.json`, `run_commands.csv`, `monitor_commands.csv`, `test_cases.json`
 - v1 의 데이터 폴더: `%APPDATA%\tcgen\config.json` 에 적힌 폴더. 그 파일이 없으면 `C:\Users\<계정>\tcgen_data`
 - v1 의 폴더와 파일은 읽기만 한다. 내용도 수정 시각도 그대로 둔다.
 - 테스트 기록과 로그(`testcases\`), 백업(`backup\`)은 복사하지 않는다.
-- v1 설정의 테스트 기록 CSV 나 로그 폴더가 v1 데이터 폴더 안을 가리키면 `tcgen2_data` 의 같은 위치로 고쳐 저장한다. v2.0 이 v1 폴더에 기록하지 않게 하기 위해서다. v1 데이터 폴더 밖의 경로는 그대로 두므로, 그 경우 v1.4 와 v2.0 이 같은 기록 파일에 이어 쓴다.
+- v1 설정의 테스트 기록 CSV 나 로그 폴더가 v1 데이터 폴더 안을 가리키면 `tcgen2_data` 의 같은 위치로 고쳐 저장한다. v2 가 v1 폴더에 기록하지 않게 하기 위해서다. v1 데이터 폴더 밖의 경로는 그대로 두므로, 그 경우 v1.4 와 v2.0 이 같은 기록 파일에 이어 쓴다.
 - v1 데이터에는 진행 방식과 프로세스 이름이 없다. 진행 방식은 순서 실행이 되고, 프로세스 이름은 탭 1 에서 입력한다.
 
 ## 4. 진행 방식
@@ -135,7 +140,7 @@ A 블록이 점프 VM 의 `~/.tcgen/` 에 설치하는 파일은 다음과 같�
 
 1. 탭 1 에 실행 명령을 등록하고 `프로세스 이름` 을 적는다. 프로세스 이름은 잡이 실행되는 동안 VM 에 떠 있는 프로세스의 명령줄에 들어 있는 글자다(7.2절).
 2. 탭 2 에 모니터링 명령을 등록한다.
-3. 설정을 적용하려면 탭 3 에 설정 프로파일을 등록한다(7.4절).
+3. 설정을 적용하려면 탭 3 의 설정 프로파일을 쓴다. 기본 프로파일 12개가 들어 있고, 직접 추가할 수도 있다(7.4절).
 4. 탭 4 에 케이스를 실행할 순서대로 입력한다. VM 행마다 잡과 모니터링을 고른다. 설정을 적용할 케이스는 케이스 행의 설정 칸에서 ESX 호스트 프로파일을, VM 행의 설정 칸에서 VM 프로파일을 고른다.
 5. [명령어 생성] 을 누른다. 오류가 있으면 블록을 만들지 않고 오류 목록을 보인다.
 
@@ -437,6 +442,33 @@ Numa.LocalityWeightActionAffinity = 0
 
 프로파일을 여러 개 고르면 탭 3 의 표 순서대로 합친다. 같은 키가 겹치면 아래쪽 프로파일의 값을 쓴다.
 
+#### 기본 프로파일
+
+생성기를 처음 실행하면(데이터 폴더에 `profiles.json` 이 없으면) 탭 3 에 아래 12개가 들어 있다. 고치거나 삭제해도 된다.
+
+| 프로파일 이름 | 대상 | 설정 내용 | 뜻 |
+| :-- | :-- | :-- | :-- |
+| `lpage_1g_on` | VM | `sched.mem.lpage.enable1GPage = TRUE`, `sched.mem.pin = TRUE`, `sched.mem.prealloc = TRUE`, `sched.mem.prealloc.pinnedMainMem = TRUE`, `sched.swap.vmxSwapEnabled = FALSE` | 1GB page 키 5개 적용 |
+| `lpage_1g_off` | VM | 위 다섯 키의 값을 비움 | 1GB page 키 5개 삭제 |
+| `halt_in_monitor_on` | VM | `monitor_control.halt_in_monitor = TRUE`, `monitor.idleLoopSpinBeforeHalt = TRUE`, `monitor.idleLoopMinSpinUS = 50`, `monitor_control.disable_pause_loop_exiting = TRUE` | 유휴 vCPU 처리 키 4개 적용 |
+| `halt_in_monitor_off` | VM | 위 네 키의 값을 비움 | 유휴 vCPU 처리 키 4개 삭제 |
+| `latency_high` | VM | `sched.cpu.latencySensitivity = high` | Latency Sensitivity high |
+| `latency_normal` | VM | `sched.cpu.latencySensitivity = normal` | Latency Sensitivity normal (기본값) |
+| `vpmc_on` | VM | `vpmc.enable = TRUE` | vPMC 사용. 게스트 perf 의 하드웨어 이벤트 수집에 쓴다 |
+| `vpmc_off` | VM | `vpmc.enable` 의 값을 비움 | vPMC 키 삭제 |
+| `kstats_on` | VM | `vmx.buildType = stats`, `vmx.log.keepOld = 20` | vmx stats 빌드, vmware.log 보존 수 20 |
+| `kstats_off` | VM | 위 두 키의 값을 비움 | vmx stats 빌드 키와 로그 보존 수 키 삭제 |
+| `ht_wholecore_1` | ESX 호스트 | `/Cpu/HTWholeCoreThreshold = 1` | 호스트 옵션 Cpu.HTWholeCoreThreshold 를 1 로 변경 |
+| `ht_wholecore_800` | ESX 호스트 | `/Cpu/HTWholeCoreThreshold = 800` | 같은 옵션을 기본값 800 으로 변경 |
+
+- 이름이 `_off` 로 끝나는 프로파일은 값을 비워 둔 것이라 그 키의 줄을 vmx 에서 지운다. 키가 없는 VM 에서는 바꿀 것이 없어 VM 을 끄지 않는다.
+- `lpage_1g_on` 은 VM 의 메모리 전체 예약이 있어야 한다. 없으면 VM 이 켜지지 않는다(Broadcom 문서 Backing Guest vRAM with 1 GB Pages).
+- `latency_high` 는 CPU 와 메모리 전체 예약이 있어야 한다. 없으면 VM 이 켜지지 않는다(Broadcom 문서 Adjust Latency Sensitivity).
+- 두 경우 모두 진행 스크립트가 설정을 이전 값으로 복원한 뒤 멈춘다(5.8절). 예약 값은 이 생성기가 바꾸지 않는다.
+- [기본 프로파일 추가] 는 표에 없는 이름의 기본 프로파일만 표 끝에 추가한다. 이름이 같은 행은 고친 내용 그대로 둔다. 처음 값으로 복원하려면 그 행을 삭제한 뒤 버튼을 누른다.
+- 이미 쓰던 데이터 폴더(`profiles.json` 이 있는 폴더)에는 자동으로 넣지 않는다. [기본 프로파일 추가] 를 한 번 누른다.
+- CPU affinity, 예약, shares 는 기본 프로파일에 없다. VM 마다 값이 다르므로 직접 프로파일을 만들어 적는다.
+
 적용 방법은 다음과 같다(ESX 호스트에서 `tcgen_apply.py` 가 한다).
 
 1. 케이스의 VM 을 `vim-cmd vmsvc/getallvms` 에서 이름이 정확히 같은 줄로 찾는다. 찾지 못하거나 같은 이름이 둘 이상이면 아무것도 바꾸지 않고 멈춘다.
@@ -633,7 +665,7 @@ ESX 에서 줄을 지운 뒤에는 `/bin/echo root >> /var/spool/cron/crontabs/c
 | 출력 | 뜻과 할 일 |
 | :-- | :-- |
 | `FAILED  .../tcrun (sha256 differs. Paste block A again)` | A 블록을 붙여넣는 중에 글자가 빠졌다. A 블록을 다시 붙여넣는다 |
-| `==== tcrun on this jump VM is not installed, tcgen is 2.0` | A 블록을 붙여넣지 않았다 |
+| `==== tcrun on this jump VM is not installed, tcgen is 2.1` | A 블록을 붙여넣지 않았다 |
 | `==== plan FAILED (sha256 differs)` | P 블록이나 S 블록을 붙여넣는 중에 글자가 빠졌다. 그 블록을 다시 붙여넣는다 |
 | `==== esx01: run ... was already started on this jump VM` | 같은 S 블록을 두 번 붙여넣었다. 다시 실행하려면 다시 생성한다 |
 | `==== esx01: run ... is still running for this ESX host` | 앞의 실행이 끝나지 않았다. `tcrun status` 로 확인한다 |
@@ -682,14 +714,14 @@ Windows 에서는 셸이 필요한 시험을 건너뛴다. 전체 시험은 tcsh
 
 ## 13. v1.4 로 돌아가는 방법
 
-v2.0 은 v1.4 의 프로그램, 데이터 폴더(`tcgen_data`), 설정 폴더(`%APPDATA%\tcgen`)를 고치지 않는다. v1.4 를 그대로 다시 실행하면 된다.
+v2 는 v1.4 의 프로그램, 데이터 폴더(`tcgen_data`), 설정 폴더(`%APPDATA%\tcgen`)를 고치지 않는다. v1.4 를 그대로 다시 실행하면 된다.
 
 1. 점프 VM 에서 순서 실행이 진행 중이면 `sh ~/.tcgen/tcrun stop` 으로 멈춘다. `sh ~/.tcgen/tcrun status` 로 `running` 이 없는지 확인한다.
-2. PC 에서 v1.4 를 실행한다(`dist\tcgen\tcgen.exe` 또는 v1.4 소스 폴더의 `run_gui.bat`). v1.4 의 데이터가 v2.0 을 쓰기 전 상태 그대로 보인다. v2.0 에서 입력한 내용은 `tcgen2_data` 에만 있다.
+2. PC 에서 v1.4 를 실행한다(`dist\tcgen\tcgen.exe` 또는 v1.4 소스 폴더의 `run_gui.bat`). v1.4 의 데이터가 v2 를 쓰기 전 상태 그대로 보인다. v2 에서 입력한 내용은 `tcgen2_data` 에만 있다.
 3. 점프 VM 의 `~/.tcgen/vmssh`, `askpass`, `setpw`, `vmpw` 는 v1.4 와 같은 파일이다. v1.4 의 B 블록과 D 블록을 그대로 붙여넣을 수 있다. A 블록을 다시 붙여넣을 필요가 없다.
-4. v2.0 이 VM crontab 에 남긴 줄이 있으면 지운다. 표식이 v1.4 와 같은 `# tcgen 케이스이름 호스트` 이므로 8.5절의 명령이나 v1.4 의 D 블록으로 지운다.
+4. v2 가 VM crontab 에 남긴 줄이 있으면 지운다. 표식이 v1.4 와 같은 `# tcgen 케이스이름 호스트` 이므로 8.5절의 명령이나 v1.4 의 D 블록으로 지운다.
 
-v2.0 이 추가한 것을 지우려면 다음과 같이 한다. 지우지 않아도 v1.4 의 동작에는 영향이 없다.
+v2 가 추가한 것을 지우려면 다음과 같이 한다. 지우지 않아도 v1.4 의 동작에는 영향이 없다.
 
 | 위치 | 지울 것 |
 | :-- | :-- |
@@ -698,9 +730,9 @@ v2.0 이 추가한 것을 지우려면 다음과 같이 한다. 지우지 않아
 | 데이터스토어 | VM 폴더의 `<이름>.vmx.tcgen-<시각>` (설정을 적용하기 전의 vmx 복사본) |
 | PC | `tcgen2_data`, `%APPDATA%\tcgen2`, `dist\tcgen2` |
 
-v2.0 이 적용한 ESX 호스트 옵션과 vmx 의 키는 v1.4 로 돌아가도 그대로 남는다. 이전 값은 진행 로그의 `TCGEN-SET`, `TCGEN-HOST` 줄과 vmx 복사본에서 확인한다.
+v2 가 적용한 ESX 호스트 옵션과 vmx 의 키는 v1.4 로 돌아가도 그대로 남는다. 이전 값은 진행 로그의 `TCGEN-SET`, `TCGEN-HOST` 줄과 vmx 복사본에서 확인한다.
 
-테스트 기록 CSV 를 v1.4 와 v2.0 이 같은 파일로 쓰는 경우(3.2절), v2.0 이 머리글 끝에 추가한 열(진행 방식, 설정, 실행 ID)은 v1.4 가 이어 쓸 때 빈칸으로 남는다.
+테스트 기록 CSV 를 v1.4 와 v2 가 같은 파일로 쓰는 경우(3.2절), v2 가 머리글 끝에 추가한 열(진행 방식, 설정, 실행 ID)은 v1.4 가 이어 쓸 때 빈칸으로 남는다.
 
 ## 14. 개발 자료
 

@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-tcgen_apply.py 2.0 - apply ESXi host advanced options and VM configuration (.vmx) keys for one test case.
+tcgen_apply.py 2.1 - apply ESXi host advanced options and VM configuration (.vmx) keys for one test case.
 
 Runs ON THE ESXi HOST with the python3 that ships with ESXi. Standard library only, Python 3.5 syntax.
 The tcgen sequence runner (tcrun, on the jump VM) uploads this file to /tmp/tcgen on the host and runs it over ssh.
@@ -37,7 +37,7 @@ import subprocess
 import sys
 import time
 
-VERSION = "2.0"
+VERSION = "2.1"
 VMFS_ROOT = os.environ.get("TCGEN_VMFS_ROOT", "/vmfs/volumes")
 TMP = os.environ.get("TCGEN_TMP", "/tmp/tcgen")
 POLL = float(os.environ.get("TCGEN_POLL_SEC", "5"))

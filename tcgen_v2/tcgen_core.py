@@ -39,7 +39,7 @@ import re
 import shutil
 import sys
 
-VERSION = "2.0"
+VERSION = "2.1"
 KST_TO_UTC = dt.timedelta(hours=9)
 CHUNK = 100            # 붙여넣는 글 한 줄에 담는 명령 조각 길이(문자 수)
 NONE_JOB = "(없음)"
@@ -1281,6 +1281,51 @@ def new_profile():
     return {"name": "", "target": "VM", "text": "", "desc": ""}
 
 
+# 기본 설정 프로파일: (이름, 대상, 설명, 설정 줄). 데이터 폴더에 profiles.json 이 없으면(처음 실행) 이 목록으로 채우고,
+# 탭 3 의 [기본 프로파일 추가] 는 표에 없는 이름만 끝에 추가한다. 값을 비운 줄은 그 키를 vmx 에서 지운다는 뜻이다.
+# 이름이나 내용을 바꾸면 README 7.4절의 표와 tests/test_seq.py 를 같이 고친다.
+_LPAGE_KEYS = ("sched.mem.lpage.enable1GPage", "sched.mem.pin", "sched.mem.prealloc", "sched.mem.prealloc.pinnedMainMem",
+               "sched.swap.vmxSwapEnabled")
+_HALT_KEYS = ("monitor_control.halt_in_monitor", "monitor.idleLoopSpinBeforeHalt", "monitor.idleLoopMinSpinUS",
+              "monitor_control.disable_pause_loop_exiting")
+DEFAULT_PROFILES = (
+    ("lpage_1g_on", "VM", "1GB page 키 5개 적용 (메모리 전체 예약 필요)",
+     ("sched.mem.lpage.enable1GPage = TRUE", "sched.mem.pin = TRUE", "sched.mem.prealloc = TRUE",
+      "sched.mem.prealloc.pinnedMainMem = TRUE", "sched.swap.vmxSwapEnabled = FALSE")),
+    ("lpage_1g_off", "VM", "1GB page 키 5개 삭제", tuple("%s =" % k for k in _LPAGE_KEYS)),
+    ("halt_in_monitor_on", "VM", "유휴 vCPU 처리 키 4개 적용",
+     ("monitor_control.halt_in_monitor = TRUE", "monitor.idleLoopSpinBeforeHalt = TRUE", "monitor.idleLoopMinSpinUS = 50",
+      "monitor_control.disable_pause_loop_exiting = TRUE")),
+    ("halt_in_monitor_off", "VM", "유휴 vCPU 처리 키 4개 삭제", tuple("%s =" % k for k in _HALT_KEYS)),
+    ("latency_high", "VM", "Latency Sensitivity high (CPU, 메모리 전체 예약 필요)",
+     ("sched.cpu.latencySensitivity = high",)),
+    ("latency_normal", "VM", "Latency Sensitivity normal (기본값)", ("sched.cpu.latencySensitivity = normal",)),
+    ("vpmc_on", "VM", "vPMC 사용 (게스트 perf 하드웨어 이벤트 수집용)", ("vpmc.enable = TRUE",)),
+    ("vpmc_off", "VM", "vPMC 키 삭제", ("vpmc.enable =",)),
+    ("kstats_on", "VM", "vmx stats 빌드, vmware.log 보존 수 20", ("vmx.buildType = stats", "vmx.log.keepOld = 20")),
+    ("kstats_off", "VM", "vmx stats 빌드 키, 로그 보존 수 키 삭제", ("vmx.buildType =", "vmx.log.keepOld =")),
+    ("ht_wholecore_1", "ESX", "Cpu.HTWholeCoreThreshold = 1", ("/Cpu/HTWholeCoreThreshold = 1",)),
+    ("ht_wholecore_800", "ESX", "Cpu.HTWholeCoreThreshold = 800 (기본값)", ("/Cpu/HTWholeCoreThreshold = 800",)),
+)
+
+
+def default_profiles():
+    """기본 설정 프로파일의 목록(호출할 때마다 새 사전)."""
+    return [{"name": n, "target": t, "text": "\n".join(lines) + "\n", "desc": d} for n, t, d, lines in DEFAULT_PROFILES]
+
+
+def add_default_profiles(rows):
+    """탭 3 의 표(rows)에 이름이 없는 기본 프로파일만 끝에 추가한다. 추가한 이름의 목록을 반환한다.
+    이름이 같은 행은 내용이 달라도 그대로 둔다(사용자가 고친 내용을 덮어쓰지 않는다)."""
+    have = set((r.get("name") or "").strip() for r in rows)
+    added = []
+    for p in default_profiles():
+        if p["name"] not in have:
+            rows.append(p)
+            added.append(p["name"])
+    return added
+
+
 def _clean_profile(p):
     d = {}
     for k in PROFILE_FIELDS:
@@ -1292,11 +1337,20 @@ def _clean_profile(p):
     return d
 
 
-def load_profiles(base):
-    """탭 3 설정 프로파일 표를 불러온다. 파일이 없으면 빈 목록."""
+def load_profiles(base, seed=False):
+    """탭 3 설정 프로파일 표를 불러온다. 파일이 없으면 빈 목록.
+    seed=True 이고 파일이 없으면(처음 실행) 기본 프로파일을 저장하고 그 목록을 반환한다.
+    파일이 있으면 비어 있어도 그대로 둔다(사용자가 기본 프로파일을 지운 상태를 유지)."""
     p = os.path.join(base, PROFILES_FILE)
     if not os.path.exists(p):
-        return []
+        if not seed:
+            return []
+        rows = default_profiles()
+        try:
+            save_profiles(base, rows)
+        except OSError:
+            pass                    # 저장하지 못해도 화면에는 보인다. 다음 자동 저장 때 다시 저장한다
+        return rows
     with open(p, encoding="utf-8-sig") as f:
         data = json.load(f)
     rows = data.get("profiles", []) if isinstance(data, dict) else data

@@ -500,7 +500,7 @@ class App(object):
                 keep = bad
             self.load_msg = "%s 를 읽지 못해 빈 표로 시작함 (원래 파일: %s) %s" % (core.CASES_FILE, keep, e)
         try:
-            self.profiles[:] = core.load_profiles(self.base)
+            self.profiles[:] = core.load_profiles(self.base, seed=True)     # 파일이 없으면(처음 실행) 기본 프로파일로 채움
         except (OSError, ValueError) as e:
             self.profiles[:] = []
             bad = os.path.join(self.base, core.PROFILES_FILE)
@@ -832,6 +832,14 @@ class App(object):
         "vmx 는 바꾸기 전에 같은 폴더에 <이름>.vmx.tcgen-<시각> 으로 복사해 둔다.",
         "프로파일을 여러 개 고르면 이 표의 순서대로 합친다. 같은 키가 겹치면 아래쪽 프로파일의 값을 쓴다.",
         "VM 을 구별하는 값이나 파일 위치를 적는 키(displayName, uuid.bios, 디스크 파일 이름 등)는 넣을 수 없다.",
+        "기본 프로파일: 생성기를 처음 실행하면 이 표에 기본 프로파일 12개가 들어 있다. 1GB page 백킹 키(lpage_1g_on, lpage_1g_off), "
+        "유휴 vCPU 처리 키(halt_in_monitor_on, halt_in_monitor_off), Latency Sensitivity(latency_high, latency_normal), "
+        "vPMC(vpmc_on, vpmc_off), vmx stats 빌드(kstats_on, kstats_off), 호스트 옵션 Cpu.HTWholeCoreThreshold(ht_wholecore_1, "
+        "ht_wholecore_800)이다. 이름이 _off 로 끝나는 프로파일은 그 키를 vmx 에서 지운다. 고치거나 삭제해도 된다.",
+        "[기본 프로파일 추가] 는 표에 없는 이름의 기본 프로파일만 표 끝에 추가한다. 이름이 같은 행은 고친 내용 그대로 둔다. "
+        "처음 값으로 복원하려면 그 행을 삭제한 뒤 버튼을 누른다.",
+        "lpage_1g_on 은 VM 메모리 전체 예약이, latency_high 는 CPU 와 메모리 전체 예약이 있어야 한다. 없으면 VM 이 켜지지 않고, "
+        "진행 스크립트가 설정을 이전 값으로 복원한 뒤 멈춘다.",
     ]
     RESULT_HELP_SEQ = [
         "A. 점프 VM 최초 1회 설정: 점프 VM 터미널에 처음 한 번 붙여넣는다(생성기를 새 판으로 바꾼 뒤에도 한 번). ~/.tcgen 에 접속 "
@@ -985,6 +993,7 @@ class App(object):
         tb = self.toolbar(f)
         ttk.Button(tb, text="+ 행 추가", style="Green.TButton", command=self.add_prof_row).pack(side="left")
         ttk.Button(tb, text="삭제", command=self.del_prof_row).pack(side="left", padx=self.px(6))
+        ttk.Button(tb, text="기본 프로파일 추가", command=self.add_default_profiles).pack(side="left")
         self.help_button(tb, "3. 설정 프로파일", self.PROF_HELP)
         self.t_prof = EditableTable(f, self, cols, height=8)
         self.t_prof.rows = self.profiles
@@ -1544,6 +1553,21 @@ class App(object):
         self.autosave("profiles")
         t.refresh(i)
         t.start_edit(str(i), 0)
+
+    def add_default_profiles(self):
+        """표에 없는 이름의 기본 프로파일만 끝에 추가한다. 이름이 같은 행은 내용이 달라도 그대로 둔다."""
+        t = self.t_prof
+        t.finish_edit()
+        added = core.add_default_profiles(self.profiles)
+        if not added:
+            messagebox.showinfo(TITLE, "기본 프로파일 %d개가 이미 표에 모두 있음.\n\n"
+                                       "내용을 처음 값으로 복원하려면 그 행을 삭제한 뒤 이 버튼을 다시 누른다."
+                                % len(core.DEFAULT_PROFILES), parent=self.root)
+            return
+        self.autosave("profiles")
+        t.refresh(len(self.profiles) - len(added))
+        messagebox.showinfo(TITLE, "기본 프로파일 %d개를 표 끝에 추가함:\n%s\n\n이름이 같은 행은 그대로 두었다."
+                            % (len(added), ", ".join(added)), parent=self.root)
 
     def del_prof_row(self):
         t = self.t_prof

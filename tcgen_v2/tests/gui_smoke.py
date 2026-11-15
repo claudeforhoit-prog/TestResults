@@ -160,7 +160,7 @@ def main():
     app = appmod.App(root)
     root.geometry("%sx%s+20+40" % (os.environ.get("TCGEN_W", "1500"), os.environ.get("TCGEN_H", "900")))
     root.update()
-    check(appmod.TITLE == "테스트 실행 명령 생성기 v2.0" and root.title() == appmod.TITLE, "창 제목에 v2.0")
+    check(appmod.TITLE == "테스트 실행 명령 생성기 v2.1" and root.title() == appmod.TITLE, "창 제목에 v2.1")
     check([app.nb.tab(i, "text") for i in range(5)] == ["1. 실행 명령", "2. 모니터링 명령", "3. 설정 프로파일", "4. 테스트 케이스",
                                                         "5. 생성 결과"], "탭 5개와 순서")
     check(app.mode() == "seq" and app.v_mode.get() == "순서 실행", "진행 방식의 기본값은 순서 실행")
@@ -546,10 +546,37 @@ def main():
     check([r["proc"] for r in saved_run] == ["run_a.sh", "run_b.sh -n 4"], "프로세스 이름도 run_commands.csv 에 자동 저장")
     shot(root, app, 0, "tcgen_seq_tab1.png")
 
-    # 탭 3: 설정 프로파일 (ESX 호스트 1개, VM 2개)
+    # 탭 3: 처음 실행하면 기본 프로파일 12개가 들어 있다. [기본 프로파일 추가] 는 표에 없는 이름만 다시 추가한다.
     app.nb.select(2)
     root.update()
     tp = app.t_prof
+    defaults = [q["name"] for q in core.default_profiles()]
+    check(len(defaults) == 12 and [q["name"] for q in app.profiles] == defaults, "처음 실행: 탭 3 에 기본 프로파일 12개")
+    check([q["name"] for q in core.load_profiles(BASE)] == defaults, "기본 프로파일을 profiles.json 에 저장")
+    check(cell_of(tp, "0", "name") == "lpage_1g_on" and cell_of(tp, "10", "target") == "ESX 호스트"
+          and "sched.mem.pin = TRUE" in cell_of(tp, "0", "text"), "기본 프로파일의 이름, 대상, 설정 내용이 표에 보임")
+    shot(root, app, 2, "tcgen_seq_tab3_defaults.png")
+    n_log = len(LOG)
+    press(root, "기본 프로파일 추가")
+    check(len(app.profiles) == 12 and any(x[0] == "info" and "이미 표에 모두 있음" in x[1] for x in LOG[n_log:]),
+          "기본 프로파일이 모두 있으면 [기본 프로파일 추가] 는 아무것도 추가하지 않음")
+    app.profiles[3]["text"] = "monitor_control.halt_in_monitor = FALSE\n"        # 사용자가 고친 내용
+    tp.refresh(6)
+    app.del_prof_row()
+    check(len(app.profiles) == 11 and "vpmc_on" not in [q["name"] for q in app.profiles], "기본 프로파일 한 행 삭제")
+    n_log = len(LOG)
+    press(root, "기본 프로파일 추가")
+    check(len(app.profiles) == 12 and app.profiles[-1]["name"] == "vpmc_on"
+          and app.profiles[3]["text"] == "monitor_control.halt_in_monitor = FALSE\n"
+          and any(x[0] == "info" and "1개를 표 끝에 추가" in x[1] for x in LOG[n_log:]),
+          "[기본 프로파일 추가] 는 없는 이름만 표 끝에 추가하고 고친 행은 그대로 둠")
+    check([q["name"] for q in core.load_profiles(BASE)][-1] == "vpmc_on", "추가한 기본 프로파일 자동 저장")
+    while app.profiles:                      # 아래 흐름은 빈 표에서 시작한다
+        tp.refresh(0)
+        app.del_prof_row()
+    check(app.profiles == [] and core.load_profiles(BASE) == [], "기본 프로파일을 모두 삭제하면 빈 표로 저장")
+
+    # 탭 3: 설정 프로파일 (ESX 호스트 1개, VM 2개)
     app.add_prof_row()
     check(tp.editor is not None and tp.editor[3] == "name", "탭 3 + 행 추가 후 이름 칸 편집 상태")
     tp.editor[1].set("numa0")
