@@ -46,9 +46,10 @@ from . import palette as P
 LINES_PER_CHART = 8
 CHART_DPI = 150          # 그래프 해상도: 14 x 7.5 in → 약 2,100 x 1,100 픽셀 (본문 폭 16.5 cm 에서 약 320 ppi)
 PNG_LEVEL = 3            # PNG 압축 수준: 기본값 6 보다 빠르고 파일은 조금 크다
-DEFAULT_WIDTH_CM = 16.5  # 문서 그래프 폭 기본값 = 세로 페이지 본문 폭 (6.5 in)
+DEFAULT_WIDTH_CM = 16.5  # 문서 그래프 폭 기본값 = A4 세로 페이지 본문 폭 (좌우 여백 2.25 cm)
 MAX_WIDTH_CM = 31.5      # 컨플루언스 Word 가져오기의 기본 그림 크기 제한(Word 에 보이는 크기 1200 x 900 px) 안의 최대 폭
-A3_LANDSCAPE_CM = (42.0, 29.7)   # 가로 Letter 페이지(본문 최대 약 25.9 cm)보다 넓은 그래프는 A3 가로 페이지에 싣는다
+A4_CM = (21.0, 29.7)             # 기본 용지 (세로). Letter 는 쓰지 않는다
+A3_LANDSCAPE_CM = (42.0, 29.7)   # A4 가로 페이지(본문 최대 27.7 cm)보다 넓은 그래프는 A3 가로 페이지에 싣는다
 SUMMARY_PRIORITY = [   # 요약 표에 넣는 지표: 기존 성능 리포트의 서버별 요약 표 순서 (데이터에 있는 것만)
     'CPU|Usage (%)', 'Super Metrics|Resource-Utilization (%)', 'CPU|Co-stop (%)', 'CPU|Ready (%)',
     'CPU|Peak vCPU Co-Stop within collection cycle (%)', 'CPU|Peak vCPU Ready within collection cycle (%)',
@@ -266,17 +267,19 @@ class ChartPool:
 
 
 def _page_for(doc, width_cm):
-    """그래프 폭이 기본값(16.5 cm, 세로 페이지: 기존 리포트와 같음)보다 넓으면 가로 방향 페이지로 바꾸고,
-    그래도 본문 폭이 좁으면 좌우 여백을 줄인다. 여백을 1 cm 로 줄여도 모자라면 A3 가로 페이지로 바꾼다."""
+    """용지는 A4 가 기본이다(사용자 지시 2026-11-11). 그래프 폭이 기본값(16.5 cm) 이하면 A4 세로(좌우 여백 2.25 cm, 본문 16.5 cm),
+    더 넓으면 A4 가로로 바꾸고 좌우 여백을 최소 1 cm 까지 줄인다. 그래도 모자라면 A3 가로."""
     sec = doc.sections[0]
+    sec.page_width, sec.page_height = Cm(A4_CM[0]), Cm(A4_CM[1])
+    sec.left_margin = sec.right_margin = Cm((A4_CM[0] - DEFAULT_WIDTH_CM) / 2)
     if width_cm <= DEFAULT_WIDTH_CM + 0.01:
         return
     sec.orientation = WD_ORIENT.LANDSCAPE
-    sec.page_width, sec.page_height = sec.page_height, sec.page_width
-    if width_cm > sec.page_width / 360000 - 2.0:
+    sec.page_width, sec.page_height = Cm(A4_CM[1]), Cm(A4_CM[0])
+    if width_cm > A4_CM[1] - 2.0 + 0.01:
         sec.page_width, sec.page_height = Cm(A3_LANDSCAPE_CM[0]), Cm(A3_LANDSCAPE_CM[1])
-    if width_cm > (sec.page_width - sec.left_margin - sec.right_margin) / 360000:
-        sec.left_margin = sec.right_margin = Cm(max(1.0, (sec.page_width / 360000 - width_cm) / 2))
+    page = sec.page_width / 360000
+    sec.left_margin = sec.right_margin = Cm(max(1.0, min(2.25, (page - width_cm) / 2)))
 
 
 def _save(doc, path, log):
