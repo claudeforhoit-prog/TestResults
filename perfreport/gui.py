@@ -11,6 +11,7 @@ from . import compare as CMP
 from . import palette as P
 from . import profiles as PF
 from . import settings as settings_mod
+from . import summary as SM
 from . import roles as R
 from .metrics import ROLE_DESC
 
@@ -199,6 +200,7 @@ COLORS = dict(bg='#f3f5f8', card='#ffffff', line='#d5dbe3', head='#e8edf4', ink=
               red='#c0392b', red_d='#a93226', case='#edf3fc', sel='#cfe0fb', off='#9aa3af', dark='#2f3a48',
               tab='#e3e8ef', tab_h='#d5dce6', field='#aeb7c2')
 NO_BASE = '(기준선 없음)'
+NO_REF = '(비교 안 함)'
 KINDS = ('BM', 'VM')
 FONT = 'Malgun Gothic'
 
@@ -392,7 +394,7 @@ def build(root):
     root.minsize(1180, 740)
     apply_style(root)
     saved = settings_mod.load()
-    v = {k: tk.StringVar(value=str(saved.get('path_' + k, ''))) for k in ('cases', 'data', 'out', 'split')}
+    v = {k: tk.StringVar(value=str(saved.get('path_' + k, ''))) for k in ('cases', 'data', 'out', 'split', 'prev')}
     v.update({k: tk.StringVar() for k in ('title', 'selection')})
     core = tk.BooleanVar(value=False)
     include_un = tk.BooleanVar(value=True)
@@ -411,7 +413,9 @@ def build(root):
     count_var = tk.StringVar(value='케이스 정보 파일을 고르면 케이스가 표로 나온다')
     q = queue.Queue()
     last = {}
-    state = {'roles': {}, 'cases': [], 'rows': {}, 'edit': None, 'baselines': [], 'metric_names': [],
+    ref_bulk = tk.StringVar(value=NO_REF)
+    prev_info = tk.StringVar()
+    state = {'roles': {}, 'cases': [], 'rows': {}, 'edit': None, 'baselines': [], 'metric_names': [], 'priors': [],
              'cmp_rows': [], 'cmp_metrics': []}
     # 이전 판이 settings.json 에 둔 기준선(또는 더 옛 판의 'TAT 비교 기준')은 기준선 프로파일 '기본' 의 처음 값으로 옮긴다
     legacy = [dict(b) for b in saved.get('baselines', []) if isinstance(b, dict) and b.get('name')]
@@ -451,11 +455,33 @@ def build(root):
     path_row(1, 3, '데이터 폴더', 'data', pick_dir('data', '데이터 폴더'))
     path_row(2, 0, '결과 폴더', 'out', pick_dir('out', '결과 폴더'))
     path_row(2, 3, 'TC별 정리 폴더 (선택)', 'split', pick_dir('split', 'TC별 정리 폴더'))
+    # 이전 결과 폴더: 이전에 만든 결과 폴더(case_summary 가 있는 곳). 여러 개는 ; 로 구분. 비교 기준 케이스와 비교 리포트에 쓴다
+    ttk.Label(card, text='이전 결과 폴더 (선택)').grid(row=3, column=0, sticky='w', pady=3, padx=(0, 6))
+    ttk.Entry(card, textvariable=v['prev']).grid(row=3, column=1, columnspan=3, sticky='we')
+
+    def add_prev():
+        d = filedialog.askdirectory(title='이전 결과 폴더 (이전에 만든 결과 폴더)')
+        if d:
+            cur = [x.strip() for x in v['prev'].get().split(';') if x.strip()]
+            if d not in cur:
+                v['prev'].set(';'.join(cur + [d]))
+    ttk.Button(card, text='폴더 추가', command=add_prev).grid(row=3, column=4, sticky='w', padx=(6, 0))
+    ttk.Label(card, textvariable=prev_info, style='Hint.TLabel').grid(row=3, column=4, columnspan=2, sticky='e')
+
+    def scan_prev(*_):
+        state['priors'] = SM.scan([x.strip() for x in v['prev'].get().split(';') if x.strip()])
+        prev_info.set(f'이전 결과 케이스 {len(state["priors"])}건' if v['prev'].get().strip() else '')
+        if 'refresh_cases' in hooks:
+            hooks['refresh_cases']()
+            hooks['cmp_sync']()
 
     def save_paths(*_):
-        settings_mod.save({'path_' + k: v[k].get() for k in ('cases', 'data', 'out', 'split')})
-    for k in ('cases', 'data', 'out', 'split'):
+        settings_mod.save({'path_' + k: v[k].get() for k in ('cases', 'data', 'out', 'split', 'prev')})
+    hooks = {}
+    for k in ('cases', 'data', 'out', 'split', 'prev'):
         v[k].trace_add('write', save_paths)
+    v['prev'].trace_add('write', scan_prev)
+    scan_prev()
 
     nb = ttk.Notebook(root)
     nb.pack(fill='both', expand=True, padx=8, pady=(4, 8))
@@ -482,11 +508,13 @@ def build(root):
     # ── 탭 1: 테스트 케이스
     bar = ttk.Frame(tab1)
     bar.pack(fill='x', pady=(0, 6))
+    bar3 = ttk.Frame(tab1)
+    bar3.pack(fill='x', pady=(0, 6))
     bar2 = ttk.Frame(tab1)
     bar2.pack(fill='x', pady=(0, 8))
     COLS = (('gen', '생성', 46, 'center'), ('id', '케이스명', 140, 'w'), ('label', '설명 (수정 가능)', 180, 'w'), ('group', '테스트 그룹', 90, 'w'),
             ('host', '호스트', 80, 'w'), ('start', '잡 시작', 135, 'w'), ('end', '잡 종료', 135, 'w'), ('vms', '포함할 VM (수정 가능)', 150, 'w'),
-            ('end_refs', '종료 기준 VM', 100, 'w'), ('base', '기준선 (TAT)', 170, 'w'))
+            ('end_refs', '종료 기준 VM', 100, 'w'), ('base', '기준선 (TAT)', 170, 'w'), ('ref', '비교 기준 케이스', 190, 'w'))
     wrap = ttk.Frame(tab1)
     wrap.pack(fill='both', expand=True)
     tree = ttk.Treeview(wrap, columns=[c_[0] for c_ in COLS], show='headings', selectmode='extended')
@@ -503,7 +531,7 @@ def build(root):
     tree.grid(row=0, column=0, sticky='nsew')
     sy.grid(row=0, column=1, sticky='ns')
     sx.grid(row=1, column=0, sticky='we')
-    ttk.Label(tab1, text='생성 칸을 누르면 체크가 바뀐다. 설명 · 포함할 VM · 기준선 칸은 두 번 눌러 고친다. 체크한 케이스만 리포트를 만든다. '
+    ttk.Label(tab1, text='생성 칸을 누르면 체크가 바뀐다. 설명 · 포함할 VM · 기준선 · 비교 기준 케이스 칸은 두 번 눌러 고친다. 체크한 케이스만 리포트를 만든다. '
                          '고친 내용은 자동 저장되고 원본 파일은 바꾸지 않는다.', style='Hint.TLabel').pack(anchor='w', pady=(6, 0))
     ttk.Label(tab1, textvariable=count_var, style='Hint.TLabel').pack(anchor='w')
 
@@ -526,7 +554,7 @@ def build(root):
             tree.insert('', 'end', iid=c_['id'], tags=('on' if r['gen'] else 'off',), values=(
                 '☑' if r['gen'] else '☐', c_['id'], r['label'], c_.get('group') or '', c_.get('host') or '',
                 f'{c_["start"]:%Y-%m-%d %H:%M:%S}', '자동' if c_.get('end_auto') else f'{c_["end"]:%Y-%m-%d %H:%M:%S}',
-                r['vms'], c_.get('end_refs') or '', btxt))
+                r['vms'], c_.get('end_refs') or '', btxt, ref_text(r.get('ref', ''))))
         if state['cases']:
             count_var.set(f'케이스 {len(state["cases"])}건 중 {n}건 생성 · 기준선 지정 {sum(1 for r in state["rows"].values() if base_by_name(r.get("base", "")))}건')
 
@@ -552,7 +580,8 @@ def build(root):
         for c_ in cases:
             o = old.get(c_['id'], {}) if isinstance(old.get(c_['id']), dict) else {}
             state['rows'][c_['id']] = {'gen': bool(o.get('gen', True)), 'label': str(o.get('label', c_.get('label') or '')),
-                                       'base': str(o.get('base', '')), 'vms': str(o.get('vms', c_.get('vms') or ''))}
+                                       'base': str(o.get('base', '')), 'vms': str(o.get('vms', c_.get('vms') or '')),
+                                       'ref': str(o.get('ref', ''))}
         refresh_cases()
         cmp_sync()
         return True
@@ -571,6 +600,8 @@ def build(root):
             state['rows'][iid]['base'] = name_of_choice(val)
         elif key == 'vms':
             state['rows'][iid]['vms'] = val.strip()
+        elif key == 'ref':
+            state['rows'][iid]['ref'] = '' if ref_key(val) == iid else ref_key(val)
         save_cases()
         refresh_cases()
 
@@ -589,6 +620,8 @@ def build(root):
         key = tree['columns'][int(col[1:]) - 1]
         if key in ('label', 'vms'):
             state['edit'] = edit_cell(tree, iid, col, None, cell_done)
+        elif key == 'ref':
+            state['edit'] = edit_cell(tree, iid, col, [x for x in ref_choices() if x != iid], cell_done)
         elif key == 'base':
             state['edit'] = edit_cell(tree, iid, col, base_choices(), cell_done)
 
@@ -599,6 +632,36 @@ def build(root):
             return
         for cid in ids:
             state['rows'][cid]['base'] = name_of_choice(bulk_var.get())
+        save_cases()
+        refresh_cases()
+        tree.selection_set([i for i in ids if tree.exists(i)])
+
+    def ref_choices():
+        """비교 기준 케이스 목록: 비교 안 함 + 이번 파일의 케이스 + 이전 결과 폴더의 케이스(이름 뒤에 결과 날짜)."""
+        return [NO_REF] + [c_['id'] for c_ in state['cases']] + [p_['display'] for p_ in state['priors']]
+
+    def ref_key(text):
+        if not text or text == NO_REF:
+            return ''
+        p_ = next((x for x in state['priors'] if x['display'] == text), None)
+        return p_['key'] if p_ else text
+
+    def ref_text(key):
+        if not key:
+            return NO_REF
+        if SM.is_prior(key):
+            p_ = next((x for x in state['priors'] if x['key'] == key), None)
+            return p_['display'] if p_ else f'(찾을 수 없는 이전 결과: {os.path.splitext(os.path.basename(key))[0]})'
+        return key if any(c_['id'] == key for c_ in state['cases']) else f'{key} (없는 케이스)'
+
+    def apply_ref(all_rows):
+        ids = [c_['id'] for c_ in state['cases']] if all_rows else list(tree.selection())
+        if not ids:
+            messagebox.showinfo('비교 기준 케이스 일괄 적용', '표에서 적용할 케이스를 먼저 고르십시오. (Shift · Ctrl 로 여러 줄 선택)')
+            return
+        k = ref_key(ref_bulk.get())
+        for cid in ids:
+            state['rows'][cid]['ref'] = '' if k == cid else k        # 자기 자신은 비교 기준이 될 수 없다
         save_cases()
         refresh_cases()
         tree.selection_set([i for i in ids if tree.exists(i)])
@@ -624,11 +687,18 @@ def build(root):
     bulk_cb.pack(side='left')
     ttk.Button(bar, text='전체 케이스에 적용', style='Purple.TButton', command=lambda: apply_base(True)).pack(side='left', padx=(6, 0))
     ttk.Button(bar, text='선택한 케이스에 적용', style='Purple.TButton', command=lambda: apply_base(False)).pack(side='left', padx=(4, 0))
+    ttk.Label(bar3, text='비교 기준 케이스 일괄 적용').pack(side='left', padx=(0, 6))
+    ref_cb = ttk.Combobox(bar3, textvariable=ref_bulk, values=[NO_REF], state='readonly', width=34, postcommand=lambda: ref_cb.config(values=ref_choices()))
+    ref_cb.pack(side='left')
+    ttk.Button(bar3, text='전체 케이스에 적용', style='Purple.TButton', command=lambda: apply_ref(True)).pack(side='left', padx=(6, 0))
+    ttk.Button(bar3, text='선택한 케이스에 적용', style='Purple.TButton', command=lambda: apply_ref(False)).pack(side='left', padx=(4, 0))
+    ttk.Label(bar3, text='문서에 기준 케이스 대비 TAT 표와 phase 막대가 들어간다',
+              style='Hint.TLabel').pack(side='left', padx=10)
     ttk.Label(bar2, text='포함할 VM 일괄 적용').pack(side='left', padx=(0, 6))
     ttk.Entry(bar2, textvariable=vmf_var, width=30).pack(side='left')
     ttk.Button(bar2, text='전체 케이스에 적용', style='Purple.TButton', command=lambda: apply_vms(True)).pack(side='left', padx=(6, 0))
     ttk.Button(bar2, text='선택한 케이스에 적용', style='Purple.TButton', command=lambda: apply_vms(False)).pack(side='left', padx=(4, 0))
-    ttk.Label(bar2, text='VM 이름에 이 글자가 들어 있는 VM 만 넣는다. 쉼표로 여러 개(vm01,vm02). 비우면 탭 3 의 기본값, 기본값도 비었으면 호스트의 VM 전부',
+    ttk.Label(bar2, text='이름에 이 글자가 든 VM 만 (쉼표로 여러 개). 비우면 탭 3 기본값, 그것도 비면 전부',
               style='Hint.TLabel').pack(side='left', padx=10)
 
     # ── 탭 2: 기준선 사전 정의 (기준선 프로파일: 서버마다 하나씩 두고 바꿔 쓴다)
@@ -947,10 +1017,10 @@ def build(root):
         for r in state['cmp_rows']:
             n += bool(r['sel'])
             ctree.insert('', 'end', iid=r['id'], tags=('on' if r['sel'] else 'off',),
-                         values=('☑' if r['sel'] else '☐', n if r['sel'] else '', r['id'], r['name'], r['palette']))
+                         values=('☑' if r['sel'] else '☐', n if r['sel'] else '', ref_text(r['id']), r['name'], r['palette']))
         if select and ctree.exists(select):
             ctree.selection_set(select)
-        ids = [r['id'] for r in state['cmp_rows']]
+        ids = [r['id'] for r in state['cmp_rows'] if not SM.is_prior(r['id'])]
         cmp_pcase_cb.config(values=ids)
         if cmp_pcase.get() not in ids:
             cmp_pcase.set(next((r['id'] for r in cmp_selected()), ids[0] if ids else ''))
@@ -961,12 +1031,14 @@ def build(root):
         hold['cmp'] = True
         try:
             old = settings_mod.load().get('compare_state', {}).get(cmp_key(), {})
-            have = {c_['id'] for c_ in state['cases']}
-            rows = [dict(r) for r in old.get('rows', []) if isinstance(r, dict) and r.get('id') in have]
+            have = [c_['id'] for c_ in state['cases']] + [p_['key'] for p_ in state['priors']]
+            prev_rows = state['cmp_rows'] if state['cmp_rows'] and state.get('cmp_for') == cmp_key() else old.get('rows', [])
+            rows = [dict(r) for r in prev_rows if isinstance(r, dict) and r.get('id') in set(have)]
             known = {r['id'] for r in rows}
-            for c_ in state['cases']:
-                if c_['id'] not in known:
-                    rows.append({'id': c_['id'], 'sel': False, 'name': '', 'palette': ''})
+            for k_ in have:
+                if k_ not in known:
+                    rows.append({'id': k_, 'sel': False, 'name': '', 'palette': ''})
+            state['cmp_for'] = cmp_key()
             auto = [n for i, n in enumerate(PAL_NAMES) if i not in P.NO_AUTO]
             for i, r in enumerate(rows):
                 r['sel'] = bool(r.get('sel'))
@@ -1126,7 +1198,7 @@ def build(root):
     def cmp_spec():
         b = base_by_name(name_of_choice(cmp_base.get()))
         return {'title': cmp_title.get().strip(),
-                'cases': [{'id': r['id'], 'name': r['name'], 'palette': r['palette']} for r in cmp_selected()],
+                'cases': [{'id': r['id'], 'name': r['name'], 'palette': r['palette'], 'display': ref_text(r['id'])} for r in cmp_selected()],
                 'metrics': [{k: it[k] for k in ('metric', 'value', 'chart', 'vms')} for it in state['cmp_metrics'] if it.get('on', True)],
                 'baseline': ({'name': b['name'], 'kind': b.get('kind', ''), 'cond': b.get('cond', ''), 'note': b.get('note', ''),
                               'value': str(b.get('tat', '')).replace(',', '') or 0} if b else None),
@@ -1268,6 +1340,15 @@ def build(root):
                     miss.append(f'[탭 2 기준선] 기준선 {b["name"]} 의 TAT 가 비어 있습니다. ({cid} 에서 사용)')
                 elif not b:
                     warn.append(f'{cid}: 기준선 없음 (Degradation 을 적지 않음)')
+        refs = {}
+        for cid in only:
+            k = state['rows'][cid].get('ref', '')
+            if not k:
+                continue
+            if (SM.is_prior(k) and not any(p_['key'] == k for p_ in state['priors'])) or (not SM.is_prior(k) and k not in state['rows']):
+                miss.append(f'[탭 1 테스트 케이스] {cid}: 비교 기준 케이스 {ref_text(k)} 를 찾을 수 없습니다. 이전 결과 폴더를 확인하거나 다시 고르십시오.')
+            else:
+                refs[cid] = k
         for c_ in state['cases']:
             b = base_by_name(state['rows'][c_['id']].get('base', ''))
             if b and str(b.get('tat', '')).strip():
@@ -1278,7 +1359,8 @@ def build(root):
             spec = cmp_spec()
             if not state['cases']:
                 miss.append('[탭 4 비교 리포트] 케이스 정보 파일을 먼저 불러오십시오.')
-            miss += ['[탭 4 비교 리포트] ' + m for m in CMP.validate(spec, [c_['id'] for c_ in state['cases']] if state['cases'] else None)]
+            miss += ['[탭 4 비교 리포트] ' + m for m in CMP.validate(spec, ([c_['id'] for c_ in state['cases']] + [p_['key'] for p_ in state['priors']])
+                                                                    if state['cases'] else None)]
             if not spec['title']:
                 spec['title'] = os.path.splitext(os.path.basename(v['cases'].get()))[0] + ' 비교'
             if spec['phase_bg'] and spec['phase_case'] not in [c['id'] for c in spec['cases']]:
@@ -1294,7 +1376,8 @@ def build(root):
                   only=only, case_desc={cid: r['label'] for cid, r in state['rows'].items()}, case_baselines=bases,
                   case_vms={c_['id']: state['rows'][c_['id']]['vms'] for c_ in state['cases']      # 화면에서 고친 케이스만 (그대로면 파일의 VM 열 규칙)
                             if state['rows'][c_['id']]['vms'] and state['rows'][c_['id']]['vms'] != (c_.get('vms') or '')},
-                  vm_filter=vm_inc.get().strip() or None, make_docs=do_case, make_html=html_var.get(), compare=spec)
+                  vm_filter=vm_inc.get().strip() or None, make_docs=do_case, make_html=html_var.get(), compare=spec,
+                  case_refs=refs, prior_dirs=[x.strip() for x in v['prev'].get().split(';') if x.strip()])
         return kw, [], warn
 
     def run_args():
@@ -1366,6 +1449,7 @@ def build(root):
         else:
             subprocess.run(['xdg-open', d])
 
+    hooks.update(refresh_cases=refresh_cases, cmp_sync=cmp_sync)
     run_btn.config(command=start)
     open_btn.config(command=open_dir)
     role_btn.config(command=open_roles)
@@ -1382,7 +1466,7 @@ def build(root):
             'nb': nb, 'tabs': (tab1, tab2, tab3, tabc, tab4), 'tree': tree, 'btree': btree, 'ctree': ctree, 'mtree': mtree, 'bulk_var': bulk_var,
             'load_cases': load_cases, 'set_gen': set_gen, 'apply_base': apply_base, 'apply_vms': apply_vms, 'vmf_var': vmf_var, 'cell_done': cell_done,
             'base_add': base_add, 'base_done': base_done, 'base_del': base_del, 'run_args': run_args, 'check': check,
-            'refresh_cases': refresh_cases, 'count_var': count_var, 'pb_base': pb_base, 'pb_opt': pb_opt, 'pb_cmp': pb_cmp,
+            'refresh_cases': refresh_cases, 'count_var': count_var, 'apply_ref': apply_ref, 'ref_bulk': ref_bulk, 'ref_choices': ref_choices, 'pb_base': pb_base, 'pb_opt': pb_opt, 'pb_cmp': pb_cmp,
             'cmp': {'pal': cmp_pal, 'pal_pick': cmp_pal_pick, 'title': cmp_title, 'base': cmp_base, 'phase': cmp_phase, 'pcase': cmp_pcase, 'word': cmp_word, 'html': cmp_html,
                     'toggle': cmp_toggle, 'case_done': cmp_case_done, 'case_move': cmp_case_move, 'auto_colors': cmp_auto_colors,
                     'metric_add': cmp_metric_add, 'metric_del': cmp_metric_del, 'metric_move': cmp_metric_move,

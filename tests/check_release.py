@@ -259,6 +259,25 @@ def main():
             bad = [1 for i, (k, x) in enumerate(items) if k == 't' and not (i and items[i - 1][0] == 'p' and items[i - 1][1].text.startswith('표. ')
                                                                      and items[i - 1][1].alignment in (None, WD_ALIGN_PARAGRAPH.LEFT))]
             check('비교 리포트: 표 제목은 표 위 · 왼쪽', not bad)
+        # 이전 결과: 첫 실행이 남긴 케이스 요약을 다음 실행의 비교 기준 케이스와 비교 리포트 케이스로 쓴다
+        code5 = ("import json,sys,docx\n"
+                 "from perfreport.build import run_csv\n"
+                 "from perfreport import summary\n"
+                 "if __name__=='__main__':\n"
+                 "    old,new=sys.argv[1],sys.argv[2]\n"
+                 "    run_csv('samples/sample_cases.csv','samples/sample_data',out_dir=old,log=lambda m:None,workers=1,only=['CASE-A'],make_html=False)\n"
+                 "    p=summary.scan([old]); k=p[0]['key']\n"
+                 "    spec={'title':'prior check','cases':[{'id':k,'display':p[0]['display']},{'id':'CASE-B','name':'tB'}],'metrics':[{'metric':'TAT'},{'metric':'CPU|Usage (%)','value':'mean','chart':'bar','vms':'vm01'}],'word':True,'html':True}\n"
+                 "    rec=run_csv('samples/sample_cases.csv','samples/sample_data',out_dir=new,log=lambda m:None,workers=1,only=['CASE-B'],make_html=False,case_refs={'CASE-B':k},compare=spec)\n"
+                 "    d=docx.Document(new+'/CASE-B.docx'); t=[x for x in d.tables if x.rows[0].cells[-1].text=='차이 (%)']\n"
+                 "    c=docx.Document(new+'/prior check.docx'); cpu=[[z.text for z in r.cells] for x in c.tables if x.rows[0].cells[0].text=='케이스' and len(x.rows[0].cells)==5 for r in x.rows[1:]]\n"
+                 "    print(json.dumps({'n':len(p),'id':p[0]['id'],'ref_rows':len(t[0].rows)-1 if t else 0,'ref':t[0].rows[1].cells[2].text if t else '','cpu':cpu}))\n")
+        r5 = subprocess.run([sys.executable, '-c', code5, os.path.join(tmp, 'out_old'), os.path.join(tmp, 'out_new')], cwd=ROOT, env=env,
+                            capture_output=True, text=True, encoding='utf-8', errors='replace')
+        res = json.loads(r5.stdout.strip().splitlines()[-1]) if r5.returncode == 0 and r5.stdout.strip() else {}
+        check('이전 결과: 케이스 요약 저장과 찾기', res.get('n') == 1 and res.get('id') == 'CASE-A', str(res) + r5.stderr[-300:])
+        check('이전 결과: 비교 기준 케이스 대비 TAT 표', res.get('ref_rows') == 2 and res.get('ref') == 'CASE-A', str(res))
+        check('이전 결과: 비교 리포트에 이전 결과 케이스의 지표 통계', len(res.get('cpu') or []) == 2 and res['cpu'][0][2] == '65.20', str(res.get('cpu')))
         unit_checks(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

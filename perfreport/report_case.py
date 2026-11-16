@@ -309,7 +309,7 @@ def _gaps(t):
 
 
 def build_case(path, case, df, chart_dir, date, log=print, roles=None, include_unassigned=True,
-               palette=None, chart_width_cm=None, pool=None, phase=None, jobs=None, tat_base=None):
+               palette=None, chart_width_cm=None, pool=None, phase=None, jobs=None, tat_base=None, ref=None):
     """case: {id, label, host, start, end}. df: 이 케이스의 행만 (case 열 = case id).
     roles: {지표: (역할, 순서)}. 이 케이스 데이터에 있는 지표로 역할이 하나라도 있으면 역할 순서로 절을 나눈다.
     include_unassigned: 역할 미지정 지표를 Appendix A 에 넣을지. 역할이 없으면 기본 양식(분류별 절).
@@ -318,6 +318,7 @@ def build_case(path, case, df, chart_dir, date, log=print, roles=None, include_u
     pool: 그래프를 나눠 그릴 프로세스 풀 (없으면 순서대로 그린다).
     phase: 이 케이스에 연결된 phase 요약(phase.summarize). 있으면 phase 소요 시간 절을 넣고 시계열 그래프 배경에 phase 구간을 그린다.
     jobs: 이 케이스에 연결된 잡 정리(jobs.classify). tat_base: 이 케이스의 TAT 기준선 {'name', 'kind', 'value'(초), 'cond', 'note'} 또는 None.
+    ref: 비교 기준 케이스 {'name', 'note', 'jobs', 'phase'} 또는 None. 있으면 TAT 절에 기준 케이스 대비 표, phase 절에 두 케이스의 누적 막대.
     반환: (저장한 경로, 그래프 수, 문서 글자)."""
     from . import roles as R
     os.makedirs(chart_dir, exist_ok=True)
@@ -494,6 +495,26 @@ def build_case(path, case, df, chart_dir, date, log=print, roles=None, include_u
                            (f'기준선 조건: {tat_base["cond"]}' if tat_base.get('cond') else ''),
                            (f'기준선 비고: {tat_base["note"]}' if tat_base.get('note') and tat_base.get('note') != bn else '')])
 
+        rmains = ((ref or {}).get('jobs') or {}).get('mains') or []
+        if rmains:                                 # 비교 기준 케이스 대비 (본문). VM 은 이름 끝(예: vm01)이 같은 것끼리 짝짓는다
+            def tail(h):
+                m_ = re.search(r'([A-Za-z]+\d+)$', str(h))
+                return m_.group(1).lower() if m_ else str(h).lower()
+
+            def pair(m):
+                same = [r for r in rmains if r['code'] == m['code']] or rmains
+                return next((r for r in same if {tail(h) for h in r['hosts']} & {tail(h) for h in m['hosts']}), same[0])
+            D._sub(doc, 'TAT 와 비교 기준 케이스 대비', 2)
+            rows = []
+            for m in mains:
+                r = pair(m)
+                rows.append([', '.join(m['hosts']) or m['label'], f'{m["tat"]:,.2f}', ref['name'], ', '.join(r['hosts']) or r['label'],
+                             f'{r["tat"]:,.2f}', f'{jobs_mod.degradation(m["tat"], r["tat"]):+.2f}'])
+            table('TAT 와 비교 기준 케이스 대비', ['VM', 'TAT (s)', '비교 기준 케이스', '기준 케이스 VM', '기준 케이스 TAT (s)', '차이 (%)'], rows)
+            D._notes(doc, ['차이 = (TAT − 기준 케이스 TAT) ÷ 기준 케이스 TAT × 100, 양수는 기준 케이스보다 TAT 가 긺',
+                           'VM 짝: 이름 끝의 글자와 번호(예: vm01)가 같은 TAT 측정 잡. 없으면 기준 케이스의 첫 TAT 측정 잡',
+                           (f'비교 기준 케이스: {ref["name"]} ({ref["note"]})' if ref.get('note') else '')])
+
         def tat_tables():
             D._sub(doc, 'TAT 측정 잡', 2)
             for m in mains:
@@ -523,8 +544,13 @@ def build_case(path, case, df, chart_dir, date, log=print, roles=None, include_u
             D._notes(doc, [f'phase 합계와 TAT: {phase["total"]:,.2f} s / {main["tat"]:,.2f} s (차이 {diff:+,.2f} s, 비교 대상 {main["label"]})'
                            + (', 두 기록의 잡 수 불일치' if phase['jobs'] != len(main['jobs']) else '')])
         state['n'] += 1
+        rph = (ref or {}).get('phase')
         D._sub(doc, 'phase별 self 시간 누적', 2)
-        picture(_phase_stack(os.path.join(chart_dir, 'phase_stack.png'), [(cid, phase)]), '그림. phase별 self 시간 누적',
+        if rph:
+            D._notes(doc, [f'비교 기준 케이스 {ref["name"]}: phase 합계 {rph["total"]:,.2f} s, 이 케이스 {phase["total"]:,.2f} s '
+                           f'(차이 {(phase["total"] - rph["total"]) / rph["total"] * 100:+.2f}%)'])
+        picture(_phase_stack(os.path.join(chart_dir, 'phase_stack.png'), ([(f'{ref["name"]} (기준)', rph)] if rph else []) + [(cid, phase)]),
+                '그림. phase별 self 시간 누적' + (' (왼쪽: 비교 기준 케이스)' if rph else ''),
                 ['막대 구성: 실행 순서대로 아래부터 누적',
                  '시계열 그래프 배경: phase 구간 (교대 음영, 전체의 3% 이상 단계만 이름 표기'
                  + (', 주황 점선은 Load · Compute 경계)' if phase.get('load') else ')')])

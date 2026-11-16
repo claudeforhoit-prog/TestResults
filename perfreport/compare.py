@@ -188,15 +188,16 @@ def line_chart(path, series, ylabel, bands=None):
     return _save(fig, path)
 
 
-def build(spec, cases, meta, df, outdir, date, log=print, width_cm=None):
+def build(spec, cases, meta, df, outdir, date, log=print, width_cm=None, extra_stats=None):
     """비교 문서(docx)를 만든다. cases: 케이스 dict(jobs · phase · label 포함), meta: {케이스명: {start, end, ...}}, df: 전체 값 표.
+    extra_stats: 이전 결과 케이스의 통계 표(summary.as_case). 이전 결과 케이스의 시계열 행은 in_run=False 라 통계에 들어가지 않는다.
     반환: (저장한 경로 또는 None, 그래프 수, 문서 글자)."""
     from .build import versioned_path
     by_id = {c['id']: c for c in cases}
     sel = [dict(c, case=by_id[c['id']]) for c in spec['cases'] if c['id'] in by_id]
     auto = [cols for k, (_, cols) in enumerate(P.PALETTES) if k not in P.NO_AUTO]      # 색 계열을 정하지 않은 케이스: 자동 배정용 계열을 순서대로
     for i, c in enumerate(sel):
-        c['name'] = (c.get('name') or '').strip() or c['id']
+        c['name'] = (c.get('name') or '').strip() or c['case'].get('display') or c['id']
         c['colors'] = P.palette_colors(P.palette_index(c['palette'])) if c.get('palette') else auto[i % len(auto)]   # 색 계열 이름 또는 1부터 센 번호
     base = spec.get('baseline')
     bval = float(base['value']) if base and float(base.get('value') or 0) > 0 else None
@@ -211,6 +212,8 @@ def build(spec, cases, meta, df, outdir, date, log=print, width_cm=None):
     units = df.drop_duplicates('metric').set_index('metric')['unit'].to_dict()
     run = df[df['in_run']] if 'in_run' in df else df
     st = analyze.stats_table(run)
+    if extra_stats is not None and len(extra_stats):
+        st = analyze.pd.concat([st, extra_stats], ignore_index=True)
     n = {'k': 0}
 
     def table(t, header, rows):
@@ -233,7 +236,7 @@ def build(spec, cases, meta, df, outdir, date, log=print, width_cm=None):
     doc.add_paragraph(f'작성일: {date}')
     doc.add_heading('1. 비교 대상', level=1)
     table('비교 대상 케이스', ['표시 이름', '케이스명', '설명', '호스트', '잡 시작', '잡 종료', '실행 시간 (s)'],
-          [[c['name'], c['id'], c['case'].get('label') or '', c['case'].get('host') or '', f'{meta[c["id"]]["start"]:%Y-%m-%d %H:%M:%S}',
+          [[c['name'], c['case'].get('show_id') or c['id'], (c['case'].get('label') or '') + (' (이전 결과)' if c['case'].get('prior') else ''), c['case'].get('host') or '', f'{meta[c["id"]]["start"]:%Y-%m-%d %H:%M:%S}',
             f'{meta[c["id"]]["end"]:%Y-%m-%d %H:%M:%S}', f'{(meta[c["id"]]["end"] - meta[c["id"]]["start"]).total_seconds():,.0f}'] for c in sel])
     D._notes(doc, ['그래프 가로축의 케이스 순서와 색: 위 표의 순서, 케이스마다 색 계열 1개(같은 케이스의 VM 은 계열 안의 색으로 구분)',
                    '통계 기준: 잡 실행 구간(시작~종료 시각)의 수집값',

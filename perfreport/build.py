@@ -13,6 +13,7 @@ import pandas as pd
 import yaml
 
 from . import analyze, charts, ingest, report_case, report_docx, report_html, runwin, units
+from . import summary as summary_mod
 from . import jobs as jobs_mod
 from . import phase as phase_mod
 from . import metrics as metrics_mod
@@ -302,7 +303,7 @@ def run_csv(cases_csv, data_dir, out_dir=None, title=None, baseline=None, analys
             split_dir=None, report=True, margin_s=None, roles=None, include_unassigned=True,
             palette=None, chart_width_cm=None, workers=None, selection=None, to_gb=False, to_gbps=False,
             tat_baseline=None, tat_baseline_note='', end_ref_vms='', only=None, case_desc=None, case_baselines=None, case_vms=None, vm_filter=None,
-            make_docs=True, make_html=True, compare=None):
+            make_docs=True, make_html=True, compare=None, prior_dirs=None, case_refs=None, write_summary=True):
     """케이스 정보 CSV + 데이터 폴더 방식. 데이터 폴더의 모든 파일을 읽어 케이스마다 호스트·잡 실행 구간으로 잘라 쓴다.
     roles: 지표 역할 {지표: (역할, 순서)} 또는 역할 파일 경로. 없으면 기본 리포트 양식.
     palette: 케이스 문서 그래프의 색상 팔레트(1부터 센 번호 또는 이름, 기본 1 파랑 계열).
@@ -318,6 +319,10 @@ def run_csv(cases_csv, data_dir, out_dir=None, title=None, baseline=None, analys
     compare: 비교 리포트 설정(compare.py 의 spec: title, cases[{id, name, palette}], metrics[{metric, value, chart, vms}],
              baseline, phase_bg, phase_case, word, html). 주면 그 케이스들도 읽어 비교 문서 · 비교 HTML 을 만든다.
              only 는 케이스 리포트를 만들 케이스이고, 비교 리포트의 케이스는 compare 에서 따로 정한다.
+             compare 의 케이스 id 가 'prior:<경로>' 면 이전 결과 폴더의 케이스 요약 파일을 쓴다(summary.py).
+    prior_dirs: 이전 결과 폴더 목록(요약 파일을 찾는 곳, 화면 목록용. 실제로는 id 의 경로를 읽는다).
+    case_refs: {케이스명: 비교 기준 케이스} 케이스 리포트마다의 비교 기준. 값은 이번 케이스 정보 파일의 케이스명 또는 'prior:<경로>'.
+    write_summary: 결과 폴더의 case_summary 에 케이스 요약 파일을 남길지(기본 남김).
     case_baselines: {케이스명: 기준선} 케이스마다의 TAT 기준선. 기준선 = {'name', 'kind'(BM · VM), 'value'(초), 'cond', 'note'}.
                     없는 케이스는 tat_baseline 을 쓴다."""
     phase_files, tat_files, unknown_files = [], [], []
@@ -331,14 +336,26 @@ def run_csv(cases_csv, data_dir, out_dir=None, title=None, baseline=None, analys
         elif vm_filter and not c.get('vms'):
             c['vms'] = vm_filter_patterns(vm_filter)
     all_cases = cases            # 종료 시각 감지는 만들지 않는 케이스의 시작 시각도 경계로 쓴다
-    cmp_ids = [x['id'] for x in (compare or {}).get('cases') or []]
+    priors = {}
+    want_prior = [x['id'] for x in (compare or {}).get('cases') or [] if summary_mod.is_prior(x['id'])] \
+        + [r for r in (case_refs or {}).values() if summary_mod.is_prior(r)]
+    for key in dict.fromkeys(want_prior):
+        try:
+            priors[key] = summary_mod.load(key)
+        except (OSError, ValueError) as e:
+            raise SystemExit(f'이전 결과 파일을 읽지 못함: {key[len(summary_mod.PREFIX):]} ({e})')
+    cmp_ids = [x['id'] for x in (compare or {}).get('cases') or [] if not summary_mod.is_prior(x['id'])]
+    ref_ids = [r for k, r in (case_refs or {}).items() if r and not summary_mod.is_prior(r)]
     doc_ids = [] if not make_docs else ([c['id'] for c in cases] if only is None else [c['id'] for c in cases if c['id'] in set(only)])
     if compare:
         gone = [i for i in cmp_ids if i not in {c['id'] for c in cases}]
         if gone:
             raise SystemExit('비교 리포트의 케이스가 케이스 정보 파일에 없음: ' + ', '.join(gone))
+    gone = [r for r in ref_ids if r not in {c['id'] for c in cases}]
+    if gone:
+        raise SystemExit('비교 기준 케이스가 케이스 정보 파일에 없음: ' + ', '.join(dict.fromkeys(gone)))
     if only is not None or not make_docs or compare:
-        want = set(doc_ids) | set(cmp_ids)
+        want = set(doc_ids) | set(cmp_ids) | {r for k, r in (case_refs or {}).items() if k in set(doc_ids) and r in set(ref_ids)}
         cases = [c for c in cases if c['id'] in want]
         if not cases:
             raise SystemExit('만들 케이스가 없음: 생성할 케이스를 하나 이상 고른다.')
@@ -415,6 +432,7 @@ def run_csv(cases_csv, data_dir, out_dir=None, title=None, baseline=None, analys
            'palette': palette_mod.palette_index(palette), 'chart_width_cm': chart_width_cm, 'workers': workers,
            'selection': sel, 'to_gb': bool(to_gb), 'to_gbps': bool(to_gbps),
            'doc_cases': doc_ids, 'make_html': bool(make_html), 'compare': compare,
+           'priors': priors, 'case_refs': {k: v for k, v in (case_refs or {}).items() if v and k != v}, 'write_summary': write_summary,
            'tat_base': ({'value': float(tat_baseline), 'note': (tat_baseline_note or '').strip(), 'name': (tat_baseline_note or '').strip() or '기준선'}
                         if tat_baseline not in (None, '') and float(tat_baseline) > 0 else None),
            'output': out_dir or os.path.join(os.path.dirname(os.path.abspath(cases_csv)), 'out_' + name)}
@@ -450,7 +468,7 @@ def _build_docs(cases, meta, df, outdir, date, log, roles, include_unassigned, p
                                       df[df['case'] == c['id']], os.path.join(outdir, 'charts', _safe(c['id'])), date, log,
                                       roles=roles, include_unassigned=include_unassigned,
                                       palette=pal, chart_width_cm=width_cm, pool=pool, phase=c.get('phase'),
-                                      jobs=c.get('jobs'), tat_base=c.get('tat_base') or tat_base)
+                                      jobs=c.get('jobs'), tat_base=c.get('tat_base') or tat_base, ref=c.get('_ref'))
         out.append((dpath, k, text))
         log(f'[문서] {c["id"]}: 그래프 {k}장')
     return out
@@ -558,6 +576,16 @@ def run_job(job, base, log=print):
     try:
         doc_ids = job.get('doc_cases')
         doc_cases = cases if doc_ids is None else [c for c in cases if c['id'] in set(doc_ids)]
+        by_id = {c['id']: c for c in cases}
+        for c in doc_cases:                    # 비교 기준 케이스: 이번 파일의 케이스 또는 이전 결과 요약
+            r = (job.get('case_refs') or {}).get(c['id'])
+            if r and summary_mod.is_prior(r) and r in (job.get('priors') or {}):
+                sm = job['priors'][r]
+                c['_ref'] = {'name': sm['id'], 'note': f'이전 결과 {str(sm.get("built_at", ""))[:10]}', 'jobs': sm.get('jobs'), 'phase': sm.get('phase')}
+            elif r and r in by_id:
+                c['_ref'] = {'name': r, 'note': '', 'jobs': by_id[r].get('jobs'), 'phase': by_id[r].get('phase')}
+            if c.get('_ref'):
+                log(f'[비교 기준] {c["id"]}: {c["_ref"]["name"]}' + (f' ({c["_ref"]["note"]})' if c['_ref']['note'] else ''))
         built = _build_docs(doc_cases, meta, df, outdir, date, log, roles, include_unassigned, pal, width_cm, pool, job.get('tat_base'))
     finally:
         pool.close()
@@ -614,8 +642,17 @@ def run_job(job, base, log=print):
         from . import compare as compare_mod
         ctitle = (spec.get('title') or '').strip() or '비교 리포트'
         ids = [x['id'] for x in spec['cases']]
+        ccases, cmeta, cdf, cst = list(cases), dict(meta), df, []
+        for x in spec['cases']:                # 이전 결과 케이스: 요약 파일의 시계열 · 통계 · 잡 · phase 를 쓴다
+            if summary_mod.is_prior(x['id']) and x['id'] in (job.get('priors') or {}):
+                pc, pm, pdf_, pst = summary_mod.as_case(x['id'], job['priors'][x['id']], x.get('display'))
+                ccases.append(pc)
+                cmeta[x['id']] = pm
+                cdf = pd.concat([cdf, pdf_], ignore_index=True)
+                cst.append(pst)
         if spec.get('word', True):
-            cpath, k, ctext = compare_mod.build(spec, cases, meta, df, outdir, date, log, width_cm)
+            cpath, k, ctext = compare_mod.build(spec, ccases, cmeta, cdf, outdir, date, log, width_cm,
+                                                extra_stats=pd.concat(cst, ignore_index=True) if cst else None)
             cmp_out.append(cpath)
             n_charts += k
             for h in _scan_terms(ctext, terms):
@@ -623,8 +660,17 @@ def run_job(job, base, log=print):
                 log(f'[검사] 통제 용어 검출: {os.path.basename(cpath)}: {h}')
         if spec.get('html'):
             order = {i: n for n, i in enumerate(ids)}
-            cmp_out.append(html_for(sorted(ids, key=order.get), '', ctitle, compare_mod.file_title(ctitle)))
+            hids = [i for i in sorted(ids, key=order.get) if not summary_mod.is_prior(i)]
+            if len(hids) < len(ids):
+                log(f'[비교] HTML 에는 이번 케이스 정보 파일의 케이스만 넣는다 (이전 결과 {len(ids) - len(hids)}건은 Word 에만)')
+            if hids:
+                cmp_out.append(html_for(hids, '', ctitle, compare_mod.file_title(ctitle)))
         log(f'[비교] {ctitle}: 케이스 {len(ids)}건 · 지표 {len(spec.get("metrics") or [])}개')
+    if job.get('write_summary', True):        # 케이스 요약: 다음 리포트에서 이 결과 폴더를 '이전 결과 폴더' 로 지정하면 비교 기준으로 쓴다
+        built_at = dt.datetime.now().isoformat(timespec='seconds')
+        for c in cases:
+            summary_mod.write(outdir, c, meta[c['id']], df, stats, built_at)
+        log(f'[요약 저장] {os.path.join(outdir, summary_mod.DIRNAME)}: 케이스 {len(cases)}건')
     rec = {'job': job.get('name'), 'built_at': dt.datetime.now().isoformat(timespec='seconds'),
            'cases': case_order, 'baseline': baseline, 'metrics': len(metrics), 'values': int(len(df)),
            'charts': n_charts, 'term_violations': term_hits, 'outputs': docs + htmls + cmp_out, 'outdir': outdir,
