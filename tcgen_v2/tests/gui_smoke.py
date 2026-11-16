@@ -39,6 +39,8 @@ ASK_DIR = []                                # 폴더 선택 창 대답 (차례�
 appmod.filedialog.askdirectory = lambda **k: ASK_DIR.pop(0) if ASK_DIR else ""
 ASK_SAVE = []                               # 저장 위치 창 대답 (차례대로)
 appmod.filedialog.asksaveasfilename = lambda **k: ASK_SAVE.pop(0) if ASK_SAVE else ""
+ASK_OPEN = []                               # 파일 열기 창 대답 (차례대로)
+appmod.filedialog.askopenfilename = lambda **k: ASK_OPEN.pop(0) if ASK_OPEN else ""
 
 LOG = []
 mb = appmod.messagebox
@@ -937,24 +939,23 @@ def main():
           "v1 폴더 안을 가리키던 기록 CSV 경로는 v2 폴더로 바꿈")
     root5.destroy()
 
-    # 테스트 종류 (새 데이터 폴더에서): 케이스 표와 기록 CSV, 로그 폴더는 종류마다 따로 두고 명령과 프로파일은 같이 쓴다
+    # 테스트 케이스 파일 (새 데이터 폴더에서): 불러오기, 다른 이름으로 저장, 지정한 파일로 자동 저장, 하루 두 번 자동 백업
     core.save_config({})
-    sets_dir = os.path.join(TMP, "data_sets")
-    os.environ["TCGEN_DEFAULT_DATA_DIR"] = sets_dir
+    cf_dir = os.path.join(TMP, "data_casefile")
+    ext = os.path.join(TMP, "my_case_files")
+    os.makedirs(ext)
+    os.environ["TCGEN_DEFAULT_DATA_DIR"] = cf_dir
     os.environ["TCGEN_V1_DATA_DIR"] = os.path.join(TMP, "no_v1_data")
     os.environ["TCGEN_V1_CONFIG_DIR"] = os.path.join(TMP, "no_v1_cfg")
     root6 = tk.Tk()
     app6 = appmod.App(root6)
     root6.geometry("%sx%s+20+40" % (os.environ.get("TCGEN_W", "1500"), os.environ.get("TCGEN_H", "900")))
     root6.update()
-
-    def pick_set(a, r, label):
-        a.v_set.set(label)
-        a.cb_set.event_generate("<<ComboboxSelected>>")
-        r.update()
-
-    check(app6.v_set.get() == "기본" and list(app6.cb_set.cget("values")) == ["기본"] and "테스트 종류: 기본" in app6.v_status.get(),
-          "처음에는 테스트 종류가 '기본' 하나")
+    default_file = os.path.join(cf_dir, core.CASES_FILE)
+    check(app6.v_cfile.get().startswith(default_file) and "지정하지 않음" in app6.v_cfile.get()
+          and "테스트 케이스 파일: 기본" in app6.v_status.get(), "파일을 정하지 않으면 데이터 폴더의 기본 파일을 쓴다고 보임")
+    check(not [w for w in walk(root6) if isinstance(w, ttk.Button) and w.cget("text") in ("+ 새 종류", "종류 삭제")],
+          "테스트 종류를 만드는 버튼은 없음")
     app6.add_cmd_row(app6.t_run, "run")
     app6.t_run.finish_edit(commit=False)
     for key, val in (("app", "AppA"), ("name", "job_a"), ("cmd", "/home/tester/bench/run_a.sh"), ("proc", "run_a.sh")):
@@ -967,104 +968,106 @@ def main():
     c["vms"][0].update(job="job_a", profiles=["lpage_1g_on"])
     c.update(esx_profiles=["ht_wholecore_1"], applied=True, max_wait="12:00")
     app6.mark_cases()
-    n_log = len(LOG)
-    press(root6, "이름 변경")
-    press(root6, "종류 삭제")
-    check(len([x for x in LOG[n_log:] if x[0] == "info" and "기본" in x[1]]) == 2 and last_toplevel(root6) is None,
-          "기본 종류는 이름 변경과 삭제를 할 수 없음")
-    press(root6, "+ 새 종류")
-    top = app6.set_win
-    check(top.winfo_exists() and top.title() == "새 테스트 종류", "[+ 새 종류] 창이 열림")
-    shot_window(root6, "새 테스트 종류", "tcgen_set_new_dialog.png")
-    n_log = len(LOG)
-    for bad in ("기본", "a b", ""):
-        app6.set_name_var.set(bad)
-        press(top, "만들기")
-    check(top.winfo_exists() and len([x for x in LOG[n_log:] if x[0] == "error"]) == 3, "쓸 수 없는 이름은 거부하고 창은 남음")
-    app6.set_name_var.set("EMR")
-    press(top, "만들기")
+    check([x["name"] for x in core.load_cases(cf_dir)] == ["SPR-base"], "파일을 정하지 않은 동안에는 데이터 폴더에 자동 저장")
+    auto = os.path.join(cf_dir, "backup", "auto")
+    check(os.path.isdir(auto) and len(os.listdir(auto)) == 1 and os.listdir(auto)[0] == core.auto_backup_slot(dt.datetime.now()),
+          "생성기를 켜면 그 시간대(오전 또는 오후)의 자동 백업을 한 번 만듦 %s" % (os.listdir(auto) if os.path.isdir(auto) else None))
+    app6.auto_backup_tick()
+    check(len(os.listdir(auto)) == 1, "같은 시간대에는 자동 백업을 다시 만들지 않음")
+    # [다른 이름으로 저장]: 지금 표를 고른 파일에 저장하고 그 파일에 자동 저장
+    spr = os.path.join(ext, "spr_cases.csv")
+    ASK_SAVE.append(spr)
+    press(root6, "다른 이름으로 저장")
     root6.update()
-    check(not top.winfo_exists() and app6.v_set.get() == "EMR" and list(app6.cb_set.cget("values")) == ["기본", "EMR"]
-          and "테스트 종류: EMR" not in "" and core.active_set(app6.settings) == "EMR", "새 종류를 만들면 그 종류로 바뀜")
-    check(app6.cases == [] and app6.t_case.tree.get_children() == (), "체크하지 않고 만든 새 종류는 빈 표")
-    check(app6.v_record.get() == os.path.join(sets_dir, "testcases", "EMR", "test_record.csv")
-          and app6.v_log.get() == os.path.join(sets_dir, "testcases", "EMR"), "기록 CSV 와 로그 폴더가 그 종류의 기본 위치로 바뀜")
-    check([r["name"] for r in app6.run_cmds] == ["job_a"] and len(app6.profiles) == 12, "실행 명령과 설정 프로파일은 종류를 바꿔도 그대로(공통)")
-    app6.add_case()
-    app6.t_case.finish_edit(commit=False)
+    check(os.path.isfile(spr) and app6.v_cfile.get() == spr and core.case_file(app6.settings) == spr
+          and "spr_cases.csv" in app6.v_status.get(), "[다른 이름으로 저장] 뒤 그 파일을 쓰는 것으로 바뀜")
+    with open(spr, encoding="utf-8-sig", newline="") as f:
+        rows = list(csv.reader(f))
+    check(rows[0] == core.CASE_CSV_HEADER and [r[0] for r in rows[1:]] == ["케이스", "VM", "VM"] and rows[1][2] == "SPR-base"
+          and rows[2][8] == "lpage_1g_on" and rows[1][8] == "ht_wholecore_1" and rows[1][1] == "예", "저장한 CSV 에 케이스, VM, 설정, 적용 체크가 들어 있음")
+    app6.commit_case("c0", "desc", "저장 뒤에 고친 설명")
+    check(core.load_cases(cf_dir, spr)[0]["desc"] == "저장 뒤에 고친 설명" and core.load_cases(cf_dir)[0]["desc"] == "",
+          "그 뒤에 고친 내용은 지정한 파일에 자동 저장되고 기본 파일은 그대로")
+    app6.v_record.set(os.path.join(ext, "spr_record.csv"))
+    # 다른 파일로 저장해 EMR 케이스를 만든다
+    emr = os.path.join(ext, "emr_cases.csv")
+    ASK_SAVE.append(emr)
+    press(root6, "다른 이름으로 저장")
+    root6.update()
+    check(app6.v_cfile.get() == emr and app6.v_record.get() == os.path.join(ext, "spr_record.csv"),
+          "새 파일로 저장하면 기록 CSV 는 지금 값을 그대로 씀")
     app6.commit_case("c0", "name", "EMR-base")
     app6.commit_case("c0", "esx", "emr01")
-    app6.cases[0]["vms"][0].update(job="job_a", profiles=["vpmc_on"])
-    app6.mark_cases()
-    app6.v_record.set(os.path.join(sets_dir, "rec", "emr.csv"))
-    app6.commit_run(0, "desc", "EMR 에서 고친 설명")
-    pick_set(app6, root6, "기본")
-    c = app6.cases[0] if app6.cases else {}
-    check(app6.v_set.get() == "기본" and [x["name"] for x in app6.cases] == ["SPR-base"], "기본 종류로 돌아오면 그 종류의 케이스가 보임")
-    check(c["applied"] and c["esx_profiles"] == ["ht_wholecore_1"] and c["vms"][0]["profiles"] == ["lpage_1g_on"]
-          and c["vms"][0]["job"] == "job_a" and c["max_wait"] == "12:00", "돌아오면 케이스에 지정한 설정, 잡, 적용 체크, 최대 대기가 그대로")
-    check(cell_of(app6.t_case, "c0v0", "prof") == "lpage_1g_on" and cell_of(app6.t_case, "c0", "prof").startswith("ht_wholecore_1"),
-          "탭 4 의 설정 칸에도 그대로 보임")
-    check(app6.v_record.get() == os.path.join(sets_dir, "testcases", "test_record.csv"), "기록 CSV 도 기본 종류의 것으로 돌아옴")
-    check(app6.run_cmds[0]["desc"] == "EMR 에서 고친 설명", "명령은 공통이라 다른 종류에서 고친 내용이 그대로")
-    with open(os.path.join(sets_dir, core.SETTINGS_FILE), encoding="utf-8") as f:
-        raw = json.load(f)
-    check(raw["case_set"] == "" and raw["case_sets"] == ["EMR"]
-          and raw["case_set_paths"] == {"EMR": {"record_csv": os.path.join(sets_dir, "rec", "emr.csv"), "log_dir": ""}},
-          "종류 목록과 종류별 경로를 settings.json 에 저장 %s" % raw.get("case_set_paths"))
-    check([x["name"] for x in core.load_cases(sets_dir, "EMR")] == ["EMR-base"] and [x["name"] for x in core.load_cases(sets_dir)] == ["SPR-base"],
-          "케이스 표는 종류마다 다른 파일에 저장")
-    press(root6, "+ 새 종류")
-    top = app6.set_win
-    app6.set_name_var.set("SPR")
-    app6.set_copy_var.set(True)
-    press(top, "만들기")
-    root6.update()
-    check(app6.v_set.get() == "SPR" and [x["name"] for x in app6.cases] == ["SPR-base"]
-          and app6.cases[0]["vms"][0]["profiles"] == ["lpage_1g_on"], "'지금 보이는 테스트 케이스를 복사해서 시작' 을 체크하면 표를 복사")
-    app6.commit_case("c0", "name", "SPR-copy")
+    app6.cases[0]["vms"][0]["profiles"] = ["vpmc_on"]
     app6.cases[0]["applied"] = False
     app6.mark_cases()
-    press(root6, "이름 변경")
-    top = app6.set_win
-    check(app6.set_name_var.get() == "SPR" and top.title() == "테스트 종류 이름 변경", "[이름 변경] 창에 지금 이름이 들어 있음")
+    app6.v_record.set(os.path.join(ext, "emr_record.csv"))
+    app6.commit_run(0, "desc", "EMR 작업 중에 고친 설명")
+    check(core.load_cases(cf_dir, spr)[0]["name"] == "SPR-base", "이전 파일은 마지막 상태로 남음")
+    # [불러오기]: 잘못된 파일은 거부, SPR 파일을 불러오면 케이스와 지정한 설정, 기록 CSV 가 그대로
+    rec_like = os.path.join(ext, "not_cases.csv")
+    with open(rec_like, "w", encoding="utf-8-sig") as f:
+        f.write("테스트 케이스 이름,생성 시각\nx,y\n")
     n_log = len(LOG)
-    app6.set_name_var.set("emr")
-    press(top, "바꾸기")
-    check(top.winfo_exists() and any(x[0] == "error" and "이미 있음" in x[1] for x in LOG[n_log:]), "있는 이름으로는 바꿀 수 없음")
-    app6.set_name_var.set("SPR-2P")
-    press(top, "바꾸기")
+    ASK_OPEN.append(rec_like)
+    press(root6, "불러오기")
     root6.update()
-    check(app6.v_set.get() == "SPR-2P" and list(app6.cb_set.cget("values")) == ["기본", "EMR", "SPR-2P"]
-          and os.path.isfile(core.cases_path(sets_dir, "SPR-2P")) and not os.path.exists(core.cases_path(sets_dir, "SPR"))
-          and [x["name"] for x in app6.cases] == ["SPR-copy"], "이름을 바꾸면 목록과 케이스 표 파일의 이름이 바뀜")
+    check(app6.v_cfile.get() == emr and any(x[0] == "error" and "테스트 기록 CSV" in x[1] for x in LOG[n_log:]),
+          "테스트 케이스 파일이 아닌 CSV 는 불러오지 않고 알림")
+    ASK_OPEN.append(spr)
+    press(root6, "불러오기")
+    root6.update()
+    c = app6.cases[0] if app6.cases else {}
+    check(app6.v_cfile.get() == spr and [x["name"] for x in app6.cases] == ["SPR-base"], "[불러오기] 로 SPR 파일의 케이스가 보임")
+    check(c["applied"] and c["esx_profiles"] == ["ht_wholecore_1"] and c["vms"][0]["profiles"] == ["lpage_1g_on"]
+          and c["vms"][0]["job"] == "job_a" and c["max_wait"] == "12:00" and c["desc"] == "저장 뒤에 고친 설명",
+          "불러오면 케이스에 지정한 설정, 잡, 적용 체크, 최대 대기가 그대로")
+    check(cell_of(app6.t_case, "c0v0", "prof") == "lpage_1g_on" and cell_of(app6.t_case, "c0", "prof").startswith("ht_wholecore_1"),
+          "탭 4 의 설정 칸에도 그대로 보임")
+    check(app6.v_record.get() == os.path.join(ext, "spr_record.csv"), "그 파일에서 쓰던 테스트 기록 CSV 로 함께 바뀜")
+    check(app6.run_cmds[0]["desc"] == "EMR 작업 중에 고친 설명" and len(app6.profiles) == 12, "실행 명령과 설정 프로파일은 파일을 바꿔도 그대로(공통)")
+    check(core.load_cases(cf_dir, emr)[0]["name"] == "EMR-base", "EMR 파일에는 EMR 케이스가 저장돼 있음")
+    shot(root6, app6, 3, "tcgen_casefile_tab4.png")
+    # 생성: 지금 파일의 기록 CSV 에 기록. 파일을 바꾸면 탭 5 의 이전 결과를 지움
+    app6.cases[0]["applied"] = False
+    app6.mark_cases()
     app6.generate()
     root6.update()
-    check(app6.result is not None and app6.result["errors"] == [], "새 종류에서 [명령어 생성]")
-    check(os.path.isfile(os.path.join(sets_dir, "testcases", "SPR-2P", "test_record.csv"))
-          and not os.path.exists(os.path.join(sets_dir, "testcases", "test_record.csv")), "생성 기록은 지금 종류의 기록 CSV 에만 추가")
-    shot(root6, app6, 3, "tcgen_set_tab4.png")
-    pick_set(app6, root6, "EMR")
-    check(app6.result is None and app6.blk_setup.get("1.0", "end").strip() == "" and "테스트 종류: EMR" in app6.res_text.get("1.0", "end"),
-          "종류를 바꾸면 탭 5 의 이전 생성 결과를 지움")
-    check(app6.v_record.get() == os.path.join(sets_dir, "rec", "emr.csv") and [x["name"] for x in app6.cases] == ["EMR-base"],
-          "EMR 에서 지정한 기록 CSV 와 케이스가 그대로")
-    n_log = len(LOG)
-    press(root6, "종류 삭제")
+    check(app6.result is not None and app6.result["errors"] == [] and os.path.isfile(os.path.join(ext, "spr_record.csv"))
+          and not os.path.exists(os.path.join(ext, "emr_record.csv")), "생성 기록은 지금 파일의 테스트 기록 CSV 에 추가")
+    ASK_OPEN.append(emr)
+    press(root6, "불러오기")
     root6.update()
-    kept = [os.path.join(cur, fn) for cur, _, files in os.walk(os.path.join(sets_dir, "backup")) for fn in files if fn == "EMR.json"]
-    check(app6.v_set.get() == "기본" and list(app6.cb_set.cget("values")) == ["기본", "SPR-2P"]
-          and any(x[0] == "ask" and "EMR" in x[1] for x in LOG[n_log:]) and len(kept) == 1 and "_deleted_case_set" in kept[0],
-          "종류를 삭제하면 기본 종류로 바뀌고 케이스 표는 backup 으로 옮김")
-    pick_set(app6, root6, "SPR-2P")
+    check(app6.result is None and app6.blk_setup.get("1.0", "end").strip() == "" and "emr_cases.csv" in app6.res_text.get("1.0", "end"),
+          "파일을 바꾸면 탭 5 의 이전 생성 결과를 지움")
+    check(app6.v_record.get() == os.path.join(ext, "emr_record.csv") and [x["name"] for x in app6.cases] == ["EMR-base"],
+          "EMR 파일에서 쓰던 기록 CSV 와 케이스가 그대로")
+    # 데이터 폴더의 기본 파일을 고르면 '지정하지 않음' 상태로 돌아간다
+    ASK_OPEN.append(default_file)
+    press(root6, "불러오기")
+    root6.update()
+    check(core.case_file(app6.settings) == "" and "지정하지 않음" in app6.v_cfile.get() and app6.cases[0]["desc"] == "",
+          "데이터 폴더의 기본 파일을 고르면 지정하지 않은 상태로 돌아감")
+    ASK_OPEN.append(emr)
+    press(root6, "불러오기")
+    root6.update()
     root6.destroy()
     root7 = tk.Tk()
     app7 = appmod.App(root7)
     root7.update()
-    check(app7.v_set.get() == "SPR-2P" and list(app7.cb_set.cget("values")) == ["기본", "SPR-2P"]
-          and [x["name"] for x in app7.cases] == ["SPR-copy"] and app7.v_record.get() == os.path.join(sets_dir, "testcases", "SPR-2P", "test_record.csv"),
-          "다시 실행하면 마지막에 고른 종류와 그 케이스 표, 기록 CSV 를 불러옴")
+    check(app7.v_cfile.get() == emr and [x["name"] for x in app7.cases] == ["EMR-base"] and app7.v_record.get() == os.path.join(ext, "emr_record.csv"),
+          "다시 실행하면 마지막에 쓰던 테스트 케이스 파일과 기록 CSV 를 불러옴")
     root7.destroy()
+    # 지정한 파일이 없어졌으면 기본 파일로 바꾸고 알린다
+    os.rename(emr, emr + ".moved")
+    n_log = len(LOG)
+    root8 = tk.Tk()
+    app8 = appmod.App(root8)
+    root8.update()
+    check(core.case_file(app8.settings) == "" and [x["name"] for x in app8.cases] == ["SPR-base"]
+          and any(x[0] == "warning" and "기본 파일로 바꿈" in x[1] for x in LOG[n_log:]) and os.path.isfile(emr + ".moved"),
+          "지정한 파일을 찾지 못하면 기본 파일로 바꾸고 알림")
+    root8.destroy()
     print("GUI smoke OK  tmp=%s" % TMP)
 
 

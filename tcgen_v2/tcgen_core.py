@@ -110,36 +110,20 @@ def app_dir():
     return os.path.dirname(os.path.abspath(__file__))
 
 
-# 테스트 종류: 테스트 케이스 표(탭 4)와 기록 CSV, 로그 폴더를 종류마다 따로 둔다. 실행 명령, 모니터링 명령, 설정 프로파일과
-# 그 밖의 설정은 모든 종류가 같이 쓴다. 처음부터 있는 종류(기본)는 이름이 빈 문자열이고 test_cases.json 과 설정의 맨 위
-# record_csv, log_dir 를 쓴다(v1.4, v2.2 까지의 파일과 같은 자리). 사용자가 만든 종류는 case_sets/<이름>.json 과
-# 설정의 case_set_paths[이름] 을 쓴다. 메모리의 설정에서 record_csv, log_dir 는 항상 지금 고른 종류의 값이다.
-CASE_SET_DIR = "case_sets"
-DEFAULT_SET_LABEL = "기본"
-SET_NAME_RE = re.compile(r"^[0-9A-Za-z가-힣._-]{1,40}$")
-SET_RESERVED = ("CON", "PRN", "AUX", "NUL") + tuple("COM%d" % i for i in range(1, 10)) + tuple("LPT%d" % i for i in range(1, 10))
-
-
-def active_set(s):
-    """지금 고른 테스트 종류의 이름. 기본 종류는 빈 문자열."""
-    n = (s or {}).get("case_set") or ""
-    return n if n in ((s or {}).get("case_sets") or []) else ""
-
-
-def set_label(name):
-    return name or DEFAULT_SET_LABEL
-
-
-def default_paths(base, name=""):
-    """기록 CSV 와 로그 폴더의 기본 위치. 기본 종류는 testcases/, 다른 종류는 testcases/<이름>/."""
-    d = os.path.join(base, DEFAULT_CASE_DIR, name) if name else os.path.join(base, DEFAULT_CASE_DIR)
+# 테스트 케이스 파일: 탭 4 의 표를 사용자가 정한 파일에 저장하고 불러온다(화면의 [불러오기], [다른 이름으로 저장]).
+# 정하지 않으면 데이터 폴더의 test_cases.json 에 자동 저장한다(v1.4, v2.2 까지와 같은 자리). 설정의 case_file 이 정한 파일의
+# 경로다(빈 값 = 정하지 않음). 실행 명령, 모니터링 명령, 설정 프로파일과 그 밖의 설정은 어느 파일을 쓰든 같이 쓴다.
+# 기록 CSV 와 로그 폴더는 테스트 케이스 파일마다 마지막에 쓰던 값을 기억한다(설정의 case_file_paths).
+# 메모리의 설정에서 record_csv, log_dir 는 항상 지금 쓰는 테스트 케이스 파일의 값이다.
+def default_paths(base):
+    d = os.path.join(base, DEFAULT_CASE_DIR)
     return os.path.join(d, DEFAULT_RECORD), d
 
 
 def resolve_paths(base, s):
-    """설정의 기록 CSV 경로와 로그 폴더를 절대 경로로 바꾼 사본을 반환한다. 빈 값은 지금 고른 테스트 종류의 기본 경로."""
+    """설정의 기록 CSV 경로와 로그 폴더를 절대 경로로 바꾼 사본을 반환한다. 빈 값은 기본 경로."""
     r = dict(s)
-    rec, logd = default_paths(base, active_set(s))
+    rec, logd = default_paths(base)
     for key, dflt in (("record_csv", rec), ("log_dir", logd)):
         p = (r.get(key) or "").strip()
         if not p:
@@ -148,6 +132,24 @@ def resolve_paths(base, s):
             p = os.path.join(base, p)
         r[key] = os.path.normpath(p)
     return r
+
+
+def case_file(s):
+    """사용자가 정한 테스트 케이스 파일의 경로. 정하지 않았으면 빈 문자열(데이터 폴더의 test_cases.json 을 쓴다)."""
+    return ((s or {}).get("case_file") or "").strip()
+
+
+def cases_path(base, path=""):
+    """테스트 케이스 표를 저장하는 파일. path(사용자가 정한 파일)가 비어 있으면 데이터 폴더의 test_cases.json."""
+    return os.path.normpath(path) if (path or "").strip() else os.path.join(base, CASES_FILE)
+
+
+def case_file_key(base, path):
+    """테스트 케이스 파일별 값을 찾는 열쇠. 정하지 않았거나 데이터 폴더의 test_cases.json 을 고른 경우는 빈 문자열."""
+    if not (path or "").strip():
+        return ""
+    k = os.path.normcase(os.path.abspath(path.strip()))
+    return "" if k == os.path.normcase(os.path.abspath(os.path.join(base, CASES_FILE))) else k
 
 
 def load_settings(base):
@@ -176,20 +178,19 @@ def load_settings(base):
         s[k] = "" if s.get(k) is None else str(s[k])
     if s.get("run_mode") not in RUN_MODES:
         s["run_mode"] = DEFAULT_SETTINGS["run_mode"]
-    # 테스트 종류: 이름 목록, 지금 고른 종류, 종류별 경로. 파일의 맨 위 record_csv, log_dir 는 기본 종류의 값이다
-    names = []
-    for n in (s.get("case_sets") if isinstance(s.get("case_sets"), list) else []):
-        n = "" if n is None else str(n).strip()
-        if not case_set_error(n, {"case_sets": names}):
-            names.append(n)
-    cur = "" if s.get("case_set") is None else str(s.get("case_set")).strip()
-    raw = s.get("case_set_paths") if isinstance(s.get("case_set_paths"), dict) else {}
+    # 테스트 케이스 파일과 파일별 기록 경로. 파일의 맨 위 record_csv, log_dir 는 기본 파일(test_cases.json)을 쓸 때의 값이다
+    cf = "" if s.get("case_file") is None else str(s.get("case_file")).strip()
+    key = case_file_key(base, cf)
+    raw = s.get("case_file_paths") if isinstance(s.get("case_file_paths"), dict) else {}
     paths = {"": {"record_csv": s["record_csv"], "log_dir": s["log_dir"]}}
-    for n in names:
-        q = raw.get(n) if isinstance(raw.get(n), dict) else {}
-        paths[n] = dict((k, "" if q.get(k) is None else str(q.get(k))) for k in ("record_csv", "log_dir"))
-    s["case_sets"], s["case_set"], s["case_set_paths"] = names, (cur if cur in names else ""), paths
-    s["record_csv"], s["log_dir"] = paths[s["case_set"]]["record_csv"], paths[s["case_set"]]["log_dir"]
+    for k, q in raw.items():
+        if isinstance(k, str) and k and isinstance(q, dict):
+            paths[k] = dict((x, "" if q.get(x) is None else str(q.get(x))) for x in ("record_csv", "log_dir"))
+    s["case_file"], s["case_file_paths"] = (os.path.normpath(cf) if key else ""), paths
+    if key in paths:                    # 처음 쓰는 파일이면 기본 파일의 값을 그대로 쓴다
+        s["record_csv"], s["log_dir"] = paths[key]["record_csv"], paths[key]["log_dir"]
+    for k in ("case_set", "case_sets", "case_set_paths"):       # 2026-11-16 에 잠깐 있던 '테스트 종류' 의 키. 쓰지 않는다
+        s.pop(k, None)
     return s
 
 
@@ -201,148 +202,47 @@ def _atomic_write(path, text, encoding):
 
 
 def save_settings(base, s):
-    """설정을 저장한다. s 의 record_csv, log_dir 는 지금 고른 테스트 종류의 값이다. 파일에는 기본 종류의 값을 맨 위에,
-    다른 종류의 값을 case_set_paths 에 적는다. 기본 경로와 같은 값은 비워 저장해 데이터 폴더를 옮겨도 따라가게 한다."""
+    """설정을 저장한다. s 의 record_csv, log_dir 는 지금 쓰는 테스트 케이스 파일의 값이다. 파일에는 기본 파일(test_cases.json)을
+    쓸 때의 값을 맨 위에, 사용자가 정한 파일의 값을 case_file_paths 에 적는다. 기본 경로와 같은 값은 비워 저장해 데이터 폴더를
+    옮겨도 따라가게 한다. 없어진 파일의 값은 버린다."""
     out = dict(s)
-    names = list(out.get("case_sets") or [])
-    act = active_set(out)
-    src = out.get("case_set_paths") if isinstance(out.get("case_set_paths"), dict) else {}
-    paths = {}
-    for n in [""] + names:
-        q = src.get(n) if isinstance(src.get(n), dict) else {}
-        if n == act:
-            q = {"record_csv": out.get("record_csv"), "log_dir": out.get("log_dir")}
-        clean = {}
-        for key, dflt in zip(("record_csv", "log_dir"), default_paths(base, n)):
-            v = "" if q.get(key) is None else str(q.get(key)).strip()
+    cf = case_file(out)
+    key = case_file_key(base, cf)
+    src = out.get("case_file_paths") if isinstance(out.get("case_file_paths"), dict) else {}
+    paths = dict((k, dict(v)) for k, v in src.items() if isinstance(v, dict))
+    paths[key] = {"record_csv": out.get("record_csv"), "log_dir": out.get("log_dir")}
+    clean = {}
+    for k, q in paths.items():
+        if k and k != key and not os.path.isfile(k):
+            continue
+        c = {}
+        for name, dflt in zip(("record_csv", "log_dir"), default_paths(base)):
+            v = "" if q.get(name) is None else str(q.get(name)).strip()
             if v and os.path.normcase(os.path.normpath(v)) == os.path.normcase(dflt):
                 v = ""
-            clean[key] = v
-        paths[n] = clean
-    out["record_csv"], out["log_dir"] = paths[""]["record_csv"], paths[""]["log_dir"]
-    out["case_sets"], out["case_set"] = names, act
-    out["case_set_paths"] = dict((n, paths[n]) for n in names)
+            c[name] = v
+        clean[k] = c
+    top = clean.get("", {"record_csv": "", "log_dir": ""})
+    out["record_csv"], out["log_dir"] = top["record_csv"], top["log_dir"]
+    out["case_file"] = os.path.normpath(cf) if key else ""
+    out["case_file_paths"] = dict((k, v) for k, v in clean.items() if k)
     _atomic_write(os.path.join(base, SETTINGS_FILE), json.dumps(out, ensure_ascii=False, indent=2) + "\n", "utf-8")
 
 
-def case_set_error(name, s, old=None):
-    """테스트 종류 이름을 쓸 수 없는 이유. 쓸 수 있으면 빈 문자열. old: 이름을 바꾸는 중인 종류(자기 이름과 겹치는 것은 허용)."""
-    n = (name or "").strip()
-    if not n:
-        return "테스트 종류 이름이 비어 있음"
-    if not SET_NAME_RE.match(n) or n.startswith(".") or n.endswith("."):
-        return "테스트 종류 이름은 한글, 영문, 숫자, . _ - 만 쓰고 40자 이내 (공백 불가, 처음과 끝에 . 불가): '%s'" % n
-    if n == DEFAULT_SET_LABEL:
-        return "'%s' 은(는) 처음부터 있는 종류의 이름이라 쓸 수 없음" % DEFAULT_SET_LABEL
-    if n.split(".")[0].upper() in SET_RESERVED:
-        return "'%s' 은(는) Windows 에서 파일 이름으로 쓸 수 없음" % n
-    if n.lower() in [x.lower() for x in ((s or {}).get("case_sets") or []) if x != old]:
-        return "같은 이름의 테스트 종류가 이미 있음: '%s' (대소문자만 다른 이름도 같은 이름으로 본다)" % n
-    return ""
-
-
-def _set_paths_copy(s):
-    return dict((k, dict(v)) for k, v in ((s.get("case_set_paths") or {}).items()) if isinstance(v, dict))
-
-
-def switch_case_set(s, name):
-    """테스트 종류를 name 으로 바꾼 새 설정을 반환한다(저장은 호출한 쪽이 한다). 지금 종류의 기록 CSV, 로그 폴더 값을
-    보관하고 name 종류의 값을 record_csv, log_dir 에 넣는다. name 이 빈 문자열이면 기본 종류."""
-    names = list(s.get("case_sets") or [])
-    if name and name not in names:
-        raise ValueError("없는 테스트 종류: %s" % name)
+def switch_case_file(base, s, path):
+    """테스트 케이스 파일을 path 로 바꾼 새 설정을 반환한다(설정 저장과 표 읽기, 쓰기는 호출한 쪽이 한다).
+    path 가 비어 있거나 데이터 폴더의 test_cases.json 이면 기본 파일이다. 지금 파일의 기록 CSV, 로그 폴더 값을 보관하고,
+    path 를 전에 쓴 적이 있으면 그때의 값을 넣는다. 처음 쓰는 파일이면 지금 값을 그대로 둔다."""
     out = dict(s)
-    paths = _set_paths_copy(s)
-    paths[active_set(s)] = {"record_csv": s.get("record_csv") or "", "log_dir": s.get("log_dir") or ""}
-    q = paths.get(name) or {}
-    out.update(case_sets=names, case_set=name, case_set_paths=paths,
-               record_csv=q.get("record_csv", ""), log_dir=q.get("log_dir", ""))
+    src = s.get("case_file_paths") if isinstance(s.get("case_file_paths"), dict) else {}
+    paths = dict((k, dict(v)) for k, v in src.items() if isinstance(v, dict))
+    paths[case_file_key(base, case_file(s))] = {"record_csv": s.get("record_csv") or "", "log_dir": s.get("log_dir") or ""}
+    key = case_file_key(base, path)
+    out["case_file"] = os.path.normpath(path.strip()) if key else ""
+    out["case_file_paths"] = paths
+    if key in paths:
+        out["record_csv"], out["log_dir"] = paths[key]["record_csv"], paths[key]["log_dir"]
     return out
-
-
-def add_case_set(base, s, name, cases=None):
-    """테스트 종류를 추가한 새 설정을 반환한다(설정 저장과 종류 바꾸기는 호출한 쪽이 한다).
-    cases 를 주면 그 케이스 표를 새 종류의 표로 저장한다(지금 표를 복사해 시작). cases 가 None 이면 빈 표로 시작한다.
-    다만 case_sets/<이름>.json 이 이미 있으면 그 파일을 그대로 쓴다(백업에서 돌아온 표를 지우지 않으려는 것)."""
-    err = case_set_error(name, s)
-    if err:
-        raise ValueError(err)
-    name = name.strip()
-    if cases is not None or not os.path.exists(cases_path(base, name)):
-        save_cases(base, cases or [], name)
-    out = dict(s)
-    paths = _set_paths_copy(s)
-    paths[name] = {"record_csv": "", "log_dir": ""}
-    out.update(case_sets=list(s.get("case_sets") or []) + [name], case_set_paths=paths)
-    return out
-
-
-def rename_case_set(base, s, old, new):
-    """테스트 종류의 이름을 바꾼 새 설정을 반환한다. 케이스 표 파일의 이름을 바꾸고, 기록 CSV 와 로그 폴더가 기본 위치
-    (testcases/<옛 이름>/)이면 그 폴더의 이름도 바꾼다. 폴더 이름을 바꾸지 못하면 옛 폴더를 계속 쓰도록 경로를 적어 둔다."""
-    if old not in (s.get("case_sets") or []):
-        raise ValueError("없는 테스트 종류: %s" % old)
-    err = case_set_error(new, s, old=old)
-    if err:
-        raise ValueError(err)
-    new = new.strip()
-    if new == old:
-        return dict(s)
-    src, dst = cases_path(base, old), cases_path(base, new)
-    if os.path.exists(src):
-        os.makedirs(os.path.dirname(dst), exist_ok=True)
-        os.replace(src, dst)
-    out = dict(s)
-    paths = _set_paths_copy(s)
-    if active_set(s) == old:
-        paths[old] = {"record_csv": s.get("record_csv") or "", "log_dir": s.get("log_dir") or ""}
-    q = dict(paths.pop(old, None) or {"record_csv": "", "log_dir": ""})
-    old_rec, old_dir = default_paths(base, old)
-    new_dir = default_paths(base, new)[1]
-    for key, dflt in (("record_csv", old_rec), ("log_dir", old_dir)):     # 기본 위치를 쓰던 값은 비워 새 기본 위치를 따르게 한다
-        v = (q.get(key) or "").strip()
-        if v and os.path.normcase(os.path.normpath(v)) == os.path.normcase(dflt):
-            q[key] = ""
-    if os.path.isdir(old_dir):
-        moved = False
-        if not os.path.exists(new_dir) or os.path.normcase(old_dir) == os.path.normcase(new_dir):
-            try:
-                os.rename(old_dir, new_dir)
-                moved = True
-            except OSError:
-                moved = False
-        if not moved:                      # 옛 폴더의 기록을 계속 쓰게 한다
-            if not q.get("record_csv"):
-                q["record_csv"] = old_rec
-            if not q.get("log_dir"):
-                q["log_dir"] = old_dir
-    paths[new] = q
-    names = [new if n == old else n for n in (s.get("case_sets") or [])]
-    out.update(case_sets=names, case_set_paths=paths)
-    if active_set(s) == old:
-        out.update(case_set=new, record_csv=q.get("record_csv", ""), log_dir=q.get("log_dir", ""))
-    return out
-
-
-def delete_case_set(base, s, name, now=None):
-    """테스트 종류를 지운 새 설정과, 케이스 표 파일을 옮겨 둔 경로를 반환한다. 파일은 지우지 않고
-    backup/<시각>_deleted_case_set/<이름>.json 으로 옮긴다. 기록 CSV 와 로그 폴더의 파일은 건드리지 않는다.
-    지금 고른 종류를 지우면 기본 종류로 바꾼다."""
-    if name not in (s.get("case_sets") or []):
-        raise ValueError("없는 테스트 종류: %s" % name)
-    kept = None
-    src = cases_path(base, name)
-    if os.path.exists(src):
-        ts = (now or dt.datetime.now()).strftime("%Y%m%d%H%M%S")
-        dest = os.path.join(base, "backup", ts + "_deleted_case_set")
-        os.makedirs(dest, exist_ok=True)
-        kept = os.path.join(dest, os.path.basename(src))
-        os.replace(src, kept)
-    out = switch_case_set(s, "") if active_set(s) == name else dict(s)
-    paths = _set_paths_copy(out)
-    paths.pop(name, None)
-    out.update(case_sets=[n for n in (s.get("case_sets") or []) if n != name], case_set_paths=paths)
-    return out, kept
 
 
 def _decode(data):
@@ -424,27 +324,111 @@ def _clean_case(c):
     return d
 
 
-def cases_path(base, name=""):
-    """테스트 종류 name 의 테스트 케이스 표 파일. 기본 종류(빈 이름)는 test_cases.json, 다른 종류는 case_sets/<이름>.json."""
-    return os.path.join(base, CASE_SET_DIR, name + ".json") if name else os.path.join(base, CASES_FILE)
+# 테스트 케이스 CSV: 화면의 [다른 이름으로 저장] 이 만드는 형식. 케이스 행 아래에 그 케이스의 VM 행이 온다.
+CASE_CSV_HEADER = ["구분", "적용", "케이스 이름", "설명", "ESX 호스트", "VM 이름", "잡", "모니터링", "설정", "최대 대기", "테스트 그룹",
+                   "종료 기준 VM", "간격", "잡 시작", "모니터링 중지", "모니터링 중지 시각", "잡 종료 (리포트)"]
+STOP_LABELS = {"auto": "자동", "manual": "직접 입력", "none": "중지 없음"}
+CSV_TRUE = ("예", "Y", "YES", "1", "TRUE", "V", "O")
 
 
-def load_cases(base, name=""):
-    """테스트 케이스 표(적용 체크 포함)를 불러온다. name: 테스트 종류(빈 값 = 기본). 파일이 없으면 빈 목록. 예전 형식도 읽는다."""
-    p = cases_path(base, name)
+def _join_names(names):
+    """이름 여러 개를 한 칸에 적는다: 'a; b'. 이름에 ; 이 들어 있으면 JSON 목록으로 적는다."""
+    names = list(names or [])
+    if any(";" in n or n != n.strip() for n in names):
+        return json.dumps(names, ensure_ascii=False)
+    return "; ".join(names)
+
+
+def _split_names(text):
+    t = (text or "").strip()
+    if not t:
+        return []
+    if t.startswith("["):
+        try:
+            v = json.loads(t)
+            if isinstance(v, list):
+                return [str(x) for x in v]
+        except ValueError:
+            pass
+    return [x.strip() for x in t.split(";") if x.strip()]
+
+
+def cases_to_csv(cases):
+    """테스트 케이스 표를 CSV 글로 바꾼다. 케이스마다 '케이스' 행 하나와 VM 마다 'VM' 행 하나."""
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(CASE_CSV_HEADER)
+    for c in cases:
+        c = _clean_case(c)
+        w.writerow(["케이스", "예" if c["applied"] else "", c["name"], c["desc"], c["esx"], "", "", _join_names(c["esx_monitors"]),
+                    _join_names(c["esx_profiles"]), c["max_wait"], c["group"], "", c["interval"], c["start"],
+                    STOP_LABELS[c["stop_mode"]], c["stop_time"], c["end_time"]])
+        for v in c["vms"]:
+            w.writerow(["VM", "", "", "", "", v["name"], v["job"], _join_names(v["monitors"]), _join_names(v["profiles"]), "", "",
+                        "기준" if v["end_ref"] else "", "", "", "", "", ""])
+    return buf.getvalue()
+
+
+def cases_from_csv(text):
+    """테스트 케이스 CSV 의 글을 케이스 목록으로 바꾼다. 열은 머리글 이름으로 찾는다(순서가 달라도 됨). 형식이 맞지 않으면 ValueError."""
+    rows = [r for r in csv.reader(io.StringIO(text)) if any((x or "").strip() for x in r)]
+    if not rows:
+        return []
+    idx = dict((h.strip(), i) for i, h in enumerate(rows[0]))
+    if not all(k in idx for k in ("구분", "케이스 이름", "VM 이름")):
+        hint = " 이 파일은 생성 내용을 적어 두는 테스트 기록 CSV 로 보인다." if "테스트 케이스 이름" in idx and "생성 시각" in idx else ""
+        raise ValueError("테스트 케이스 파일이 아님 (머리글에 구분, 케이스 이름, VM 이름 열이 있어야 함).%s" % hint)
+
+    def cell(r, name):
+        i = idx.get(name)
+        return r[i].strip() if i is not None and i < len(r) else ""
+
+    stop_by_label = dict((v, k) for k, v in STOP_LABELS.items())
+    out = []
+    for n, r in enumerate(rows[1:], 1):
+        kind = cell(r, "구분").upper()
+        if kind in ("케이스", "CASE"):
+            sm = cell(r, "모니터링 중지")
+            out.append({"applied": cell(r, "적용").upper() in CSV_TRUE, "name": cell(r, "케이스 이름"), "desc": cell(r, "설명"),
+                        "esx": cell(r, "ESX 호스트"), "vms": [], "esx_monitors": _split_names(cell(r, "모니터링")),
+                        "esx_profiles": _split_names(cell(r, "설정")), "max_wait": cell(r, "최대 대기"), "group": cell(r, "테스트 그룹"),
+                        "interval": cell(r, "간격"), "start": cell(r, "잡 시작"), "stop_mode": stop_by_label.get(sm, sm or "auto"),
+                        "stop_time": cell(r, "모니터링 중지 시각"), "end_time": cell(r, "잡 종료 (리포트)")})
+        elif kind == "VM":
+            if not out:
+                raise ValueError("데이터 %d번째 행: 케이스 행보다 VM 행이 먼저 나옴" % n)
+            out[-1]["vms"].append({"name": cell(r, "VM 이름"), "job": cell(r, "잡") or NONE_JOB, "monitors": _split_names(cell(r, "모니터링")),
+                                   "profiles": _split_names(cell(r, "설정")), "end_ref": cell(r, "종료 기준 VM") != ""})
+        else:
+            raise ValueError("데이터 %d번째 행: 구분 칸은 '케이스' 또는 'VM' 이어야 함 ('%s')" % (n, cell(r, "구분")))
+    return [_clean_case(c) for c in out]
+
+
+def load_cases(base, path=""):
+    """테스트 케이스 표(적용 체크 포함)를 불러온다. path: 사용자가 정한 파일(빈 값 = 데이터 폴더의 test_cases.json).
+    이름이 .json 으로 끝나면 JSON, 그 밖에는 테스트 케이스 CSV 로 읽는다. 파일이 없으면 빈 목록. 예전 형식의 JSON 도 읽는다."""
+    p = cases_path(base, path)
     if not os.path.exists(p):
         return []
+    if not p.lower().endswith(".json"):
+        with open(p, "rb") as f:
+            text, _ = _decode(f.read())
+        return cases_from_csv(text)
     with open(p, encoding="utf-8-sig") as f:
         data = json.load(f)
     rows = data.get("cases", []) if isinstance(data, dict) else data
     return [_clean_case(c) for c in rows if isinstance(c, dict)]
 
 
-def save_cases(base, cases, name=""):
+def save_cases(base, cases, path=""):
+    """테스트 케이스 표를 저장한다. path: 사용자가 정한 파일(빈 값 = 데이터 폴더의 test_cases.json). 이름이 .json 이면 JSON, 그 밖에는 CSV."""
+    p = cases_path(base, path)
+    if (path or "").strip():
+        os.makedirs(os.path.dirname(os.path.abspath(p)), exist_ok=True)
+    if not p.lower().endswith(".json"):
+        _atomic_write(p, cases_to_csv(cases), "utf-8-sig")
+        return
     data = {"version": CASES_VERSION, "cases": [_clean_case(c) for c in cases]}
-    p = cases_path(base, name)
-    if name:
-        os.makedirs(os.path.dirname(p), exist_ok=True)
     _atomic_write(p, json.dumps(data, ensure_ascii=False, indent=1) + "\n", "utf-8")
 
 
@@ -562,7 +546,6 @@ def backup_settings(base, now=None):
         if os.path.exists(src):
             shutil.copy2(src, os.path.join(dest, fn))
             copied.append(fn)
-    copied += _copy_case_sets(base, dest)
     return dest, copied
 
 
@@ -664,23 +647,8 @@ def _inside(path, folder):
     return p == f or p.startswith(f.rstrip("\\/") + os.sep)
 
 
-def _copy_case_sets(src, dst, overwrite=True):
-    """테스트 종류별 케이스 표(case_sets/*.json)를 복사한다. 복사한 파일의 이름 목록(case_sets/<이름>.json)을 반환한다."""
-    sd, done = os.path.join(src, CASE_SET_DIR), []
-    if not os.path.isdir(sd):
-        return done
-    for fn in sorted(os.listdir(sd)):
-        s = os.path.join(sd, fn)
-        t = os.path.join(dst, CASE_SET_DIR, fn)
-        if fn.endswith(".json") and os.path.isfile(s) and (overwrite or not os.path.exists(t)):
-            os.makedirs(os.path.dirname(t), exist_ok=True)
-            shutil.copy2(s, t)
-            done.append("%s/%s" % (CASE_SET_DIR, fn))
-    return done
-
-
 def copy_data(src, dst, dirs=(), overwrite=True):
-    """src 의 데이터 파일(테스트 종류별 케이스 표 포함)과 dirs 에 적은 하위 폴더를 dst 로 복사한다. 복사한 항목 이름 목록을 반환한다.
+    """src 의 데이터 파일과 dirs 에 적은 하위 폴더를 dst 로 복사한다. 복사한 항목 이름 목록을 반환한다.
     하위 폴더(테스트 기록, 로그, 백업) 안의 파일은 dst 에 같은 이름이 없을 때만 복사해 기록을 덮어쓰지 않는다."""
     os.makedirs(dst, exist_ok=True)
     done = []
@@ -689,7 +657,6 @@ def copy_data(src, dst, dirs=(), overwrite=True):
         if os.path.isfile(s) and (overwrite or not os.path.exists(os.path.join(dst, fn))):
             shutil.copy2(s, os.path.join(dst, fn))
             done.append(fn)
-    done += _copy_case_sets(src, dst, overwrite)
     for sub in dirs:
         sd = os.path.join(src, sub)
         if not os.path.isdir(sd):
@@ -716,7 +683,8 @@ def _remap_settings_paths(old, new):
         return
     s = load_settings(new)
     changed = False
-    for q in [s] + [v for k, v in s["case_set_paths"].items() if k != s["case_set"]]:     # 지금 고른 종류와 나머지 종류
+    cur = case_file_key(new, case_file(s))
+    for q in [s] + [v for k, v in s["case_file_paths"].items() if k != cur]:      # 지금 쓰는 파일의 값과 나머지 파일의 값
         for key in ("record_csv", "log_dir"):
             v = (q.get(key) or "").strip()
             if v and os.path.isabs(v) and _inside(v, old):
@@ -764,6 +732,36 @@ def backup_to(base, parent, now=None):
     ts = (now or dt.datetime.now()).strftime("%Y%m%d%H%M%S")
     dest = os.path.join(parent, BACKUP_PREFIX + ts)
     return dest, copy_data(base, dest, dirs=(DEFAULT_CASE_DIR,))
+
+
+AUTO_BACKUP_DIR = os.path.join("backup", "auto")
+AUTO_BACKUP_KEEP = 60          # 하루 두 번(오전, 오후) 만들므로 30일치
+
+
+def auto_backup_slot(now):
+    return now.strftime("%Y%m%d") + ("_AM" if now.hour < 12 else "_PM")
+
+
+def auto_backup(base, s=None, now=None):
+    """하루 두 번(오전, 오후) 데이터 파일을 backup/auto/<년월일>_<AM|PM>/ 에 복사한다. 그 시간대의 백업이 이미 있으면 하지 않는다.
+    사용자가 정한 테스트 케이스 파일은 그 폴더에 case_file_<파일 이름> 으로 함께 복사한다. 오래된 백업은 AUTO_BACKUP_KEEP 개만 남긴다.
+    만든 폴더를 반환한다. 만들지 않았으면 None."""
+    now = now or dt.datetime.now()
+    root = os.path.join(base, AUTO_BACKUP_DIR)
+    dest = os.path.join(root, auto_backup_slot(now))
+    if os.path.isdir(dest) or not has_data(base):
+        return None
+    tmp = dest + ".tmp"
+    shutil.rmtree(tmp, ignore_errors=True)
+    copy_data(base, tmp)
+    cf = case_file(s or {})
+    if case_file_key(base, cf) and os.path.isfile(cf):
+        shutil.copy2(cf, os.path.join(tmp, "case_file_" + os.path.basename(cf)))
+    os.rename(tmp, dest)
+    olds = sorted(n for n in os.listdir(root) if re.match(r"^\d{8}_(AM|PM)$", n))
+    for n in olds[:-AUTO_BACKUP_KEEP]:
+        shutil.rmtree(os.path.join(root, n), ignore_errors=True)
+    return dest
 
 
 def restore_from(src, base, now=None):

@@ -427,7 +427,7 @@ class App(object):
         self.v_jlog = tk.StringVar(value=self.settings.get("jump_log_dir", ""))
         self.v_addr = tk.StringVar(value=self.settings.get("esx_addr", ""))
         self.v_settle = tk.StringVar(value=str(self.settings["seq_settle_min"]))
-        self.v_set = tk.StringVar(value=core.set_label(core.active_set(self.settings)))     # 테스트 종류
+        self.v_cfile = tk.StringVar()           # 지금 쓰는 테스트 케이스 파일 (보여 주기만 한다)
         self.v_status = tk.StringVar()
         self.v_esx_host = tk.StringVar()
         self.build()
@@ -441,6 +441,7 @@ class App(object):
             self.v_status.set(self.load_msg)
             messagebox.showwarning(TITLE, self.load_msg, parent=root)
         root.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.auto_backup_tick()
 
     # ------------------------------------------------------------ 데이터 폴더
     def open_data_dir_at_start(self):
@@ -489,7 +490,7 @@ class App(object):
         self.settings = core.load_settings(self.base)
         self.run_cmds[:] = core.load_rows(os.path.join(self.base, core.RUN_FILE), core.RUN_FIELDS, core.RUN_HEADERS)
         self.mon_cmds[:] = core.load_rows(os.path.join(self.base, core.MON_FILE), core.MON_FIELDS, core.MON_HEADERS)
-        self.load_msg = self.load_case_table(core.active_set(self.settings))
+        self.load_msg = self.load_case_table()
         try:
             self.profiles[:] = core.load_profiles(self.base, seed=True)     # 파일이 없으면(처음 실행) 기본 프로파일로 채움
         except (OSError, ValueError) as e:
@@ -503,21 +504,38 @@ class App(object):
             self.load_msg = (self.load_msg + "\n" if self.load_msg else "") + \
                 "%s 를 읽지 못해 빈 표로 시작함 (원래 파일: %s) %s" % (core.PROFILES_FILE, keep, e)
 
-    def load_case_table(self, name):
-        """테스트 종류 name 의 케이스 표를 self.cases 에 읽는다. 읽지 못하면 그 파일을 옆에 두고 빈 표로 시작한다.
-        알릴 글(없으면 빈 문자열)을 반환한다."""
+    def load_case_table(self):
+        """설정에 적힌 테스트 케이스 파일의 표를 self.cases 에 읽는다. 알릴 글(없으면 빈 문자열)을 반환한다.
+        사용자가 정한 파일이 없어졌거나 읽을 수 없으면 그 파일은 그대로 두고 기본 파일(데이터 폴더의 test_cases.json)로 바꾼다.
+        기본 파일을 읽지 못하면 그 파일을 옆에 두고 빈 표로 시작한다."""
+        msg = ""
+        cf = core.case_file(self.settings)
+        if cf:
+            try:
+                if not os.path.isfile(cf):
+                    raise ValueError("파일이 없음")
+                self.cases[:] = core.load_cases(self.base, cf)
+                return ""
+            except (OSError, ValueError) as e:
+                msg = ("지정한 테스트 케이스 파일을 읽지 못해 기본 파일로 바꿈.\n%s\n%s\n\n그 파일은 그대로 두었다. "
+                       "다시 쓰려면 [불러오기] 에서 고른다." % (cf, e))
+                self.settings = core.switch_case_file(self.base, self.settings, "")
+                try:
+                    core.save_settings(self.base, core.resolve_paths(self.base, self.settings))
+                except OSError:
+                    pass
         try:
-            self.cases[:] = core.load_cases(self.base, name)
-            return ""
+            self.cases[:] = core.load_cases(self.base)
         except (OSError, ValueError) as e:
             self.cases[:] = []
-            bad = core.cases_path(self.base, name)
+            bad = core.cases_path(self.base)
             keep = bad + ".bad-" + dt.datetime.now().strftime("%Y%m%d%H%M%S")
             try:
                 os.replace(bad, keep)
             except OSError:
                 keep = bad
-            return "%s 를 읽지 못해 빈 표로 시작함 (원래 파일: %s) %s" % (os.path.basename(bad), keep, e)
+            msg = (msg + "\n\n" if msg else "") + "%s 를 읽지 못해 빈 표로 시작함 (원래 파일: %s) %s" % (core.CASES_FILE, keep, e)
+        return msg
 
     def reload_data(self):
         """데이터 폴더를 바꾸거나 백업을 불러온 뒤 화면 전체를 다시 채운다."""
@@ -536,7 +554,7 @@ class App(object):
             self.v_jlog.set(self.settings.get("jump_log_dir", ""))
             self.v_addr.set(self.settings.get("esx_addr", ""))
             self.v_settle.set(str(self.settings["seq_settle_min"]))
-            self.refresh_set_box()
+            self.refresh_case_file_box()
         finally:
             self.loading = False
         self.dirty = dict((k, False) for k in self.dirty)
@@ -699,18 +717,16 @@ class App(object):
         ttk.Label(row0, text="설정", style="Title.TLabel").pack(side="left")
         ttk.Label(row0, text="바뀌면 바로 데이터 폴더에 저장된다. 데이터 폴더는 생성기를 다시 빌드해도 남는다.",
                   style="Hint.TLabel").pack(side="left", padx=px(10))
-        row_set = ttk.Frame(sf)                  # 테스트 종류: 탭 4 의 표와 아래 줄의 기록 CSV, 로그 폴더를 종류마다 따로 둔다
-        row_set.pack(fill="x", pady=(px(6), 0))
-        ttk.Label(row_set, text="테스트 종류").pack(side="left")
-        self.cb_set = ttk.Combobox(row_set, textvariable=self.v_set, state="readonly", width=22)
-        self.cb_set.pack(side="left", padx=(px(6), px(8)))
-        self.cb_set.bind("<<ComboboxSelected>>", lambda e: self.set_selected())
-        ttk.Button(row_set, text="+ 새 종류", command=self.new_case_set).pack(side="left")
-        ttk.Button(row_set, text="이름 변경", command=self.rename_case_set).pack(side="left", padx=px(6))
-        ttk.Button(row_set, text="종류 삭제", command=self.delete_case_set).pack(side="left")
-        ttk.Label(row_set, text="종류마다 따로 저장: 탭 4 테스트 케이스, 테스트 기록 CSV, 로그 폴더.  모든 종류가 같이 씀: 탭 1, 2, 3 과 그 밖의 설정",
-                  style="Hint.TLabel").pack(side="left", padx=px(12))
-        self.refresh_set_box()
+        row_cf = ttk.Frame(sf)                   # 테스트 케이스 파일: 탭 4 의 표를 저장하는 파일
+        row_cf.pack(fill="x", pady=(px(6), 0))
+        ttk.Label(row_cf, text="테스트 케이스 파일").grid(row=0, column=0, sticky="w")
+        ttk.Entry(row_cf, textvariable=self.v_cfile, state="readonly").grid(row=0, column=1, sticky="ew", padx=(px(6), px(4)))
+        ttk.Button(row_cf, text="불러오기", command=self.load_case_file).grid(row=0, column=2, padx=(0, px(4)))
+        ttk.Button(row_cf, text="다른 이름으로 저장", command=self.save_case_file_as).grid(row=0, column=3, padx=(0, px(10)))
+        ttk.Label(row_cf, text="탭 4 의 표를 이 파일에 자동 저장한다. 탭 1, 2, 3 은 어느 파일을 쓰든 같이 쓴다",
+                  style="Hint.TLabel").grid(row=0, column=4, sticky="w")
+        row_cf.columnconfigure(1, weight=1)
+        self.refresh_case_file_box()
         row1 = ttk.Frame(sf)
         row1.pack(fill="x", pady=(px(6), 0))
         ttk.Label(row1, text="테스트 기록 CSV").grid(row=0, column=0, sticky="w")
@@ -1225,7 +1241,7 @@ class App(object):
             tail = "   자동 저장 %s" % self.last_saved.strftime("%H:%M:%S")
         if failed:
             tail += "   저장 실패: " + ", ".join(failed)
-        self.v_status.set("데이터 폴더: %s   테스트 종류: %s%s" % (self.base, core.set_label(core.active_set(self.settings)), tail))
+        self.v_status.set("데이터 폴더: %s   테스트 케이스 파일: %s%s" % (self.base, self.case_file_label(), tail))
 
     def autosave(self, kind):
         """설정, 탭 1, 탭 2, 탭 3, 탭 4 를 바뀔 때마다 데이터 폴더에 저장한다. 실패하면 상태 줄과 한 번의 알림으로 알린다."""
@@ -1243,7 +1259,7 @@ class App(object):
             elif kind == "profiles":
                 core.save_profiles(self.base, self.profiles)
             else:
-                core.save_cases(self.base, self.cases, core.active_set(self.settings))
+                core.save_cases(self.base, self.cases, core.case_file(self.settings))
             self.dirty[kind] = False
             self.last_saved = dt.datetime.now()
         except OSError as e:
@@ -1251,8 +1267,9 @@ class App(object):
             if not self.save_warned.get(kind):
                 self.save_warned[kind] = True
                 name = dict((k, n) for n, k in self.SAVE_NAMES)[kind]
-                messagebox.showerror(TITLE, "%s 을 자동 저장하지 못함\n%s\n%s\n\n데이터 폴더에 쓸 수 있는지 확인할 것"
-                                     % (name, self.base, e), parent=self.root)
+                where = core.cases_path(self.base, core.case_file(self.settings)) if kind == "cases" else self.base
+                messagebox.showerror(TITLE, "%s 을 자동 저장하지 못함\n%s\n%s\n\n쓸 수 있는 위치인지 확인할 것. 엑셀 등이 이 파일을 열고 있으면 닫을 것.\n"
+                                            "저장될 때까지 상태 줄에 '저장 실패' 가 보인다." % (name, where, e), parent=self.root)
         self.update_status()
 
     def save_everything(self):
@@ -1296,188 +1313,126 @@ class App(object):
                  esx_addr=self.v_addr.get().strip(), seq_settle_min=settle)
         return s
 
-    # ------------------------------------------------------------ 테스트 종류
-    def refresh_set_box(self):
-        """테스트 종류 칸의 목록과 지금 고른 종류를 설정에 맞춘다."""
-        self.cb_set.configure(values=[core.DEFAULT_SET_LABEL] + list(self.settings.get("case_sets") or []))
-        self.v_set.set(core.set_label(core.active_set(self.settings)))
+    # ------------------------------------------------------------ 테스트 케이스 파일 (불러오기, 다른 이름으로 저장, 자동 백업)
+    CASE_FILE_TYPES = [("테스트 케이스 파일", "*.csv *.json"), ("CSV", "*.csv"), ("JSON", "*.json"), ("모든 파일", "*.*")]
 
-    def _save_before_set_change(self):
-        """지금 종류의 표와 설정을 저장한다. 저장하지 못하면 알리고 False (종류를 바꾸면 고친 내용을 잃기 때문에 바꾸지 않는다)."""
+    def case_file_label(self):
+        cf = core.case_file(self.settings)
+        return os.path.basename(cf) if cf else "기본 (%s)" % core.CASES_FILE
+
+    def refresh_case_file_box(self):
+        """테스트 케이스 파일 칸에 지금 쓰는 파일의 경로를 보인다."""
+        cf = core.case_file(self.settings)
+        self.v_cfile.set(cf if cf else "%s   (지정하지 않음: 데이터 폴더에 자동 저장)" % core.cases_path(self.base))
+
+    def _save_before_file_change(self):
+        """지금 파일의 표와 설정을 저장한다. 저장하지 못하면 알리고 False (파일을 바꾸면 고친 내용을 잃기 때문에 바꾸지 않는다)."""
+        self.finish_all_edits()
         st = self.current_settings()
         if st is None:                      # 설정 영역의 분 칸이 숫자가 아님
-            self.refresh_set_box()
             return False
         self.settings = st
         if not self.save_everything():
-            messagebox.showerror(TITLE, "지금 테스트 종류의 내용을 저장하지 못해 종류를 바꾸지 않았음.\n데이터 폴더에 쓸 수 있는지 확인할 것\n%s"
-                                 % self.base, parent=self.root)
-            self.refresh_set_box()
+            messagebox.showerror(TITLE, "지금 테스트 케이스 표를 저장하지 못해 파일을 바꾸지 않았음.\n쓸 수 있는 위치인지 확인할 것\n%s"
+                                 % core.cases_path(self.base, core.case_file(self.settings)), parent=self.root)
             return False
         return True
 
-    def set_selected(self):
-        if self.loading:
-            return
-        label = self.v_set.get()
-        name = "" if label == core.DEFAULT_SET_LABEL else label
-        if name != core.active_set(self.settings):
-            self.switch_case_set(name)
-
-    def switch_case_set(self, name, settings=None):
-        """테스트 종류를 name 으로 바꾼다. 지금 종류의 케이스 표, 기록 CSV, 로그 폴더를 저장한 뒤 name 종류의 것을 불러온다.
-        settings: 이미 만든 설정(종류를 추가하거나 지운 직후)을 줄 때. 바꿨으면 True."""
-        self.finish_all_edits()
-        if settings is None:
-            if not self._save_before_set_change():
-                return False
-            try:
-                st = core.switch_case_set(self.settings, name)
-            except ValueError as e:
-                messagebox.showerror(TITLE, "테스트 종류를 바꾸지 못함\n%s" % e, parent=self.root)
-                self.refresh_set_box()
-                return False
-        else:
-            st = settings
+    def use_case_file(self, path, cases=None, note=""):
+        """테스트 케이스 파일을 path 로 바꾼다(빈 값 = 기본 파일). cases 를 주면 그 표를 path 에 먼저 저장한다(다른 이름으로 저장).
+        그 뒤 path 의 표를 화면에 읽고, 이 파일에서 마지막에 쓰던 기록 CSV 와 로그 폴더로 바꾼다. 바꿨으면 True."""
         try:
+            if cases is not None:
+                core.save_cases(self.base, cases, path)
+            new_cases = core.load_cases(self.base, path)
+            st = core.switch_case_file(self.base, self.settings, path)
             core.save_settings(self.base, core.resolve_paths(self.base, st))
-        except OSError as e:
-            messagebox.showerror(TITLE, "테스트 종류를 바꾸지 못함 (설정을 저장하지 못함)\n%s" % e, parent=self.root)
-            self.refresh_set_box()
+        except (OSError, ValueError) as e:
+            messagebox.showerror(TITLE, "테스트 케이스 파일을 바꾸지 못함\n%s\n%s" % (path or core.cases_path(self.base), e), parent=self.root)
             return False
         self.settings = st
         self.loading = True
         try:
-            msg = self.load_case_table(core.active_set(st))
+            self.cases[:] = new_cases
             paths = core.resolve_paths(self.base, st)
             self.v_record.set(paths["record_csv"])
             self.v_log.set(paths["log_dir"])
-            self.refresh_set_box()
+            self.refresh_case_file_box()
         finally:
             self.loading = False
         self.sched = []
         self.t_case.refresh(0)
-        self.show_messages("테스트 종류: %s. 탭 4 에서 [명령어 생성] 을 누르면 여기에 결과가 나온다."
-                           % core.set_label(core.active_set(st)), [], [])
+        self.show_messages("테스트 케이스 파일: %s. 탭 4 에서 [명령어 생성] 을 누르면 여기에 결과가 나온다." % self.case_file_label(), [], [])
         self.update_status()
-        if msg:
-            messagebox.showwarning(TITLE, msg, parent=self.root)
+        if note:
+            self.v_status.set(note)
         return True
 
-    def _set_dialog(self, title, lines, button, initial="", copy_text=None):
-        """테스트 종류 이름을 입력받는 창. copy_text 를 주면 체크 칸을 하나 둔다. 누른 결과는 self.set_done(이름, 체크) 로 처리한다."""
-        C, px = COLORS, self.px
-        top = tk.Toplevel(self.root, bg=C["card"])
-        top.title(title)
-        top.transient(self.root)
-        fr = ttk.Frame(top, padding=(px(14), px(12), px(14), px(12)))
-        fr.pack(fill="both", expand=True)
-        for i, text in enumerate(lines):
-            ttk.Label(fr, text=text, style="Bold.TLabel" if i == 0 else "Hint.TLabel").pack(anchor="w", pady=(0, px(4)))
-        v_name = tk.StringVar(value=initial)
-        ent = ttk.Entry(fr, textvariable=v_name, width=36)
-        ent.pack(anchor="w", pady=(px(4), px(8)))
-        v_copy = tk.BooleanVar(value=False)
-        if copy_text:
-            ttk.Checkbutton(fr, text=copy_text, variable=v_copy).pack(anchor="w", pady=(0, px(8)))
-        bf = ttk.Frame(fr)
-        bf.pack(fill="x", pady=(px(6), 0))
-        ttk.Button(bf, text="취소", command=top.destroy).pack(side="right")
-        ttk.Button(bf, text=button, style="Blue.TButton",
-                   command=lambda: self.set_done(top, v_name.get(), v_copy.get())).pack(side="right", padx=(0, px(6)))
-        top.bind("<Return>", lambda e: self.set_done(top, v_name.get(), v_copy.get()))
-        top.bind("<Escape>", lambda e: top.destroy())
-        self.set_win, self.set_name_var, self.set_copy_var = top, v_name, v_copy
-        self._center(top)
-        top.grab_set()
-        ent.focus_set()
-        ent.selection_range(0, "end")
-        return top
+    def _case_file_start_dir(self):
+        cf = core.case_file(self.settings)
+        d = os.path.dirname(cf) if cf else (core.load_config().get("case_file_dir") or "")
+        return d if d and os.path.isdir(d) else self.base
 
-    def new_case_set(self):
-        """[+ 새 종류]: 이름을 받아 테스트 종류를 만들고 그 종류로 바꾼다. 빈 표로 시작하거나 지금 케이스를 복사해 시작한다."""
-        self.finish_all_edits()
-        if not self._save_before_set_change():
-            return
-
-        def done(top, name, copy):
-            err = core.case_set_error(name, self.settings)
-            if err:
-                messagebox.showerror(TITLE, err, parent=top)
-                return
-            name = name.strip()
-            had_file = os.path.exists(core.cases_path(self.base, name))      # 백업에서 돌아온 표가 남아 있는 경우
-            try:
-                st2 = core.add_case_set(self.base, self.settings, name, cases=list(self.cases) if copy else None)
-                st2 = core.switch_case_set(st2, name)
-            except (OSError, ValueError) as e:
-                messagebox.showerror(TITLE, "테스트 종류를 만들지 못함\n%s" % e, parent=top)
-                return
-            top.destroy()
-            if self.switch_case_set(name, settings=st2):
-                how = ("지금 케이스 %d개를 복사" % len(self.cases)) if copy else (
-                    "데이터 폴더에 남아 있던 케이스 표 %d개를 불러옴" % len(self.cases) if had_file else "빈 표")
-                self.v_status.set("테스트 종류 '%s' 를 만듦 (%s)" % (name, how))
-
-        self.set_done = done
-        self._set_dialog("새 테스트 종류",
-                         ["새 테스트 종류의 이름 (예: SPR, EMR)",
-                          "한글, 영문, 숫자, . _ - 를 쓴다(공백 불가). 테스트 케이스 표, 테스트 기록 CSV, 로그 폴더를 이 종류의 것으로 따로 둔다.",
-                          "실행 명령, 모니터링 명령, 설정 프로파일은 모든 종류가 같이 쓴다."],
-                         "만들기", copy_text="지금 보이는 테스트 케이스 %d개를 복사해서 시작 (체크하지 않으면 빈 표)" % len(self.cases))
-
-    def rename_case_set(self):
-        """[이름 변경]: 지금 고른 테스트 종류의 이름을 바꾼다. 기본 종류는 바꿀 수 없다."""
-        self.finish_all_edits()
-        old = core.active_set(self.settings)
-        if not old:
-            messagebox.showinfo(TITLE, "'%s' 종류는 이름을 바꿀 수 없음.\n\n다른 이름으로 쓰려면 [+ 새 종류] 에서 '지금 보이는 테스트 케이스를 "
-                                       "복사해서 시작' 을 체크해 새 종류를 만든다." % core.DEFAULT_SET_LABEL, parent=self.root)
-            return
-        if not self._save_before_set_change():
-            return
-
-        def done(top, name, copy):
-            err = core.case_set_error(name, self.settings, old=old)
-            if err:
-                messagebox.showerror(TITLE, err, parent=top)
-                return
-            try:
-                st2 = core.rename_case_set(self.base, self.settings, old, name)
-            except (OSError, ValueError) as e:
-                messagebox.showerror(TITLE, "이름을 바꾸지 못함\n%s" % e, parent=top)
-                return
-            top.destroy()
-            self.switch_case_set(core.active_set(st2), settings=st2)
-
-        self.set_done = done
-        self._set_dialog("테스트 종류 이름 변경", ["'%s' 의 새 이름" % old, "한글, 영문, 숫자, . _ - 를 쓴다(공백 불가)."], "바꾸기", initial=old)
-
-    def delete_case_set(self):
-        """[종류 삭제]: 지금 고른 테스트 종류를 지우고 기본 종류로 바꾼다. 케이스 표 파일은 backup 폴더로 옮긴다."""
-        self.finish_all_edits()
-        name = core.active_set(self.settings)
-        if not name:
-            messagebox.showinfo(TITLE, "'%s' 종류는 삭제할 수 없음" % core.DEFAULT_SET_LABEL, parent=self.root)
-            return
-        if not messagebox.askyesno(TITLE, "테스트 종류 '%s' 를 삭제할까요?\n\n이 종류의 테스트 케이스 %d개가 목록에서 없어진다. 케이스 표 파일은 "
-                                          "지우지 않고 데이터 폴더의 backup 아래로 옮긴다. 테스트 기록 CSV 와 로그 파일은 그대로 둔다."
-                                   % (name, len(self.cases)), parent=self.root):
-            return
-        if not self._save_before_set_change():
-            return
+    def _remember_case_file_dir(self, path):
         try:
-            st2, kept = core.delete_case_set(self.base, self.settings, name)
-        except (OSError, ValueError) as e:
-            messagebox.showerror(TITLE, "테스트 종류를 삭제하지 못함\n%s" % e, parent=self.root)
+            cfg = core.load_config()
+            cfg["case_file_dir"] = os.path.dirname(os.path.abspath(path))
+            core.save_config(cfg)
+        except OSError:
+            pass
+
+    def load_case_file(self):
+        """[불러오기]: 고른 파일의 테스트 케이스 표를 불러오고, 그 뒤로는 그 파일에 자동 저장한다."""
+        if not self._save_before_file_change():
             return
-        if self.switch_case_set("", settings=st2):
-            messagebox.showinfo(TITLE, "테스트 종류 '%s' 를 삭제함.%s" % (name, ("\n\n케이스 표를 옮겨 둔 곳: %s" % kept) if kept else ""),
-                                parent=self.root)
+        p = filedialog.askopenfilename(parent=self.root, title="불러올 테스트 케이스 파일 선택", initialdir=self._case_file_start_dir(),
+                                       filetypes=self.CASE_FILE_TYPES)
+        if not p:
+            return
+        p = os.path.normpath(p)
+        try:
+            n = len(core.load_cases(self.base, p))       # 바꾸기 전에 읽을 수 있는 파일인지 본다
+        except (OSError, ValueError) as e:
+            messagebox.showerror(TITLE, "이 파일은 불러올 수 없음\n%s\n\n%s\n\n[다른 이름으로 저장] 으로 만든 테스트 케이스 파일(.csv, .json)을 고를 것"
+                                 % (p, e), parent=self.root)
+            return
+        if self.use_case_file(p, note="불러옴: %s (케이스 %d개). 고치면 이 파일에 자동 저장된다." % (p, n)):
+            self._remember_case_file_dir(p)
+
+    def save_case_file_as(self):
+        """[다른 이름으로 저장]: 지금 표를 고른 파일에 저장하고, 그 뒤로는 그 파일에 자동 저장한다. 이전 파일은 마지막 상태로 남는다."""
+        if not self._save_before_file_change():
+            return
+        cf = core.case_file(self.settings)
+        name = os.path.basename(cf) if cf else "test_cases_%s.csv" % dt.datetime.now().strftime("%Y%m%d")
+        p = filedialog.asksaveasfilename(parent=self.root, title="테스트 케이스 표를 저장할 파일 (이 파일에 자동 저장하게 된다)",
+                                         initialdir=self._case_file_start_dir(), initialfile=name, defaultextension=".csv",
+                                         filetypes=self.CASE_FILE_TYPES)
+        if not p:
+            return
+        p = os.path.normpath(p)
+        if self.use_case_file(p, cases=list(self.cases), note="저장함: %s (케이스 %d개). 고치면 이 파일에 자동 저장된다." % (p, len(self.cases))):
+            self._remember_case_file_dir(p)
+
+    AUTO_BACKUP_CHECK_MS = 30 * 60 * 1000
+
+    def auto_backup_tick(self):
+        """하루 두 번(오전, 오후) 데이터 파일을 데이터 폴더의 backup/auto 에 복사한다. 생성기가 켜져 있는 동안 30분마다 확인한다."""
+        try:
+            if not any(self.dirty.values()):
+                dest = core.auto_backup(self.base, self.settings)
+                if dest:
+                    self.last_auto_backup = dest
+        except OSError:
+            pass
+        try:
+            self.root.after(self.AUTO_BACKUP_CHECK_MS, self.auto_backup_tick)
+        except tk.TclError:
+            pass
 
     # ------------------------------------------------------------ 설정 버튼
     def pick_record(self):
-        cur = self.v_record.get().strip() or core.default_paths(self.base, core.active_set(self.settings))[0]
+        cur = self.v_record.get().strip() or core.default_paths(self.base)[0]
         opts = dict(parent=self.root, title="테스트 기록 CSV 선택 (없는 파일 이름을 적으면 새로 만든다)",
                     initialdir=os.path.dirname(cur) if os.path.isdir(os.path.dirname(cur)) else self.base,
                     initialfile=os.path.basename(cur), defaultextension=".csv",
