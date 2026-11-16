@@ -36,10 +36,10 @@ def vm(name, job="(없음)", monitors=(), profiles=()):
     return {"name": name, "job": job, "monitors": list(monitors), "profiles": list(profiles), "end_ref": False}
 
 
-def case(name, vms, esx="esx01", esx_monitors=(), esx_profiles=(), max_wait="", group="g1", desc=""):
+def case(name, vms, esx="esx01", esx_monitors=(), esx_profiles=(), max_wait="", group="g1", desc="", seq_start=""):
     c = core.new_case(esx, "", 0)
     c.update(name=name, vms=vms, esx_monitors=list(esx_monitors), esx_profiles=list(esx_profiles), max_wait=max_wait,
-             group=group, desc=desc)
+             group=group, desc=desc, seq_start=seq_start)
     return c
 
 
@@ -48,6 +48,10 @@ class TcrunBase(unittest.TestCase):
     DASH = False
 
     def setUp(self):
+        # 생성기는 시작 시각을 이 PC 의 시간대로 초(epoch)로 바꾼다. 가짜 환경의 시계는 KST 이므로 시험 프로세스도 KST 로 맞춘다
+        self.old_tz = os.environ.get("TZ")
+        os.environ["TZ"] = "Asia/Seoul"
+        time.tzset()
         self.e = fakeenv.FakeEnv(dash=self.DASH)
         e = self.e
         self.run_cmds = [
@@ -70,6 +74,11 @@ class TcrunBase(unittest.TestCase):
 
     def tearDown(self):
         self.e.close()
+        if self.old_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = self.old_tz
+        time.tzset()
 
     def two_vms(self, **esx_kw):
         self.e.add_vm("esx01ev01", crontab="30 9 * * 1 /home/tester/existing.sh > /tmp/x.log 2>&1\n")
@@ -342,6 +351,79 @@ class FullFlowTests(TcrunBase):
         self.assertEqual(self.fired(cron, "esx01ev02", "job.sh"), [job], "시계가 빠른 VM 에서도 등록 시각이 지나지 않아 실행됨")
         j1, j2 = e.vm_file("esx01ev01", "job.log"), e.vm_file("esx01ev02", "job.log")
         self.assertEqual((j1[0][0], j2[0][0]), ("start", "start"))
+
+
+class StartTimeAndGapTests(TcrunBase):
+    def test_gap_between_cases(self):
+        """케이스 사이 간격: 시각을 비운 다음 케이스의 잡은 앞 케이스의 잡이 끝난 시각에서 N분 이상 지난 뒤에 시작한다. 첫 케이스에는 없다."""
+        e = self.e
+        self.two_vms()
+        c1 = case("g1", [vm("esx01ev01", "job_a", ["gmon"])])
+        c2 = case("g2", [vm("esx01ev01", "job_a", ["gmon"])])
+        res, plan = self.gen([c1, c2], seq_gap_min=15, mon_lead_min=2)        # 가짜 환경에서 간격 없이 걸리는 시간(8분쯤)보다 길게
+        self.assertIn("SET GAP_MIN 15\n", res["plan"])
+        e.start_cron()
+        rc, out = e.tcrun("run", plan, "esx01", timeout=600)
+        log = self.log()
+        self.assertEqual(rc, 0, self.ctx(out))
+        a, b = self.results()
+        self.assertGreaterEqual(epoch(b["job_start"]) - epoch(a["job_end"]), 15 * 60, "앞 잡 종료에서 15분 이상 지난 뒤 다음 잡 시작")
+        self.assertLess(epoch(b["job_start"]) - epoch(a["job_end"]), 15 * 60 + 150, "필요한 만큼만 기다림(분 올림과 시계 여유)")
+        self.assertEqual(epoch(b["job_start"]) - epoch(b["monitor_start"]), 120, "간격이 있어도 모니터링은 잡 시작 2분 전에 시작")
+        self.assertEqual(len(re.findall(r"gap: the previous job ended .* first start time moved", log)), 1)
+        self.assertLess(epoch(a["job_start"]) - epoch(a["begin"]), 75 + 60 + 120 + 90, "첫 케이스에는 간격을 적용하지 않음")
+        self.assertIn("15 min or more between the end of a job and the start of the next job", log)
+        self.assertNotIn("WARN", log)
+
+    def test_start_time_of_the_plan(self):
+        """시작 시각을 적은 케이스는 그 시각에 잡을 시작하고(모니터링은 그 N분 전) 시각을 비운 다음 케이스는 앞 케이스가 끝난 뒤 시작한다."""
+        e = self.e
+        self.two_vms()
+        c1 = case("t1", [vm("esx01ev01", "job_a", ["gmon"]), vm("esx01ev02", "job_a")], seq_start="10:12")
+        c2 = case("t2", [vm("esx01ev01", "job_a")])
+        res, plan = self.gen([c1, c2], mon_lead_min=3, seq_gap_min=0)
+        self.assertRegex(res["plan"], r"(?m)^START 001 %d 2026-11-20 10:12$" % int(epoch("2026-11-20 10:12:00")))
+        cron = e.start_cron()
+        rc, out = e.tcrun("run", plan, "esx01", timeout=600)
+        log = self.log()
+        self.assertEqual(rc, 0, self.ctx(out))
+        a, b = self.results()
+        self.assertEqual((a["job_start"], a["monitor_start"]), ("2026-11-20 10:12:00", "2026-11-20 10:09:00"), self.ctx(out))
+        self.assertIn("start time: the plan sets the job start of this case to 2026-11-20 10:12", log)
+        self.assertEqual(self.fired(cron, "esx01ev01", "job.sh")[0], epoch("2026-11-20 10:12:00"), "cron 이 그 분에 잡을 실행")
+        self.assertEqual(self.fired(cron, "esx01ev02", "job.sh"), [epoch("2026-11-20 10:12:00")], "잡이 있는 모든 VM 이 같은 분에 시작")
+        self.assertEqual(self.fired(cron, "esx01ev01", "mon.sh start")[0], epoch("2026-11-20 10:09:00"))
+        self.assertLess(epoch(b["job_start"]) - epoch(a["end"]), 75 + 60 + 90, "시각을 비운 다음 케이스는 앞 케이스가 끝나면 이어서 시작(간격 0)")
+        self.assertNotIn("WARN the start time", log)
+        self.assertNotIn("gap:", log)
+
+    def test_start_time_that_has_passed_starts_as_soon_as_possible(self):
+        """지정한 시각을 지킬 수 없으면(앞 케이스가 그때까지 끝나지 않음) 가능한 가장 이른 시각에 시작하고 WARN 을 남긴다."""
+        e = self.e
+        self.two_vms()
+        c1 = case("p1", [vm("esx01ev01", "job_b")])                # 150초 걸리는 잡
+        c2 = case("p2", [vm("esx01ev01", "job_a")], seq_start="10:03")
+        res, plan = self.gen([c1, c2], seq_gap_min=30)
+        e.start_cron()
+        rc, out = e.tcrun("run", plan, "esx01", timeout=600)
+        log = self.log()
+        self.assertEqual(rc, 0, self.ctx(out))
+        a, b = self.results()
+        self.assertGreater(epoch(a["job_end"]), epoch("2026-11-20 10:03:00"), "앞 케이스가 지정한 시각보다 늦게 끝남")
+        self.assertIn("WARN the start time 2026-11-20 10:03 of the plan cannot be met any more", log)
+        self.assertLess(epoch(b["job_start"]) - epoch(a["end"]), 75 + 60 + 90, "지킬 수 없으면 가능한 가장 이른 시각에 시작")
+        self.assertNotIn("gap:", log, "시각을 적은 케이스에는 케이스 사이 간격을 적용하지 않음")
+        self.assertEqual(b["status"], "done")
+
+    def test_check_reports_a_start_time_that_has_passed(self):
+        e = self.e
+        self.two_vms()
+        res, plan = self.gen([case("k1", [vm("esx01ev01", "job_a")], seq_start="09:55"),
+                              case("k2", [vm("esx01ev01", "job_a")], seq_start="23:00")], now=dt.datetime(2026, 11, 20, 9, 50, 0))
+        rc, out = e.tcrun("check", plan)
+        self.assertIn("[PROBLEM] case k1: the start time 2026-11-20 09:55 has already passed", out)
+        self.assertRegex(out, r"\[ok\] start time: job at 2026-11-20 23:00 \(\d+ min from now\)")
+        self.assertRegex(out, r"CHECK RESULT: 1 problem")
 
 
 class FailureTests(TcrunBase):

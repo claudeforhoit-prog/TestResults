@@ -23,7 +23,7 @@ TITLE = "테스트 실행 명령 생성기 v%s" % core.VERSION
 NONE_JOB = core.NONE_JOB
 MODE_LABELS = {"seq": "순서 실행", "time": "시각 지정"}
 SEQ_HIDE = ("interval", "start", "mon_start", "mon_stop", "end_time")      # 순서 실행에서 숨기는 탭 4 열
-TIME_HIDE = ("prof", "max_wait")                                            # 시각 지정에서 숨기는 탭 4 열
+TIME_HIDE = ("prof", "max_wait", "seq_start")                               # 시각 지정에서 숨기는 탭 4 열
 
 COLORS = dict(bg="#f3f5f8", card="#ffffff", line="#d5dbe3", head="#e8edf4", ink="#1f2937", mut="#6b7280",
               blue="#2a6fd6", blue_d="#1f5bb5", green="#1f9d6b", green_d="#17845a", purple="#7a4fbf", purple_d="#6540a3",
@@ -427,12 +427,13 @@ class App(object):
         self.v_jlog = tk.StringVar(value=self.settings.get("jump_log_dir", ""))
         self.v_addr = tk.StringVar(value=self.settings.get("esx_addr", ""))
         self.v_settle = tk.StringVar(value=str(self.settings["seq_settle_min"]))
+        self.v_gap = tk.StringVar(value=str(self.settings["seq_gap_min"]))      # 순서 실행: 케이스 사이 간격(분)
         self.v_cfile = tk.StringVar()           # 지금 쓰는 테스트 케이스 파일 (보여 주기만 한다)
         self.v_status = tk.StringVar()
         self.v_esx_host = tk.StringVar()
         self.build()
         self.apply_mode()
-        for v in (self.v_record, self.v_log, self.v_user, self.v_mon, self.v_stop, self.v_jlog, self.v_addr, self.v_settle):
+        for v in (self.v_record, self.v_log, self.v_user, self.v_mon, self.v_stop, self.v_jlog, self.v_addr, self.v_settle, self.v_gap):
             v.trace_add("write", self._settings_changed) if hasattr(v, "trace_add") else v.trace("w", self._settings_changed)
         self.update_status()
         for m in self.start_msgs:
@@ -554,6 +555,7 @@ class App(object):
             self.v_jlog.set(self.settings.get("jump_log_dir", ""))
             self.v_addr.set(self.settings.get("esx_addr", ""))
             self.v_settle.set(str(self.settings["seq_settle_min"]))
+            self.v_gap.set(str(self.settings["seq_gap_min"]))
             self.refresh_case_file_box()
         finally:
             self.loading = False
@@ -758,6 +760,9 @@ class App(object):
         ttk.Label(self.f_seq, text="분 뒤 잡 시작").pack(side="left", padx=(0, px(18)))
         ttk.Label(self.f_seq, text="VM 다시 켠 뒤 잡 시작까지 최소").pack(side="left")
         ttk.Spinbox(self.f_seq, from_=0, to=240, width=4, textvariable=self.v_settle).pack(side="left", padx=px(6))
+        ttk.Label(self.f_seq, text="분").pack(side="left", padx=(0, px(18)))
+        ttk.Label(self.f_seq, text="케이스 사이 간격").pack(side="left")
+        ttk.Spinbox(self.f_seq, from_=0, to=1440, width=5, textvariable=self.v_gap).pack(side="left", padx=px(6))
         ttk.Label(self.f_seq, text="분").pack(side="left")
         self.row_seq = ttk.Frame(sf)             # 순서 실행에서만 보이는 줄
         ttk.Label(self.row_seq, text="점프 VM 로그 폴더").grid(row=0, column=0, sticky="w")
@@ -924,10 +929,16 @@ class App(object):
         if self.mode() == "seq":
             st = self.current_settings(show_error=False) or self.settings
             return [
-                "순서 실행에서는 시각을 입력하지 않는다. 점프 VM 이 케이스를 표의 순서대로 진행한다. ESX 호스트가 여러 대이면 "
+                "순서 실행에서는 점프 VM 이 케이스를 표의 순서대로 진행한다. ESX 호스트가 여러 대이면 "
                 "호스트마다 따로 진행하고 서로 기다리지 않는다.",
                 "케이스 행(옅은 파란 바탕, 굵은 글씨): 적용 체크, 케이스 이름, 설명, ESX 호스트, ESX 모니터링, 설정(대상이 ESX 호스트인 "
-                "프로파일), 최대 대기, 테스트 그룹",
+                "프로파일), 최대 대기, 시작 시각, 테스트 그룹",
+                "시작 시각: 비우면 '자동' 이다. 자동인 케이스는 앞 케이스의 잡이 끝난 시각에서 %d분(설정 영역의 '케이스 사이 간격') 이상 지난 "
+                "뒤에 잡을 시작한다. 시각을 적으면 그 시각에 잡을 시작한다. '10:00' 처럼 시:분만 적으면 [명령어 생성] 을 누른 뒤 처음 오는 "
+                "그 시각이고, '2026-11-20 10:00:00' 처럼 날짜까지 적을 수도 있다. 예: 첫 케이스에 10:00 을 적고 나머지를 비우면 첫 케이스는 "
+                "10시에, 나머지는 앞 케이스가 끝난 뒤 차례로 시작한다." % int(st.get("seq_gap_min", 30)),
+                "시각을 적은 케이스에는 케이스 사이 간격을 적용하지 않는다. 설정 적용과 VM 켜기는 그 시각 전에 미리 한다. 앞 케이스가 그때까지 "
+                "끝나지 않았거나 VM 을 다시 켠 뒤의 대기가 남았으면 가능한 가장 이른 시각에 시작하고 로그에 WARN 을 남긴다.",
                 "VM 행(└): VM 이름, 잡, 그 VM 의 모니터링, 설정(대상이 VM 인 프로파일), 종료 기준 VM",
                 "한 케이스의 진행 순서: 설정 적용, 모니터링 시작, %d분 뒤 잡 시작(잡이 있는 모든 VM 이 같은 분에 시작), 잡 종료 확인, "
                 "모니터링 중지, crontab 줄 삭제. 그 뒤 다음 케이스로 넘어간다." % ld[0],
@@ -1052,6 +1063,7 @@ class App(object):
                 dict(key="mon", title="모니터링", width=180, popup=self.edit_monitors, stretch=True),
                 dict(key="prof", title="설정", width=200, popup=self.edit_profiles),
                 dict(key="max_wait", title="최대 대기", width=80),
+                dict(key="seq_start", title="시작 시각", width=150),
                 dict(key="interval", title="간격", width=50),
                 dict(key="start", title="잡 시작 (KST)", width=140),
                 dict(key="mon_start", title="모니터링 시작", width=95),
@@ -1093,8 +1105,9 @@ class App(object):
         "time": "칸을 두 번 누르면 고친다. 케이스 행(옅은 파란 바탕)은 케이스 설정, VM 행(└)은 그 VM 의 잡과 모니터링. "
                 "적용 체크한 케이스는 [명령어 생성] 에서 빠진다. 테스트 그룹, 잡 종료 (리포트), 종료 기준 VM 은 "
                 "리포트용 CSV 에만 들어간다. 자세한 설명은 [도움말].",
-        "seq": "순서 실행: 시각을 입력하지 않는다. 점프 VM 이 케이스를 표의 순서대로 진행하고, 잡의 프로세스가 끝난 것을 확인한 뒤 "
-               "다음 케이스로 넘어간다. 케이스 행의 설정 칸은 ESX 호스트 설정, VM 행의 설정 칸은 VM 설정(탭 3 의 프로파일)이다. "
+        "seq": "순서 실행: 점프 VM 이 케이스를 표의 순서대로 진행하고, 잡의 프로세스가 끝난 것을 확인한 뒤 다음 케이스로 넘어간다. "
+               "시작 시각 칸을 비우면 자동(앞 케이스의 잡이 끝나고 '케이스 사이 간격' 뒤), 시각을 적으면 그 시각에 잡을 시작한다. "
+               "케이스 행의 설정 칸은 ESX 호스트 설정, VM 행의 설정 칸은 VM 설정(탭 3 의 프로파일)이다. "
                "적용 체크한 케이스는 [명령어 생성] 에서 빠진다. 자세한 설명은 [도움말].",
     }
     RESULT_HINT = {
@@ -1307,10 +1320,18 @@ class App(object):
             if show_error:
                 messagebox.showerror(TITLE, "'VM 다시 켠 뒤 잡 시작까지 최소' 분은 0 이상의 정수로 입력", parent=self.root)
             return None
+        try:
+            gap = int(self.v_gap.get())
+        except ValueError:
+            gap = -1
+        if gap < 0:
+            if show_error:
+                messagebox.showerror(TITLE, "'케이스 사이 간격' 분은 0 이상의 정수로 입력", parent=self.root)
+            return None
         s = dict(self.settings)
         s.update(record_csv=self.v_record.get().strip(), log_dir=self.v_log.get().strip(), vm_user=self.v_user.get().strip(),
                  mon_lead_min=ld[0], stop_lead_min=ld[1], run_mode=self.mode(), jump_log_dir=self.v_jlog.get().strip(),
-                 esx_addr=self.v_addr.get().strip(), seq_settle_min=settle)
+                 esx_addr=self.v_addr.get().strip(), seq_settle_min=settle, seq_gap_min=gap)
         return s
 
     # ------------------------------------------------------------ 테스트 케이스 파일 (불러오기, 다른 이름으로 저장, 자동 백업)
@@ -1887,7 +1908,8 @@ class App(object):
         if c is None:
             return ""
         if k is None:
-            return c.get(key, "") if key in ("name", "desc", "esx", "interval", "start", "group", "end_time", "max_wait") else ""
+            return c.get(key, "") if key in ("name", "desc", "esx", "interval", "start", "group", "end_time", "max_wait",
+                                             "seq_start") else ""
         return v.get(key, "") if key in ("name", "job") else ""
 
     def case_kind(self, iid, col):
@@ -1898,7 +1920,7 @@ class App(object):
         if k is None:
             return {"name": "entry", "desc": "entry", "esx": "entry", "mon": "popup", "interval": "entry", "start": "entry",
                     "mon_stop": "popup", "group": "entry", "end_time": "entry", "prof": "popup",
-                    "max_wait": "entry"}.get(key, "readonly")
+                    "max_wait": "entry", "seq_start": "entry"}.get(key, "readonly")
         return {"name": "entry", "job": "combo", "mon": "popup", "end_ref": "popup", "prof": "popup"}.get(key, "readonly")
 
     def case_check(self, iid):
@@ -1937,6 +1959,8 @@ class App(object):
             return (", ".join(ep) + " (ESX)") if ep else NONE_JOB
         if key == "max_wait":
             return c.get("max_wait") or "제한 없음"
+        if key == "seq_start":
+            return c.get("seq_start") or "자동"
         s = self.sched[i] if i < len(self.sched) else {}
         has_mon = core.case_has_monitors(c)
         if key in ("job", "end_ref"):
@@ -2020,6 +2044,12 @@ class App(object):
                                          parent=self.root)
                     return
                 c["max_wait"] = core.fmt_interval(mw) if mw else ""
+            elif key == "seq_start":
+                try:
+                    c["seq_start"] = core.fmt_seq_start(t)
+                except ValueError as ex:
+                    messagebox.showerror(TITLE, "시작 시각 칸. %s\n\n비우면 자동(앞 케이스가 끝난 뒤 시작)이다." % ex, parent=self.root)
+                    return
             elif key in ("desc", "group"):
                 c[key] = " ".join(t.split())          # 줄바꿈, 탭은 빈칸 하나로
             elif key == "end_time":
@@ -2066,6 +2096,7 @@ class App(object):
             row["name"] = unique_name(src.get("name", ""), set(x.get("name", "") for x in self.cases))
             row["applied"] = False          # 새로 만든 케이스는 아직 등록 전
             row["end_time"] = ""            # 잡 종료는 케이스마다 다르므로 복사하지 않음 (자동)
+            row["seq_start"] = ""           # 시작 시각도 복사하지 않음 (자동: 앞 케이스가 끝난 뒤 시작)
             if row.get("stop_mode") == "manual":
                 row["stop_mode"], row["stop_time"] = "auto", ""
             self.cases.insert(new, row)

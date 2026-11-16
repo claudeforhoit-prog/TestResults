@@ -1,5 +1,5 @@
 #!/bin/sh
-# tcrun 2.3 - tcgen sequence runner. Runs on the jump VM (POSIX sh). tcgen block A installs it as ~/.tcgen/tcrun.
+# tcrun 2.4 - tcgen sequence runner. Runs on the jump VM (POSIX sh). tcgen block A installs it as ~/.tcgen/tcrun.
 #
 #   sh ~/.tcgen/tcrun check <plan>        read-only checks: ESX key login, tools, VMs, settings, VM login, clocks
 #   sh ~/.tcgen/tcrun start <plan>        start "run" in the background for every ESX host of the plan (block S uses this)
@@ -14,7 +14,7 @@
 # VM login: same way as ~/.tcgen/vmssh (password from ~/.tcgen/vmpw through SSH_ASKPASS, setsid).
 # ESX login: ~/.tcgen/esxssh (key ~/.tcgen/id_esx, no password).
 
-TCRUN_VERSION=2.3
+TCRUN_VERSION=2.4
 D=$HOME/.tcgen
 LC_ALL=C
 export LC_ALL
@@ -55,6 +55,7 @@ names_ok() {        # the names of case $SEQ are safe to put on a command line (
   grep "^VM $SEQ " "$PLAN" | cut -d' ' -f3- | grep -q -v '^[A-Za-z0-9._][A-Za-z0-9._-]* [A-Za-z0-9._][A-Za-z0-9._@-]*$' && return 1
   grep -E "^(AV|PAT|MS|JOB|PROC|MX) $SEQ " "$PLAN" | cut -d' ' -f3 | grep -q -v '^[A-Za-z0-9._][A-Za-z0-9._-]*$' && return 1
   grep "^PROC $SEQ " "$PLAN" | grep -q "'" && return 1
+  grep "^START $SEQ " "$PLAN" | grep -q -v '^START [0-9]* [0-9][0-9]* [0-9][0-9: -]*$' && return 1
   return 0
 }
 addr_ok() {
@@ -82,6 +83,7 @@ load_plan() {
   BOOT_WAIT=$(sget BOOT_WAIT_MIN 30)
   SHUT_WAIT=$(sget SHUTDOWN_WAIT_MIN 10)
   SETTLE=$(sget SETTLE_MIN 10)
+  GAP=$(sget GAP_MIN 0)
   [ "$POLL" -ge 1 ] || POLL=60
   [ "$GONE" -ge 1 ] || GONE=3
   [ "$PON_WAIT" -ge 1 ] || PON_WAIT=90
@@ -517,6 +519,26 @@ register() {
         log "settle: VMs of this case were powered on again (finished $R_VMSON). The job start is already $SETTLE min or more after that: no extra wait"
       fi
     fi
+    if [ -z "$AT" ] && [ -n "$PREV_END" ] && [ "$GAP" -gt 0 ]; then
+      # gap: the job must not start before the end of the previous job of this ESX host + GAP min
+      RG_G=$(( (PREV_END + OFF + GAP * 60 - RG_L + 59) / 60 * 60 ))
+      if [ "$RG_G" -gt "$RG_T" ]; then
+        log "gap: the previous job ended $(tstr "$PREV_END"). The next job starts $GAP min or more after that: first start time moved from $(tstr "$RG_T") to $(tstr "$RG_G")"
+        RG_T=$RG_G
+      elif [ "$RG_TRY" = 1 ]; then
+        log "gap: the previous job ended $(tstr "$PREV_END"). The job start is already $GAP min or more after that: no extra wait"
+      fi
+    fi
+    if [ -n "$AT" ]; then
+      # start time of the plan: the job starts at that time. When it cannot be met, the job starts as soon as possible.
+      RG_A=$((AT / 60 * 60 - RG_L))
+      if [ "$RG_A" -ge "$RG_T" ]; then
+        [ "$RG_TRY" = 1 ] && log "start time: the plan sets the job start of this case to $ATTEXT"
+        RG_T=$RG_A
+      elif [ "$RG_TRY" = 1 ]; then
+        log "WARN the start time $ATTEXT of the plan cannot be met any more (earliest possible job start $(tstr $((RG_T + RG_L)))). Starting as soon as possible."
+      fi
+    fi
     if [ "$HASMON" = 1 ]; then TMON=$RG_T; TJOB=$((RG_T + RG_L)); else TMON=; TJOB=$RG_T; fi
     WHY=
     for RG_VM in $REGVMS; do
@@ -749,6 +771,9 @@ run_case() {
   JOBVMS=$(grep "^PROC $SEQ " "$PLAN" | cut -d' ' -f3)
   HASMON=0
   if grep -q "^MS $SEQ " "$PLAN" || has EMS; then HASMON=1; fi
+  AT=$(clines START | head -n 1 | cut -d' ' -f1)
+  case "$AT" in ""|*[!0-9]*) AT= ;; esac
+  ATTEXT=$(clines START | head -n 1 | cut -d' ' -f2-)
   log "==== case $CNAME ($IDX of $TOTAL) begin. VMs: $(say $VMS)"
   setstate running "case started"
   if has AH || has AV; then
@@ -766,6 +791,7 @@ run_case() {
   fi
   register || return 1
   wait_job || return 1
+  PREV_END=$WJ_E
   stop_mon || return 1
   R_STATUS=done; write_result; write_report
   log "==== case $CNAME done. job $R_JOB to $R_END"
@@ -795,7 +821,7 @@ cmd_run() {
   [ "$TOTAL" -gt 0 ] || { say "tcrun: the plan has no case for $CH"; exit 2; }
   : >> "$LOG" || { say "tcrun: cannot write the log: $LOG"; exit 2; }
   say $$ > "$PIDF"
-  CNAME=; IDX=0; STEP=start; HOW=; HOW_TEXT=
+  CNAME=; IDX=0; STEP=start; HOW=; HOW_TEXT=; PREV_END=
   trap 'rm -f "$PIDF"' 0
   trap 'log "ended by a signal"; setstate stopped "ended by a signal"; exit 1' 2 15
   trap '' 1
@@ -804,7 +830,7 @@ cmd_run() {
   ssh_setup
   [ -s "$RES" ] || say "case,esx,apply,begin,vms_on,monitor_start,job_start,first_seen,job_end,monitor_stop,end,status" > "$RES"
   log "tcrun $TCRUN_VERSION run $RUNID, esx $CHF ($EADDR), $TOTAL case(s), pid $$"
-  log "settings: job starts $LEAD min after the monitoring start, poll every $POLL s, ended after $GONE polls without the process, start wait $START_WAIT min, power on wait $PON_WAIT min, boot wait $BOOT_WAIT min, shutdown wait $SHUT_WAIT min, job $SETTLE min or more after VMs were powered on again"
+  log "settings: job starts $LEAD min after the monitoring start, poll every $POLL s, ended after $GONE polls without the process, start wait $START_WAIT min, power on wait $PON_WAIT min, boot wait $BOOT_WAIT min, shutdown wait $SHUT_WAIT min, job $SETTLE min or more after VMs were powered on again, $GAP min or more between the end of a job and the start of the next job (cases without a start time)"
   setstate running "started"
   for SEQ in $SEQS; do
     IDX=$((IDX + 1))
@@ -1044,6 +1070,15 @@ check_body() {
       fi
       VMS=$(grep "^VM $SEQ " "$PLAN" | cut -d' ' -f3)
       say "-- case $CNAME   VMs: $(say $VMS)"
+      CB_AT=$(clines START | head -n 1 | cut -d' ' -f1)
+      case "$CB_AT" in ""|*[!0-9]*) CB_AT= ;; esac
+      if [ -n "$CB_AT" ]; then
+        if [ "$CB_AT" -le "$(now)" ]; then
+          ck_bad "case $CNAME: the start time $(clines START | head -n 1 | cut -d' ' -f2-) has already passed. Change it in tcgen and generate again."
+        else
+          ck_ok "start time: job at $(clines START | head -n 1 | cut -d' ' -f2-) ($(( (CB_AT - $(now)) / 60 )) min from now)"
+        fi
+      fi
       if has AH || has AV; then
         if [ "$CB_UP" = 1 ]; then
           mk_spec

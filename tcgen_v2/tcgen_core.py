@@ -38,8 +38,9 @@ import os
 import re
 import shutil
 import sys
+import time
 
-VERSION = "2.3"
+VERSION = "2.4"
 KST_TO_UTC = dt.timedelta(hours=9)
 CHUNK = 100            # 붙여넣는 글 한 줄에 담는 명령 조각 길이(문자 수)
 NONE_JOB = "(없음)"
@@ -63,6 +64,7 @@ CASE_DEFAULTS = {
     "end_time": "",        # 리포트용 CSV 의 '잡 종료 시각'. 비우면 리포트 생성기가 자동으로 정한다
     "esx_profiles": [],    # 순서 실행: 케이스 시작 전에 적용할 ESX 호스트 설정 프로파일 이름 (탭 3, 대상 ESX)
     "max_wait": "",        # 순서 실행: 잡 종료를 기다리는 최대 시간 (시간:분). 비우면 제한 없음
+    "seq_start": "",       # 순서 실행: 잡을 시작할 시각. 비우면 자동(앞 케이스가 끝난 뒤). '10:00' 또는 '2026-11-20 10:00:00'
 }
 DEFAULT_CASE_DIR = "testcases"
 DEFAULT_RECORD = "test_record.csv"
@@ -79,6 +81,7 @@ DEFAULT_SETTINGS = {
     "jump_log_dir": "",        # 순서 실행: 점프 VM 의 로그 폴더. 비우면 ~/tcgen_log
     "esx_addr": "",            # 순서 실행: ESX 접속 주소 '호스트이름=주소;호스트이름=주소'. 비우면 ESX 호스트 이름으로 접속
     "seq_settle_min": 10,      # 순서 실행: VM 을 다시 켠 케이스는 VM 켜기 완료 N분 뒤부터 잡 시작 (0 = 기다리지 않음)
+    "seq_gap_min": 30,         # 순서 실행: 앞 케이스의 잡이 끝난 뒤 다음 케이스의 잡을 시작하기까지 최소 N분 (0 = 기다리지 않음)
     "seq_poll_sec": 60,        # 순서 실행: 잡 종료 확인 간격(초)
     "seq_gone_count": 3,       # 순서 실행: 프로세스가 연속으로 이 횟수만큼 없으면 잡 종료로 판정
     "seq_start_wait_min": 10,  # 순서 실행: 잡 시작 뒤 이 시간 안에 프로세스가 한 번도 보이지 않으면 멈춤
@@ -87,7 +90,8 @@ DEFAULT_SETTINGS = {
     "seq_shutdown_wait_min": 10,   # 순서 실행: 게스트 종료를 기다리는 최대 시간. 넘으면 전원 끄기
 }
 RUN_MODES = ("seq", "time")
-SEQ_INT_SETTINGS = (("seq_settle_min", "VM 다시 켠 뒤 잡 시작까지 최소 분", 0), ("seq_poll_sec", "잡 종료 확인 간격(초)", 5),
+SEQ_INT_SETTINGS = (("seq_settle_min", "VM 다시 켠 뒤 잡 시작까지 최소 분", 0), ("seq_gap_min", "케이스 사이 간격 분", 0),
+                    ("seq_poll_sec", "잡 종료 확인 간격(초)", 5),
                     ("seq_gone_count", "연속 없음 횟수", 1), ("seq_start_wait_min", "시작 대기 분", 1),
                     ("seq_poweron_wait_min", "VM 켜기 대기 분", 1), ("seq_boot_wait_min", "VM 부팅 대기 분", 1),
                     ("seq_shutdown_wait_min", "종료 대기 분", 1))
@@ -304,7 +308,7 @@ def _clean_vm(v):
 
 def _clean_case(c):
     d = {"applied": bool(c.get("applied", False))}
-    for k in ("name", "esx", "interval", "start", "stop_mode", "stop_time", "desc", "group", "end_time", "max_wait"):
+    for k in ("name", "esx", "interval", "start", "stop_mode", "stop_time", "desc", "group", "end_time", "max_wait", "seq_start"):
         v = c.get(k, CASE_DEFAULTS[k])
         d[k] = "" if v is None else str(v)
     if d["stop_mode"] not in ("auto", "manual", "none"):
@@ -326,7 +330,7 @@ def _clean_case(c):
 
 # 테스트 케이스 CSV: 화면의 [다른 이름으로 저장] 이 만드는 형식. 케이스 행 아래에 그 케이스의 VM 행이 온다.
 CASE_CSV_HEADER = ["구분", "적용", "케이스 이름", "설명", "ESX 호스트", "VM 이름", "잡", "모니터링", "설정", "최대 대기", "테스트 그룹",
-                   "종료 기준 VM", "간격", "잡 시작", "모니터링 중지", "모니터링 중지 시각", "잡 종료 (리포트)"]
+                   "종료 기준 VM", "간격", "잡 시작", "모니터링 중지", "모니터링 중지 시각", "잡 종료 (리포트)", "시작 시각 (순서 실행)"]
 STOP_LABELS = {"auto": "자동", "manual": "직접 입력", "none": "중지 없음"}
 CSV_TRUE = ("예", "Y", "YES", "1", "TRUE", "V", "O")
 
@@ -362,10 +366,10 @@ def cases_to_csv(cases):
         c = _clean_case(c)
         w.writerow(["케이스", "예" if c["applied"] else "", c["name"], c["desc"], c["esx"], "", "", _join_names(c["esx_monitors"]),
                     _join_names(c["esx_profiles"]), c["max_wait"], c["group"], "", c["interval"], c["start"],
-                    STOP_LABELS[c["stop_mode"]], c["stop_time"], c["end_time"]])
+                    STOP_LABELS[c["stop_mode"]], c["stop_time"], c["end_time"], c["seq_start"]])
         for v in c["vms"]:
             w.writerow(["VM", "", "", "", "", v["name"], v["job"], _join_names(v["monitors"]), _join_names(v["profiles"]), "", "",
-                        "기준" if v["end_ref"] else "", "", "", "", "", ""])
+                        "기준" if v["end_ref"] else "", "", "", "", "", "", ""])
     return buf.getvalue()
 
 
@@ -393,7 +397,8 @@ def cases_from_csv(text):
                         "esx": cell(r, "ESX 호스트"), "vms": [], "esx_monitors": _split_names(cell(r, "모니터링")),
                         "esx_profiles": _split_names(cell(r, "설정")), "max_wait": cell(r, "최대 대기"), "group": cell(r, "테스트 그룹"),
                         "interval": cell(r, "간격"), "start": cell(r, "잡 시작"), "stop_mode": stop_by_label.get(sm, sm or "auto"),
-                        "stop_time": cell(r, "모니터링 중지 시각"), "end_time": cell(r, "잡 종료 (리포트)")})
+                        "stop_time": cell(r, "모니터링 중지 시각"), "end_time": cell(r, "잡 종료 (리포트)"),
+                        "seq_start": cell(r, "시작 시각 (순서 실행)")})
         elif kind == "VM":
             if not out:
                 raise ValueError("데이터 %d번째 행: 케이스 행보다 VM 행이 먼저 나옴" % n)
@@ -493,7 +498,7 @@ def new_vm(name=""):
 def new_case(esx="", start="", count=2, prefix="ev"):
     return {"applied": False, "name": "", "esx": esx, "vms": [new_vm(vm_name(esx, k + 1, prefix)) for k in range(count)],
             "esx_monitors": [], "interval": "", "start": start, "stop_mode": "auto", "stop_time": "",
-            "desc": "", "group": "", "end_time": "", "esx_profiles": [], "max_wait": ""}
+            "desc": "", "group": "", "end_time": "", "esx_profiles": [], "max_wait": "", "seq_start": ""}
 
 
 def rename_vms_for_esx(c, old, new, prefix="ev"):
@@ -816,6 +821,41 @@ def parse_end(text):
 
 def fmt_short(d):
     return d.strftime("%m-%d %H:%M")
+
+
+SEQ_START_RE = re.compile(r"^(\d{1,2}):(\d{2})(?::00)?$")
+
+
+def parse_seq_start(text, now=None):
+    """순서 실행에서 케이스의 잡을 시작할 시각. 비우거나 '자동' 이면 None(앞 케이스가 끝난 뒤 시작).
+    '10:00' 처럼 시:분만 적으면 now 뒤에 처음 오는 그 시각이고, '2026-11-20 10:00' 처럼 날짜까지 적으면 그 시각이다. 분 단위."""
+    t = (text or "").strip()
+    if t.lower() in AUTO_WORDS:
+        return None
+    m = SEQ_START_RE.match(t)
+    if m:
+        h, mi = int(m.group(1)), int(m.group(2))
+        if h > 23 or mi > 59:
+            raise ValueError("시각 형식이 맞지 않음: '%s' (예: 10:00 또는 2026-11-20 10:00:00)" % text)
+        base = (now or dt.datetime.now()).replace(second=0, microsecond=0)
+        d = base.replace(hour=h, minute=mi)
+        return d if d > base else d + dt.timedelta(days=1)
+    try:
+        return parse_dt(t)
+    except ValueError:
+        raise ValueError("시각 형식이 맞지 않음: '%s' (예: 10:00 또는 2026-11-20 10:00:00, 비우면 자동)" % text)
+
+
+def fmt_seq_start(text):
+    """시작 시각 칸에 적은 글을 저장할 모양으로 고친다: 자동은 빈 문자열, 시:분은 두 자리씩, 날짜가 있으면 '년-월-일 시:분:00'."""
+    t = (text or "").strip()
+    if t.lower() in AUTO_WORDS:
+        return ""
+    m = SEQ_START_RE.match(t)
+    if m:
+        parse_seq_start(t)
+        return "%02d:%s" % (int(m.group(1)), m.group(2))
+    return fmt_dt(parse_seq_start(t))
 
 
 def parse_interval(text):
@@ -1645,7 +1685,7 @@ ADDR_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
 USER_RE = re.compile(r"^[A-Za-z0-9._][A-Za-z0-9._-]*$")
 HOST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 PROC_MAX = 80
-SEQ_PLAN_NAMES = {"seq_settle_min": "SETTLE_MIN", "seq_poll_sec": "POLL_SEC", "seq_gone_count": "GONE_COUNT",
+SEQ_PLAN_NAMES = {"seq_settle_min": "SETTLE_MIN", "seq_gap_min": "GAP_MIN", "seq_poll_sec": "POLL_SEC", "seq_gone_count": "GONE_COUNT",
                   "seq_start_wait_min": "START_WAIT_MIN", "seq_poweron_wait_min": "POWERON_WAIT_MIN",
                   "seq_boot_wait_min": "BOOT_WAIT_MIN", "seq_shutdown_wait_min": "SHUTDOWN_WAIT_MIN"}
 
@@ -1705,9 +1745,12 @@ def _csv_line(fields):
     return buf.getvalue()
 
 
-def build_seq(cases, run_cmds, mon_cmds, profiles, settings):
-    """순서 실행의 검증과 케이스별 내용 계산. (케이스 목록, 오류, 경고, 공통 값) 반환. 적용 체크한 케이스는 뺀다."""
+def build_seq(cases, run_cmds, mon_cmds, profiles, settings, now=None):
+    """순서 실행의 검증과 케이스별 내용 계산. (케이스 목록, 오류, 경고, 공통 값) 반환. 적용 체크한 케이스는 뺀다.
+    now: 시:분만 적은 시작 시각을 날짜가 있는 시각으로 바꾸고, 지난 시각인지 보는 기준(생성 시각)."""
+    now = (now or dt.datetime.now()).replace(microsecond=0)
     errors, warnings, plan = [], [], []
+    last_fixed = {}                     # ESX 호스트별로 앞에서 지정한 시작 시각 (순서가 거꾸로면 경고)
     profiles = profiles or []
     try:
         lead = int(settings.get("mon_lead_min", DEFAULT_SETTINGS["mon_lead_min"]))
@@ -1817,8 +1860,24 @@ def build_seq(cases, run_cmds, mon_cmds, profiles, settings):
         except ValueError:
             errors.append("%s: 최대 대기는 시간:분 으로 입력 (예: 12:00, 비우면 제한 없음): '%s'" % (label, c.get("max_wait")))
         chain = esx_host or "-"
+        start_at = None
+        try:
+            start_at = parse_seq_start(c.get("seq_start"), now)
+        except ValueError as e:
+            errors.append("%s: 시작 시각 칸. %s" % (label, e))
+        if start_at is not None and not jobs:
+            warnings.append("%s: 잡이 없는 케이스라 시작 시각 %s 을(를) 쓰지 않음" % (label, fmt_dt(start_at)))
+            start_at = None
+        if start_at is not None:
+            if start_at <= now:
+                errors.append("%s: 시작 시각 %s 이(가) 이미 지났음 (지금 %s). 시각을 고치거나 비울 것(비우면 자동)"
+                              % (label, fmt_dt(start_at), fmt_dt(now)))
+            elif chain in last_fixed and start_at <= last_fixed[chain]:
+                warnings.append("%s: 시작 시각 %s 이(가) 앞 케이스의 시작 시각 %s 보다 빠르거나 같음. 앞 케이스가 끝난 뒤 가능한 "
+                                "가장 이른 시각에 시작함" % (label, fmt_dt(start_at), fmt_dt(last_fixed[chain])))
+            last_fixed[chain] = max(start_at, last_fixed.get(chain, start_at))
         pc = {"index": i, "name": name, "esx": esx_host, "chain": chain, "vms": [], "host_opts": [],
-              "ems": [], "emx": [], "epat": "", "max_wait": max_wait, "has_mon": has_mon,
+              "ems": [], "emx": [], "epat": "", "max_wait": max_wait, "has_mon": has_mon, "start_at": start_at,
               "group": _one_line(c.get("group")), "desc": _one_line(c.get("desc")),
               "report_vms": report_vms(c), "end_refs": report_end_refs(c), "entries": [], "case": c}
 
@@ -1955,6 +2014,8 @@ def plan_text(plan, common, run_id, now):
         s = pc["seq"]
         out.append("CASE %s %s %s" % (s, pc["chain"], pc["name"]))
         out.append("MAXWAIT %s %d" % (s, pc["max_wait"]))
+        if pc.get("start_at"):          # 잡을 시작할 시각: 초(이 PC 의 시간대 기준 epoch)와 읽기 쉬운 글
+            out.append("START %s %d %s" % (s, int(time.mktime(pc["start_at"].timetuple())), pc["start_at"].strftime("%Y-%m-%d %H:%M")))
         out.append("RPTA %s %s" % (s, _csv_line([pc["group"], pc["name"], pc["desc"], pc["esx"]])))
         out.append("RPTB %s %s" % (s, _csv_line([";".join(pc["report_vms"]), ";".join(pc["end_refs"])])))
         for vm in pc["vms"]:
@@ -1981,7 +2042,7 @@ def plan_text(plan, common, run_id, now):
 def plan_view(plan, common, run_id):
     """화면에 보이는 실행 계획: 케이스마다 점프 VM 이 하는 일과 등록할 명령."""
     sets = dict(common["sets"])
-    lead, settle = sets["MON_LEAD_MIN"], sets["SETTLE_MIN"]
+    lead, settle, gap = sets["MON_LEAD_MIN"], sets["SETTLE_MIN"], sets.get("GAP_MIN", 0)
     out = ["실행 ID %s. 점프 VM 로그 폴더 %s." % (run_id, common["logdir"]),
            "ESX 호스트마다 케이스를 표의 순서대로 진행한다. ESX 호스트가 여러 대이면 호스트끼리는 서로 기다리지 않는다.",
            "시각은 점프 VM 이 실행할 때 정한다. 실제 시각은 로그 폴더의 tcrun-%s-<ESX 호스트>.log 와 -result.csv 에 기록된다." % run_id]
@@ -2028,13 +2089,24 @@ def plan_view(plan, common, run_id):
             by_kind = {}
             for e in pc["entries"]:
                 by_kind.setdefault(e["kind"], []).append(e)
+            first_job = not any(jobs_of(q) for q in mine[:n - 1])       # 이 ESX 호스트에서 잡이 있는 첫 케이스
+            if pc.get("start_at"):
+                out.append("   시작 시각(지정): 잡을 %s 에 시작한다. 설정 적용과 VM 켜기는 그 전에 미리 한다. 앞 케이스가 그때까지 끝나지 "
+                           "않았거나 VM 을 다시 켠 뒤의 대기가 남았으면 가능한 가장 이른 시각에 시작하고 로그에 WARN 을 남긴다."
+                           % pc["start_at"].strftime("%Y-%m-%d %H:%M"))
+            elif first_job:
+                out.append("   시작 시각(자동): 앞 케이스가 없으므로 준비가 끝나는 대로 시작한다.")
+            elif gap > 0:
+                out.append("   시작 시각(자동): 앞 케이스의 잡이 끝난 시각에서 %d분 이상 지난 뒤에 잡을 시작한다(케이스 사이 간격)." % gap)
+            else:
+                out.append("   시작 시각(자동): 앞 케이스가 끝나면 이어서 시작한다(케이스 사이 간격 0분).")
             if pc["has_mon"]:
-                out.append("   모니터링 시작: crontab 에 등록하고 1~2분 뒤의 분에 시작한다.")
+                out.append("   모니터링 시작: 잡 시작 %d분 전. crontab 에 등록한다(시작 시각에 따로 정한 것이 없으면 등록 1~2분 뒤의 분)." % lead)
                 for e in by_kind.get("모니터링 시작", []):
                     out.append("     %s%s %s: %s" % (e["host"], " (ESX)" if e["role"] == "ESX" else "", e["name"], e["cmd"]))
                 out.append("   잡 시작: 모니터링 시작 %d분 뒤. 잡이 있는 모든 VM 이 같은 분에 시작한다." % lead)
             else:
-                out.append("   잡 시작: crontab 에 등록하고 1~2분 뒤의 분에 시작한다. 잡이 있는 모든 VM 이 같은 분에 시작한다.")
+                out.append("   잡 시작: crontab 에 등록한다(시작 시각에 따로 정한 것이 없으면 등록 1~2분 뒤의 분). 잡이 있는 모든 VM 이 같은 분에 시작한다.")
             for vm in jobs:
                 out.append("     %s %s: %s" % (vm["name"], vm["job_name"], next(
                     e["cmd"] for e in by_kind.get("잡", []) if e["host"] == vm["name"])))
@@ -2222,7 +2294,7 @@ def write_records_seq(settings, plan, gen_time, run_id, backup_dir=None):
 def generate_seq(cases, run_cmds, mon_cmds, profiles, settings, now=None, write=True, backup_dir=None):
     """순서 실행의 [명령어 생성]. 오류가 있으면 블록과 기록을 만들지 않는다."""
     now = (now or dt.datetime.now()).replace(microsecond=0)
-    plan, errors, warnings, common = build_seq(cases, run_cmds, mon_cmds, profiles, settings)
+    plan, errors, warnings, common = build_seq(cases, run_cmds, mon_cmds, profiles, settings, now=now)
     run_id = now.strftime("%Y%m%d-%H%M%S")
     res = {"mode": "seq", "errors": errors, "warnings": warnings, "entries": [], "sched": [], "vm": "", "esx": {},
            "setup": seq_setup_block(), "check": "", "run": "", "plan": "", "plan_view": "", "run_id": run_id,

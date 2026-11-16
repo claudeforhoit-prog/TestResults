@@ -546,7 +546,7 @@ class FakeEnv(object):
         s = dict(core.DEFAULT_SETTINGS)
         s.update(record_csv=os.path.join(self.root, "pc", "rec.csv"), log_dir=os.path.join(self.root, "pc"), run_mode="seq",
                  jump_log_dir=self.log, mon_lead_min=1, seq_poll_sec=20, seq_gone_count=2, seq_start_wait_min=3,
-                 seq_boot_wait_min=5, seq_shutdown_wait_min=1, seq_settle_min=0)
+                 seq_boot_wait_min=5, seq_shutdown_wait_min=1, seq_settle_min=0, seq_gap_min=0)
         s.update(over)
         return s
 

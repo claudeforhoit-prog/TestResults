@@ -173,8 +173,9 @@ def main():
     app.mode_changed()
     check(core.load_settings(BASE)["run_mode"] == "time", "진행 방식을 바꾸면 settings.json 에 저장")
     vis = list(app.t_case.tree.cget("displaycolumns"))
-    check("prof" not in vis and "max_wait" not in vis and all(k in vis for k in ("interval", "start", "mon_start", "mon_stop", "end_time")),
-          "시각 지정: 탭 4 에서 설정, 최대 대기 열을 숨기고 시각 열을 보임 %s" % vis)
+    check("prof" not in vis and "max_wait" not in vis and "seq_start" not in vis
+          and all(k in vis for k in ("interval", "start", "mon_start", "mon_stop", "end_time")),
+          "시각 지정: 탭 4 에서 설정, 최대 대기, 시작 시각(순서 실행) 열을 숨기고 시각 열을 보임 %s" % vis)
     check(app.blk_vm.frame.cget("text").startswith("B. VM 등록 블록") and app.blk_esx.frame.cget("text").startswith("C. ESX 블록"),
           "시각 지정: 탭 5 의 블록은 A, B, C, D")
     check(app.f_time.winfo_manager() == "pack" and app.f_seq.winfo_manager() == "" and app.row_seq.winfo_manager() == ""
@@ -505,7 +506,7 @@ def main():
     root.update()
     check(core.load_settings(BASE)["run_mode"] == "seq" and app.result is None, "순서 실행으로 바꾸면 저장하고 앞 결과를 비움")
     vis = list(app.t_case.tree.cget("displaycolumns"))
-    check(vis == ["name", "desc", "esx", "job", "mon", "prof", "max_wait", "group", "end_ref"],
+    check(vis == ["name", "desc", "esx", "job", "mon", "prof", "max_wait", "seq_start", "group", "end_ref"],
           "순서 실행: 탭 4 에서 간격, 잡 시작, 모니터링 시작, 모니터링 중지, 잡 종료 (리포트) 열을 숨김 %s" % vis)
     check(app.blk_vm.frame.cget("text").startswith("P. 점검 블록") and app.blk_esx.frame.cget("text").startswith("S. 실행 블록"),
           "순서 실행: 탭 5 의 블록은 A, P, S, D")
@@ -515,7 +516,8 @@ def main():
     check("순서 실행" in app.case_hint.cget("text") and "P(점검)" in app.result_hint.cget("text"), "탭 4, 탭 5 의 안내 글이 진행 방식에 맞게 바뀜")
     app.show_help("4. 테스트 케이스", app.case_help)
     helps = [w.cget("text") for w in walk(last_toplevel(root)) if isinstance(w, ttk.Label)]
-    check(any("시각을 입력하지 않는다" in x for x in helps) and any("최대 대기" in x for x in helps), "탭 4 도움말이 순서 실행 내용으로 바뀜")
+    check(any("표의 순서대로 진행한다" in x for x in helps) and any("최대 대기" in x for x in helps)
+          and any("시작 시각: 비우면 '자동'" in x and "케이스 사이 간격" in x for x in helps), "탭 4 도움말이 순서 실행 내용으로 바뀜(시작 시각 설명 포함)")
     shot_window(root, "도움말", "tcgen_seq_help4.png")
     last_toplevel(root).destroy()
 
@@ -701,6 +703,24 @@ def main():
         c["start"], c["interval"] = st0, iv0
     app.mark_cases()
     t.refresh("c1")
+    # 시작 시각 칸(비우면 자동)과 케이스 사이 간격
+    check(cell_of(t, "c1", "seq_start") == "자동" and app.cases[1]["seq_start"] == "", "시작 시각 칸은 처음에 자동")
+    app.commit_case("c1", "seq_start", "9:05")
+    t.refresh("c1")
+    check(app.cases[1]["seq_start"] == "09:05" and cell_of(t, "c1", "seq_start") == "09:05", "시작 시각에 시:분을 적음")
+    n_log = len(LOG)
+    app.commit_case("c1", "seq_start", "soon")
+    check(app.cases[1]["seq_start"] == "09:05" and any(x[0] == "error" and "시작 시각" in x[1] for x in LOG[n_log:]), "형식이 맞지 않는 시작 시각은 거부")
+    app.commit_case("c2", "seq_start", "2031/01/02 03:04")
+    check(app.cases[2]["seq_start"] == "2031-01-02 03:04:00", "날짜까지 적은 시작 시각")
+    app.commit_case("c2", "seq_start", "자동")
+    check(app.cases[2]["seq_start"] == "", "'자동' 을 적으면 비움")
+    check(core.load_cases(BASE)[1]["seq_start"] == "09:05", "시작 시각도 자동 저장")
+    check(app.v_gap.get() == "30" and app.f_seq.winfo_manager() == "pack", "설정 영역의 케이스 사이 간격 기본값은 30분")
+    app.v_gap.set("45")
+    check(core.load_settings(BASE)["seq_gap_min"] == 45, "케이스 사이 간격을 바꾸면 저장")
+    app.v_gap.set("30")
+    t.refresh("c1")
     shot(root, app, 3, "tcgen_seq_tab4.png")
 
     # 생성: 블록 A, P, S, D 와 실행 계획
@@ -722,6 +742,12 @@ def main():
           and "VM 001 esx01ev01 tester@esx01ev01\n" in plan and "PROC 001 esx01ev01 run_a\\.sh\n" in plan,
           "로그 폴더, ESX 접속 주소, VM 다시 켠 뒤 대기, 접속 계정, 프로세스 이름이 plan 에 들어감")
     check("MAXWAIT 001 720\n" in plan and "MAXWAIT 002 0\n" in plan, "최대 대기가 plan 에 들어감")
+    import re as _re
+    check("SET GAP_MIN 30\n" in plan and _re.search(r"(?m)^START 001 \d+ \d{4}-\d\d-\d\d 09:05$", plan) and "START 002 " not in plan,
+          "케이스 사이 간격과 지정한 시작 시각이 plan 에 들어감. 시각을 비운 케이스에는 START 줄이 없음")
+    check("시작 시각(지정): 잡을" in res["plan_view"] and "09:05 에 시작한다" in res["plan_view"]
+          and "앞 케이스의 잡이 끝난 시각에서 30분 이상 지난 뒤" in res["plan_view"], "실행 계획에 시작 시각과 간격 설명")
+    app.commit_case("c1", "seq_start", "")
     text5 = app.res_text.get("1.0", "end")
     check("순서 실행. 실행 ID %s" % res["run_id"] in text5 and "VM 을 자동으로 종료하고 다시 켠다" in text5, "결과 글에 실행 ID 와 VM 자동 종료 안내")
     app.copy_block("setup")
