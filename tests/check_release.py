@@ -119,6 +119,20 @@ def unit_checks(tmp):
     check('phase: 열이 알파벳순이어도 실행 순서', js and js[0]['order'] == stages, str(js[0]['order'][:4]) if js else '읽지 못함')
     check('phase: VM 은 …Phase-Hostname 열', js and js[0]['host'] == 'esx01-vm01', js[0]['host'] if js else '')
 
+    from perfreport import compare as CMP, profiles as PF
+    it = CMP.normalize({'metric': 'CPU|Usage (%)', 'value': 'mean', 'chart': 'line'})
+    check('비교 리포트: 꺾은선은 시계열', (it['value'], it['chart']) == ('series', 'line') and CMP.normalize({'metric': CMP.PHASE, 'chart': 'bar'})['chart'] == 'stack')
+    check('비교 리포트: 포함할 VM 은 포함 검색, 빈 값은 전부', CMP.vm_match('esx01-vm01', CMP.vm_tokens('vm01,vm03')) and not CMP.vm_match('esx01-vm02', CMP.vm_tokens('vm01'))
+          and CMP.vm_match('anything', CMP.vm_tokens('')))
+    miss = CMP.validate({'cases': [{'id': 'A'}], 'metrics': [], 'word': False, 'html': False})
+    check('비교 리포트: 빠진 설정 검사', len(miss) == 3 and not CMP.validate({'cases': [{'id': 'A'}, {'id': 'B'}], 'metrics': [{'metric': 'TAT'}], 'word': True}))
+    os.environ['PERFREPORT_DATA'] = os.path.join(tmp, 'pdata')
+    PF.save('baselines', '서버 A', {'baselines': [{'name': 'BM-A', 'tat': '100'}]})
+    PF.save('baselines', '서버 B', PF.load('baselines', '서버 A'))
+    ok = PF.names('baselines') == ['서버 A', '서버 B'] and PF.rename('baselines', '서버 B', '서버 C') and not PF.rename('baselines', '서버 A', '서버 C')
+    exp = PF.export_to('baselines', '서버 A', os.path.join(tmp, '서버 A.json'))
+    check('설정 묶음: 저장 · 복제 · 이름 바꾸기 · 내보내기 · 가져오기',
+          ok and PF.import_from('baselines', exp) == '서버 A (2)' and PF.load('baselines', '서버 A (2)')['baselines'][0]['name'] == 'BM-A' and PF.names('case_options') == [])
     from perfreport.build import vm_filter_patterns as vf
     check('VM 필터: 낱말은 포함 검색, 빈 값은 전부', [vf(x) for x in ('vm01', 'vm01, vm02', '', 'app-*')] == ['*vm01*', '*vm01*;*vm02*', '', 'app-*'])
 
@@ -216,6 +230,35 @@ def main():
                             cwd=ROOT, env=env, capture_output=True, text=True, encoding='utf-8', errors='replace')
         again = sorted(os.path.basename(p) for p in glob.glob(os.path.join(tmp, 'out_only', '*.*')) if p.endswith(('.docx', '.html')))
         check('같은 이름이 있으면 버전을 붙여 저장', r3.returncode == 0 and again == ['CASE-B.docx', 'CASE-B_v2.docx', 'tuning.html', 'tuning_v2.html'], str(again))
+        # 비교 리포트: 케이스 리포트 없이 비교 문서와 비교 HTML 만
+        code = ("import json,sys\n"
+                "from perfreport.build import run_csv\n"
+                "spec={'title':'cmp check','cases':[{'id':'CASE-A','name':'tA','palette':'파랑 계열'},{'id':'CASE-B','name':'tB','palette':'주황·빨강 계열'}],"
+                "'metrics':[{'metric':'TAT'},{'metric':'phase 소요 시간'},{'metric':'CPU|Usage (%)','value':'mean_max','chart':'bar','vms':'vm01,vm02'},"
+                "{'metric':'CPU|Usage (%)','value':'series','chart':'line','vms':'vm01'}],"
+                "'baseline':{'name':'BM-A','kind':'BM','value':13800},'phase_bg':True,'phase_case':'CASE-A','word':True,'html':True}\n"
+                "if __name__=='__main__':\n"
+                "    rec=run_csv('samples/sample_cases.csv','samples/sample_data',out_dir=sys.argv[1],log=lambda m:None,workers=1,make_docs=False,compare=spec)\n"
+                "    print(json.dumps([o.replace(chr(92),'/').split('/')[-1] for o in rec['outputs']]))\n")
+        r4 = subprocess.run([sys.executable, '-c', code, os.path.join(tmp, 'out_cmp')], cwd=ROOT, env=env, capture_output=True, text=True,
+                            encoding='utf-8', errors='replace')
+        outs = json.loads(r4.stdout.strip().splitlines()[-1]) if r4.returncode == 0 and r4.stdout.strip() else []
+        check('비교 리포트: 비교 문서와 비교 HTML 만 생성 (케이스 문서 없음)', outs == ['cmp check.docx', 'cmp check.html'], str(outs) + r4.stderr[-300:])
+        if outs:
+            import docx
+            from docx.enum.text import WD_ALIGN_PARAGRAPH
+            d4 = docx.Document(os.path.join(tmp, 'out_cmp', 'cmp check.docx'))
+            h2 = [p.text for p in d4.paragraphs if p.style.name == 'Heading 2']
+            check('비교 리포트: 지표 순서대로 소제목', h2 == ['TAT', 'phase 소요 시간', 'CPU > Usage (%) · 평균과 최대', 'CPU > Usage (%) · 시계열'], str(h2))
+            tat = next((t for t in d4.tables if t.rows[0].cells[-1].text == 'Degradation (%)'), None)
+            check('비교 리포트: TAT 표에 기준선과 Degradation', tat is not None and len(tat.rows) >= 3)
+            cells = [c.text for t in d4.tables for r in t.rows for c in r.cells]
+            txt = '\n'.join([p.text for p in d4.paragraphs] + cells)
+            check('비교 리포트: 문서에 | 없음 · 통제 용어 0건', '|' not in txt and not [t for t in terms if re.search(t['ban'], txt)])
+            items = body_items(d4)
+            bad = [1 for i, (k, x) in enumerate(items) if k == 't' and not (i and items[i - 1][0] == 'p' and items[i - 1][1].text.startswith('표. ')
+                                                                     and items[i - 1][1].alignment in (None, WD_ALIGN_PARAGRAPH.LEFT))]
+            check('비교 리포트: 표 제목은 표 위 · 왼쪽', not bad)
         unit_checks(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

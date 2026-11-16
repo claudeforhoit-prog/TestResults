@@ -301,7 +301,8 @@ def default_workers():
 def run_csv(cases_csv, data_dir, out_dir=None, title=None, baseline=None, analysis=None, log=print,
             split_dir=None, report=True, margin_s=None, roles=None, include_unassigned=True,
             palette=None, chart_width_cm=None, workers=None, selection=None, to_gb=False, to_gbps=False,
-            tat_baseline=None, tat_baseline_note='', end_ref_vms='', only=None, case_desc=None, case_baselines=None, case_vms=None, vm_filter=None):
+            tat_baseline=None, tat_baseline_note='', end_ref_vms='', only=None, case_desc=None, case_baselines=None, case_vms=None, vm_filter=None,
+            make_docs=True, make_html=True, compare=None):
     """케이스 정보 CSV + 데이터 폴더 방식. 데이터 폴더의 모든 파일을 읽어 케이스마다 호스트·잡 실행 구간으로 잘라 쓴다.
     roles: 지표 역할 {지표: (역할, 순서)} 또는 역할 파일 경로. 없으면 기본 리포트 양식.
     palette: 케이스 문서 그래프의 색상 팔레트(1부터 센 번호 또는 이름, 기본 1 파랑 계열).
@@ -312,7 +313,11 @@ def run_csv(cases_csv, data_dir, out_dir=None, title=None, baseline=None, analys
     end_ref_vms: 종료 시각을 비운 케이스에서 종료를 판단할 VM 이름 · 패턴(; 로 구분). 케이스 정보의 '종료 기준 VM' 열이 있으면 그 값이 먼저다.
     only: 리포트를 만들 케이스 이름 목록(없으면 전부). case_desc: {케이스명: 설명} 으로 설명을 바꾼다.
     case_vms: {케이스명: VM 이름 필터} 케이스마다 리포트에 넣을 VM (예: 'vm01,vm02', vm_filter_patterns). 빈 값은 호스트의 VM 전부.
-              이 값이 있는 케이스는 케이스 정보 파일의 VM 열 대신 이 값을 쓴다. vm_filter: 모든 케이스에 같은 필터(명령 옵션용).
+              이 값이 있는 케이스는 케이스 정보 파일의 VM 열 대신 이 값을 쓴다. vm_filter: VM 열이 빈 케이스에 쓰는 기본 필터.
+    make_docs: 케이스 리포트(케이스마다 docx)를 만들지. make_html: 케이스 리포트의 HTML 을 만들지.
+    compare: 비교 리포트 설정(compare.py 의 spec: title, cases[{id, name, palette}], metrics[{metric, value, chart, vms}],
+             baseline, phase_bg, phase_case, word, html). 주면 그 케이스들도 읽어 비교 문서 · 비교 HTML 을 만든다.
+             only 는 케이스 리포트를 만들 케이스이고, 비교 리포트의 케이스는 compare 에서 따로 정한다.
     case_baselines: {케이스명: 기준선} 케이스마다의 TAT 기준선. 기준선 = {'name', 'kind'(BM · VM), 'value'(초), 'cond', 'note'}.
                     없는 케이스는 tat_baseline 을 쓴다."""
     phase_files, tat_files, unknown_files = [], [], []
@@ -323,15 +328,22 @@ def run_csv(cases_csv, data_dir, out_dir=None, title=None, baseline=None, analys
             c['label'] = str(case_desc[c['id']] or '')
         if case_vms is not None and c['id'] in case_vms:
             c['vms'] = vm_filter_patterns(case_vms[c['id']])
-        elif vm_filter:
+        elif vm_filter and not c.get('vms'):
             c['vms'] = vm_filter_patterns(vm_filter)
     all_cases = cases            # 종료 시각 감지는 만들지 않는 케이스의 시작 시각도 경계로 쓴다
-    if only is not None:
-        want = set(only)
+    cmp_ids = [x['id'] for x in (compare or {}).get('cases') or []]
+    doc_ids = [] if not make_docs else ([c['id'] for c in cases] if only is None else [c['id'] for c in cases if c['id'] in set(only)])
+    if compare:
+        gone = [i for i in cmp_ids if i not in {c['id'] for c in cases}]
+        if gone:
+            raise SystemExit('비교 리포트의 케이스가 케이스 정보 파일에 없음: ' + ', '.join(gone))
+    if only is not None or not make_docs or compare:
+        want = set(doc_ids) | set(cmp_ids)
         cases = [c for c in cases if c['id'] in want]
         if not cases:
             raise SystemExit('만들 케이스가 없음: 생성할 케이스를 하나 이상 고른다.')
-        log(f'[케이스 선택] {len(cases)}/{len(all_cases)}건: ' + ', '.join(c['id'] for c in cases))
+        log(f'[케이스 선택] 케이스 리포트 {len(doc_ids)}건' + (f' · 비교 리포트 {len(cmp_ids)}건' if compare else '')
+            + f' (케이스 정보 {len(all_cases)}건 중 {len(cases)}건 읽음)')
     sel = load_selection(selection) if selection else None
     if sel:
         known = {c['id'] for c in cases}
@@ -402,6 +414,7 @@ def run_csv(cases_csv, data_dir, out_dir=None, title=None, baseline=None, analys
            'roles': roles or {}, 'include_unassigned': include_unassigned,
            'palette': palette_mod.palette_index(palette), 'chart_width_cm': chart_width_cm, 'workers': workers,
            'selection': sel, 'to_gb': bool(to_gb), 'to_gbps': bool(to_gbps),
+           'doc_cases': doc_ids, 'make_html': bool(make_html), 'compare': compare,
            'tat_base': ({'value': float(tat_baseline), 'note': (tat_baseline_note or '').strip(), 'name': (tat_baseline_note or '').strip() or '기준선'}
                         if tat_baseline not in (None, '') and float(tat_baseline) > 0 else None),
            'output': out_dir or os.path.join(os.path.dirname(os.path.abspath(cases_csv)), 'out_' + name)}
@@ -543,7 +556,9 @@ def run_job(job, base, log=print):
     log(f'[문서] 그래프 색 계열 {palette_mod.PALETTES[pal][0]} · 그래프 폭 {float(width_cm):g} cm'
         + (f' · 그래프를 {workers}개 프로세스로 나눠 그림' if pool.active else ''))
     try:
-        built = _build_docs(cases, meta, df, outdir, date, log, roles, include_unassigned, pal, width_cm, pool, job.get('tat_base'))
+        doc_ids = job.get('doc_cases')
+        doc_cases = cases if doc_ids is None else [c for c in cases if c['id'] in set(doc_ids)]
+        built = _build_docs(doc_cases, meta, df, outdir, date, log, roles, include_unassigned, pal, width_cm, pool, job.get('tat_base'))
     finally:
         pool.close()
     for dpath, k, text in built:
@@ -557,10 +572,10 @@ def run_job(job, base, log=print):
         log(f'[검사] 통제 용어 검출: {h}')
 
     # 반응형 HTML: 테스트 그룹마다 1개 (그룹 열이 없으면 1개)
-    groups = list(dict.fromkeys(c.get('group') or '' for c in cases))
+    groups = list(dict.fromkeys(c.get('group') or '' for c in doc_cases)) if job.get('make_html', True) else []
     htmls = []
-    for g in groups:
-        ids = [c['id'] for c in cases if (c.get('group') or '') == g]
+
+    def html_for(ids, g, title, fname):
         sub = df[df['case'].isin(ids)]
         gbase = baseline if baseline in ids else ids[0]
         have = set(sub['metric'].unique())
@@ -571,7 +586,7 @@ def run_job(job, base, log=print):
         gset = set(gmetrics)
         gcmp = analyze.compare(analyze.stats_table(sub), gbase, stat)
         gunits = sub.drop_duplicates('metric').set_index('metric')['unit'].to_dict()
-        gtitle = job.get('title') or f'성능 비교 리포트 ({", ".join(ids[:4])}{" 외" if len(ids) > 4 else ""})'   # 그 그룹의 케이스만
+        gtitle = title or job.get('title') or f'성능 비교 리포트 ({", ".join(ids[:4])}{" 외" if len(ids) > 4 else ""})'   # 그 그룹의 케이스만
         ctx = {'title': (f'{g}: ' if g else '') + gtitle, 'date': date, 'baseline': gbase,
                'cases': [m for m in case_meta if m['id'] in ids],
                'metrics': [{'name': m, 'unit': gunits.get(m, '')} for m in gmetrics],
@@ -581,17 +596,38 @@ def run_job(job, base, log=print):
                'jobs': {c['id']: c['jobs'] for c in cases if c.get('jobs') and c['id'] in ids},
                'tat_base': job.get('tat_base'),
                'tat_bases': {c['id']: c['tat_base'] for c in cases if c['id'] in ids and c.get('tat_base')}}
-        fname = re.sub(r'[\\/:*?"<>|]+', '_', g).strip() if g else _safe(job.get('name', 'report'))
         hpath = versioned_path(os.path.join(outdir, f'{fname}.html'))
         if os.path.basename(hpath) != f'{fname}.html':
             log(f'[HTML] 같은 이름의 파일이 있어 {os.path.basename(hpath)} 로 저장')
-        htmls.append(report_html.build(hpath, ctx, sub, gcmp))
+        return report_html.build(hpath, ctx, sub, gcmp)
+
+    for g in groups:
+        ids = [c['id'] for c in doc_cases if (c.get('group') or '') == g]
+        htmls.append(html_for(ids, g, None, re.sub(r'[\\/:*?"<>|]+', '_', g).strip() if g else _safe(job.get('name', 'report'))))
         if g:
             log(f'[HTML] 그룹 {g}: 케이스 {len(ids)}건')
-    html_path = htmls[0]
+
+    # 비교 리포트 (선택): 고른 케이스를 지표마다 그래프 1장으로 비교한 문서, 그 케이스들을 담은 HTML
+    cmp_out = []
+    spec = job.get('compare')
+    if spec:
+        from . import compare as compare_mod
+        ctitle = (spec.get('title') or '').strip() or '비교 리포트'
+        ids = [x['id'] for x in spec['cases']]
+        if spec.get('word', True):
+            cpath, k, ctext = compare_mod.build(spec, cases, meta, df, outdir, date, log, width_cm)
+            cmp_out.append(cpath)
+            n_charts += k
+            for h in _scan_terms(ctext, terms):
+                term_hits.append(f'{os.path.basename(cpath)}: {h}')
+                log(f'[검사] 통제 용어 검출: {os.path.basename(cpath)}: {h}')
+        if spec.get('html'):
+            order = {i: n for n, i in enumerate(ids)}
+            cmp_out.append(html_for(sorted(ids, key=order.get), '', ctitle, compare_mod.file_title(ctitle)))
+        log(f'[비교] {ctitle}: 케이스 {len(ids)}건 · 지표 {len(spec.get("metrics") or [])}개')
     rec = {'job': job.get('name'), 'built_at': dt.datetime.now().isoformat(timespec='seconds'),
            'cases': case_order, 'baseline': baseline, 'metrics': len(metrics), 'values': int(len(df)),
-           'charts': n_charts, 'term_violations': term_hits, 'outputs': docs + htmls,
+           'charts': n_charts, 'term_violations': term_hits, 'outputs': docs + htmls + cmp_out, 'outdir': outdir,
            'windows': {c['id']: [str(meta[c['id']]['start']), str(meta[c['id']]['end']), bool(c.get('end_auto'))] for c in cases},
            'checks': {c['id']: c.get('collection_check', '') for c in cases},
            'groups': {g or '-': [c['id'] for c in cases if (c.get('group') or '') == g] for g in groups},
