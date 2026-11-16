@@ -8,7 +8,8 @@ tcrun 과 tcgen_apply.py 에는 시험용 코드가 없다. 경로만 환경 변
 
 경우: (a) 케이스 2개의 전체 흐름 (b) 값이 이미 같음 (d) 게스트 종료 불가 (e) 전원 켜기 실패와 rollback
 (f) 프로세스가 보이지 않음 (g) ssh 일시 실패 (h) stop (i) 없는 VM, 없는 호스트 옵션 (j) 판 불일치
-(k) ESX 호스트 2대 (l) 설정만 있는 케이스, 그리고 VM 을 다시 켠 뒤 대기, 시계 차이, 점검(check), 등록 실패, 최대 대기.
+(k) ESX 호스트 2대 (l) 설정만 있는 케이스, 그리고 VM 을 켠 뒤 대기, 시계 차이, 점검(check), 등록 실패, 최대 대기,
+VM 전원(꺼진 VM 을 하나씩 켜기, 1GB page backing, 끔인 VM), 시작 시각 준비, 잡 시작 최소 간격.
 """
 import csv
 import datetime as dt
@@ -32,8 +33,8 @@ def epoch(text):
     return dt.datetime.strptime(text, "%Y-%m-%d %H:%M:%S").replace(tzinfo=fakeenv.KST).timestamp()
 
 
-def vm(name, job="(없음)", monitors=(), profiles=()):
-    return {"name": name, "job": job, "monitors": list(monitors), "profiles": list(profiles), "end_ref": False}
+def vm(name, job="(없음)", monitors=(), profiles=(), power="on"):
+    return {"name": name, "job": job, "monitors": list(monitors), "profiles": list(profiles), "end_ref": False, "power": power}
 
 
 def case(name, vms, esx="esx01", esx_monitors=(), esx_profiles=(), max_wait="", group="g1", desc="", seq_start=""):
@@ -46,13 +47,14 @@ def case(name, vms, esx="esx01", esx_monitors=(), esx_profiles=(), max_wait="", 
 @unittest.skipUnless(fakeenv.HAVE, "perl, sh 가 있는 Linux/macOS 에서만 실행")
 class TcrunBase(unittest.TestCase):
     DASH = False
+    JDIR = False         # True: 점프 VM 작업 폴더를 홈 밖에 둔다
 
     def setUp(self):
         # 생성기는 시작 시각을 이 PC 의 시간대로 초(epoch)로 바꾼다. 가짜 환경의 시계는 KST 이므로 시험 프로세스도 KST 로 맞춘다
         self.old_tz = os.environ.get("TZ")
         os.environ["TZ"] = "Asia/Seoul"
         time.tzset()
-        self.e = fakeenv.FakeEnv(dash=self.DASH)
+        self.e = fakeenv.FakeEnv(dash=self.DASH, jdir=self.JDIR)
         e = self.e
         self.run_cmds = [
             {"app": "sim", "name": "job_a", "desc": "", "cmd": e.job_cmd("simA", 100), "proc": "simA"},
@@ -138,14 +140,17 @@ class FullFlowTests(TcrunBase):
         self.assert_order(log, [
             "==== case caseA (1 of 2) begin. VMs: esx01ev01 esx01ev02", "TCGEN-SET esx01ev01 sched.mem.pin: (none) -> \"TRUE\"  [change]",
             "TCGEN-HOST /Numa/LocalityWeightActionAffinity (integer): 130 -> 0  [change]", "TCGEN-RESULT changed 3 value(s)",
-            "esx01ev01: powered on", "vm esx01ev01: ssh login works", "esx01ev02: powered on", "vm esx01ev02: ssh login works",
-            "settings: done", "settle: VMs of this case were powered on again", "registered on vm esx01ev01:",
+            "settings: applied. The VMs of this case are powered off now.",
+            "esx01ev01: powered on", "vm esx01ev01: 1GB pages are not set for this VM", "vm esx01ev01: ssh login works, ready",
+            "esx01ev02: powered on", "vm esx01ev02: ssh login works, ready",
+            "VM power: done. Powered on by this case: esx01ev01 esx01ev02", "settle: VMs of this case were powered on again",
+            "registered on vm esx01ev01:",
             "registered on vm esx01ev02:", "registered on esx esx01 (UTC):", "times: monitoring start",
             "the process is seen on every VM with a job", "job ended:", "monitoring stop registered on vm esx01ev01:",
             "monitoring stop registered on esx esx01 (UTC):", "removed the lines of this case: vm esx01ev01",
             "removed the lines of this case: esx esx01", "==== case caseA done",
-            "==== case caseB (2 of 2) begin", "settings: every value is already as wanted. The VMs are not touched.",
-            "registered on vm esx01ev01:", "job ended:", "==== case caseB done", "run finished: all 2 case(s) done"])
+            "==== case caseB (2 of 2) begin", "settings: every value is already as wanted. The VMs are not shut down for the settings.",
+            "vm esx01ev01: powered on already", "VM power: done. Every VM was on already", "registered on vm esx01ev01:", "job ended:", "==== case caseB done", "run finished: all 2 case(s) done"])
         self.assertTrue(all(ord(ch) < 128 for ch in log), "로그는 ASCII")
         # 설정: vmx 와 호스트 옵션, VM 을 켠 순서
         self.assertTrue(e.vmx("esx01", "esx01ev01").endswith('sched.mem.pin = "TRUE"\n'))
@@ -426,6 +431,24 @@ class StartTimeAndGapTests(TcrunBase):
         self.assertRegex(out, r"CHECK RESULT: 1 problem")
 
 
+    def test_preparation_starts_the_set_minutes_before_the_start_time(self):
+        """시작 시각을 적은 케이스는 그 시각 '시작 시각 준비' 분 전까지 기다린 뒤 설정 적용과 VM 전원 맞추기를 한다."""
+        e = self.e
+        self.two_vms()
+        res, plan = self.gen([case("t1", [vm("esx01ev01", "job_a", [], ["pin"])], seq_start="10:20")], seq_prep_lead_min=10)
+        self.assertIn("SET PREP_LEAD_MIN 10\n", res["plan"])
+        cron = e.start_cron()
+        rc, out = e.tcrun("run", plan, "esx01", timeout=600)
+        log = self.log()
+        self.assertEqual(rc, 0, self.ctx(out))
+        self.assertIn("start time 2026-11-20 10:20: the preparation (settings, VM power) starts 10 min before it, at 2026-11-20 10:10:00", log)
+        first = next(x for x in log.splitlines() if "settings wanted by this case:" in x)
+        self.assertGreaterEqual(epoch(first[:19]), epoch("2026-11-20 10:10:00"), "설정 적용은 10:10 이후")
+        self.assertLess(epoch(first[:19]), epoch("2026-11-20 10:11:00"))
+        r = self.results()[0]
+        self.assertEqual(r["job_start"], "2026-11-20 10:20:00")
+
+
 class CheckIntervalTests(TcrunBase):
     def test_few_logins_while_the_job_runs(self):
         """잡이 실행되는 동안 VM 접속을 줄인다: 잡 시작 뒤 한 번 확인하고 그 뒤로는 확인 간격마다 확인한다. 모든 VM 에서 프로세스가
@@ -614,6 +637,8 @@ class FailureTests(TcrunBase):
         self.assertEqual(self.tc_lines("esx01ev01"), [])
         self.assertIn("registered on vm esx01ev01:", self.log())
         self.assertIn("removed the lines of this case: vm esx01ev01", self.log())
+        mdir = os.path.join(e.tcgen, "minutes")
+        self.assertEqual(os.listdir(mdir) if os.path.isdir(mdir) else [], [], "등록이 실패하면 잡았던 잡 시작 분을 돌려줌")
         time.sleep(240 / e.speed)
         self.assertEqual(cron.fired, [], "지운 줄은 실행되지 않음")
 
@@ -653,7 +678,8 @@ class FailureTests(TcrunBase):
         res, plan = self.gen([case("k2", [vm("esx01ev01", "job_a")], esx_monitors=["hmon"])], now=GEN + dt.timedelta(seconds=5))
         rc, out = e.tcrun("run", plan, "esx01")
         self.assertEqual(rc, 1, out)
-        self.assertIn("esx esx01: ssh key login failed", e.state(res["run_id"], "esx01")["text"])
+        self.assertIn("power on of vm esx01ev01 failed: no answer from the ESX host (ssh exit 255: root@esx01: Permission denied",
+                      e.state(res["run_id"], "esx01")["text"], "ESX 호스트가 있는 케이스는 VM 전원을 맞추므로 ESX 키 접속이 먼저 필요")
         self.assertEqual(self.tc_lines("esx01ev01"), [])
         self.assertEqual(cron.fired, [])
 
@@ -734,6 +760,93 @@ class FailureTests(TcrunBase):
         self.assertEqual((rc, out.strip()), (2, "tcrun: bad ESX address in the plan for esx01"))
 
 
+class PowerTests(TcrunBase):
+    def test_vms_that_are_off_are_powered_on_one_after_another(self):
+        """VM 이 모두 꺼져 있으면 표의 순서대로 하나씩 켠다. VM 마다 1GB page backing 이 메모리 GB 수에 닿고 ssh 로그인이 된 뒤 다음 VM 을
+        켠다. 잡이 없는 VM 도 켠다. 잡은 마지막 VM 이 준비된 시각에서 '켠 뒤 대기' 이상 지난 뒤에 시작한다."""
+        e = self.e
+        e.add_vm("esx01ev01")
+        e.add_vm("esx01ev02")
+        slow = {"state": "off", "lpage_rate": 0.1, "lpage_cap": 16}
+        e.add_esx("esx01", vms=[("esx01ev01", dict(slow)), ("esx01ev02", dict(slow))],
+                  vmx={"esx01ev01": fakeenv.vmx_1g("esx01ev01"), "esx01ev02": fakeenv.vmx_1g("esx01ev02")})
+        res, plan = self.gen([case("p1", [vm("esx01ev01", "job_a"), vm("esx01ev02")])], seq_settle_min=10)
+        self.assertIn("VM 001 esx01ev02 esx01ev02\n", res["plan"], "잡이 없는 VM 도 그 케이스의 VM")
+        rc, out = e.tcrun("check", plan)
+        self.assertIn("[ok] settings and VM power: 2 VM(s) to power on.", out)
+        self.assertIn("[ok] vm esx01ev01: powered off now. The run powers it on and then waits for its ssh login.", out)
+        self.assertIn("CHECK RESULT: OK", out)
+        cron = e.start_cron()
+        rc, out = e.tcrun("run", plan, "esx01", timeout=600)
+        log = self.log()
+        self.assertEqual(rc, 0, self.ctx(out))
+        self.assert_order(log, [
+            "==== case p1 (1 of 1) begin. VMs: esx01ev01 esx01ev02",
+            "VM power: the VMs of this case are powered on one after another when off (power on, 1GB page backing, ssh login): esx01ev01 esx01ev02",
+            "esx01ev01: powered on", "1GB page backings, target, failed attempts: 16 16 0",
+            "vm esx01ev01: 1GB page backing complete (16 of 16 1GB pages, failed attempts 0)", "vm esx01ev01: ssh login works, ready",
+            "esx01ev02: powered on", "vm esx01ev02: 1GB page backing complete (16 of 16 1GB pages, failed attempts 0)",
+            "vm esx01ev02: ssh login works, ready", "VM power: done. Powered on by this case: esx01ev01 esx01ev02. The last one was ready at",
+            "settle: VMs of this case were powered on again", "times: job start", "==== case p1 done"])
+        vms = e.esx_vms("esx01")
+        self.assertEqual((vms["esx01ev01"]["state"], vms["esx01ev02"]["state"]), ("on", "on"), "잡이 없는 VM 도 켬")
+        self.assertGreaterEqual(vms["esx01ev02"]["on_at"] - vms["esx01ev01"]["on_at"], 160,
+                                "둘째 VM 은 첫 VM 의 1GB backing(16개, 초당 0.1개 = 160초)이 끝난 뒤에 켬")
+        r = self.results()[0]
+        self.assertGreaterEqual(epoch(r["vms_on"]), vms["esx01ev02"]["on_at"] + 150, "준비 시각 = 둘째 VM 의 backing 과 ssh 로그인 뒤")
+        self.assertGreaterEqual(epoch(r["job_start"]) - epoch(r["vms_on"]), 600, "잡은 마지막 VM 준비 10분 뒤 이후")
+        self.assertIn("vsish -e get /memory/lpage/vmLpage/100011", e.esx_calls("esx01"))
+
+    def test_vm_marked_off_is_shut_down(self):
+        """전원 끔인 VM 은 켜져 있으면 끈다. 그 VM 에는 접속하지 않는다. 켜져 있던 VM 만 쓰면 켠 뒤 대기가 없다."""
+        e = self.e
+        self.two_vms()
+        res, plan = self.gen([case("o1", [vm("esx01ev01", "job_a"), vm("esx01ev02", power="off")])], seq_settle_min=10)
+        self.assertIn("OFF 001 esx01ev02\n", res["plan"])
+        rc, out = e.tcrun("check", plan)
+        self.assertIn("TCGEN-POWER esx01ev02 now=on want=off  [change]", out)
+        self.assertIn("[ok] settings and VM power: 1 VM(s) to power off.", out)
+        self.assertIn("[ok] vm esx01ev02: the case wants it powered off. No login.", out)
+        self.assertIn("CHECK RESULT: OK", out)
+        cron = e.start_cron()
+        rc, out = e.tcrun("run", plan, "esx01", timeout=600)
+        log = self.log()
+        self.assertEqual(rc, 0, self.ctx(out))
+        self.assert_order(log, ["==== case o1 (1 of 1) begin. VMs: esx01ev01 esx01ev02 (powered off for this case: esx01ev02)",
+                                "vm esx01ev02: shut down (the case wants it off)", "vm esx01ev01: powered on already",
+                                "vm esx01ev01: 1GB pages are not set for this VM", "vm esx01ev01: ssh login works",
+                                "VM power: done. Every VM was on already", "times: job start", "==== case o1 done"])
+        self.assertEqual(e.esx_vms("esx01")["esx01ev02"]["state"], "off")
+        with open(os.path.join(e.root, "ssh_calls.txt")) as f:
+            self.assertNotIn("vm esx01ev02", f.read().splitlines(), "끔인 VM 에는 접속하지 않음")
+        r = self.results()[0]
+        self.assertEqual((r["status"], r["vms_on"]), ("done", ""))
+        self.assertNotIn("settle:", log, "켜져 있던 VM 만 썼으므로 켠 뒤 대기가 없음")
+        self.assertEqual(len(self.fired(cron, "esx01ev01", "job.sh")), 1)
+
+    def test_backing_that_stops_pauses_and_keeps_the_settings(self):
+        """1GB page backing 이 늘지 않고 실패 수가 있으면 멈춘다. 설정은 되돌리지 않고 VM 은 켜진 채로 둔다."""
+        e = self.e
+        e.add_vm("esx01ev01")
+        e.add_esx("esx01", vms=[("esx01ev01", {"lpage_rate": 1, "lpage_cap": 8, "lpage_failed": 3})],
+                  vmx={"esx01ev01": fakeenv.vmx_1g("esx01ev01")})
+        res, plan = self.gen([case("s1", [vm("esx01ev01", "job_a")], esx_profiles=["numa0"]), case("s2", [vm("esx01ev01", "job_a")])])
+        cron = e.start_cron()
+        rc, out = e.tcrun("run", plan, "esx01", timeout=600)
+        log = self.log()
+        self.assertEqual(rc, 1, self.ctx(out))
+        st = e.state(RID, "esx01")
+        self.assertEqual(st["state"], "paused")
+        self.assertIn("vm esx01ev01: the 1GB page backing stopped at 8 of 16 1GB pages with 3 failed attempts", st["text"])
+        self.assertIn("The settings of case s1 stay applied.", st["text"])
+        self.assertEqual(e.esx_adv("esx01", "/Numa/LocalityWeightActionAffinity"), "0", "설정은 되돌리지 않음")
+        self.assertEqual(e.esx_vms("esx01")["esx01ev01"]["state"], "on", "VM 은 켜진 채로 둠")
+        self.assertNotIn("rollback:", log)
+        self.assertIn("Not finished: s1 s2", log)
+        self.assertEqual(cron.fired, [])
+        self.assertEqual(self.results()[0]["apply"], "changed")
+
+
 class StopTests(TcrunBase):
     def test_h_stop_while_the_job_runs(self):
         """(h) stop: 진행만 끝낸다. 실행 중인 잡과 모니터링은 건드리지 않는다."""
@@ -760,7 +873,11 @@ class StopTests(TcrunBase):
         self.assertTrue(self.results()[0]["status"].startswith("stopped: while the job"))
         self.assertIn("Not finished: h1 h2", self.log())
         self.assertFalse(os.path.exists(os.path.join(e.tcgen, "runs", RID, "esx01.pid")))
-        self.assertEqual(e.tcrun("stop")[1].strip(), "no running tcrun")
+        out = e.tcrun("stop")[1]
+        self.assertTrue(out.startswith("no running tcrun\n"), out)
+        self.assertIn("run %s esx esx01: not running (stopped: while the job of case h1 was running" % RID, out,
+                      "멈춘 호스트는 상태와 함께 알리고 cancel 을 안내")
+        self.assertIn("To take its crontab lines out: sh %s/tcrun cancel esx01" % e.tcgen, out)
         self.assertIn("esx esx01 : stopped", e.tcrun("status")[1])
 
     def test_h_stop_after_monitoring_started_before_the_job(self):
@@ -845,6 +962,117 @@ class MultiHostAndCheckTests(TcrunBase):
         self.assertIn("stop requested: run %s esx esx01" % RID, out4)
         e.wait_for(lambda: e.state(RID, "esx01").get("state") == "stopped", what="esx01 stop")
 
+    def minutes(self):
+        d = os.path.join(self.e.tcgen, "minutes")
+        out = {}
+        for n in (os.listdir(d) if os.path.isdir(d) else []):
+            if not n.isdigit():
+                continue
+            with open(os.path.join(d, n, "who")) as f:
+                out[int(n)] = f.read().strip()
+        return out
+
+    def test_job_starts_on_two_esx_hosts_are_five_minutes_apart(self):
+        """ESX 호스트 2대를 동시에 시작해 두 진행이 같은 시각을 고르려 해도, 모든 잡 시작은 서로 5분(잡 시작 최소 간격) 이상 떨어진다."""
+        e = self.e
+        self.two_vms()
+        e.add_vm("esx02ev01")
+        e.add_vm("esx02ev02")
+        e.add_esx("esx02", vms=[("esx02ev01", {}), ("esx02ev02", {})])
+        cases = []
+        for n in range(1, 4):                     # 같은 모양의 케이스를 두 호스트에 3개씩: 시각 계산이 같아 같은 분을 고르려 한다
+            cases.append(case("a%d" % n, [vm("esx01ev01", "job_a"), vm("esx01ev02", "job_a")]))
+            cases.append(case("b%d" % n, [vm("esx02ev01", "job_a"), vm("esx02ev02", "job_a")], esx="esx02"))
+        res, plan = self.gen(cases)
+        cron = e.start_cron()
+        rc, out = e.tcrun("start", plan)
+        self.assertEqual(rc, 0, out)
+        e.wait_for(lambda: all(e.state(RID, h).get("state") == "done" for h in ("esx01", "esx02")), seconds=600, what="두 호스트 완료")
+        starts = {}
+        for h in ("esx01", "esx02"):
+            for r in self.results(h):
+                self.assertEqual(r["status"], "done", self.ctx())
+                starts[r["case"]] = epoch(r["job_start"])
+        self.assertEqual(sorted(starts), ["a1", "a2", "a3", "b1", "b2", "b3"])
+        ts = sorted(starts.values())
+        self.assertTrue(all(b - a >= 300 for a, b in zip(ts, ts[1:])), "잡 시작이 서로 5분 이상: %s" % sorted((t, c) for c, t in starts.items()))
+        # cron 이 실제로 실행한 잡의 분: 한 케이스의 VM 2대는 같은 분, 다른 케이스와는 다른 분
+        for c, t in starts.items():
+            hosts = ("esx01ev01", "esx01ev02") if c.startswith("a") else ("esx02ev01", "esx02ev02")
+            self.assertEqual([t in self.fired(cron, hv, "job.sh") for hv in hosts], [True, True], "케이스 %s 의 VM 2대가 같은 분에 시작" % c)
+        all_fired = [t for h, t, line in cron.fired if "job.sh" in line]
+        self.assertEqual(len(all_fired), 12)
+        self.assertEqual(len(set(all_fired)), 6, "12개 잡이 6개 분에 2개씩 (같은 케이스의 VM 끼리만 같은 분)")
+        logs = self.log("esx01") + self.log("esx02")
+        self.assertIn("spacing: the job of run %s, esx esx0" % RID, logs, "가까운 시각을 고르려던 진행이 5분 뒤로 옮김")
+        own = self.minutes()
+        self.assertEqual(sorted(own), sorted(starts.values()), "기록된 분 = 잡 시작 분")
+        self.assertEqual(sorted(own.values()), sorted("run %s, esx %s, case %s" % (RID, "esx01" if c[0] == "a" else "esx02", c) for c in starts))
+
+    def claim(self, when, who, reg=False):
+        d = os.path.join(self.e.tcgen, "minutes", str(int(epoch(when))))
+        os.makedirs(d)
+        with open(os.path.join(d, "who"), "w") as f:
+            f.write(who)
+        if reg:
+            open(os.path.join(d, "reg"), "w").close()
+
+    def test_start_near_another_run_moves_by_the_spacing(self):
+        """다른 실행의 잡 시작과 5분보다 가까운 시작 시각: 점검(P)이 알리고, 잡은 그 잡 시작 5분 뒤로 옮긴다(옮긴 자리도 다시 확인).
+        진행이 죽어 남은, 등록하지 않은 미래 기록은 무시하고 지운다. 하루 넘게 지난 기록은 지운다."""
+        e = self.e
+        self.two_vms()
+        self.claim("2026-11-20 10:12:00", "run 20261120-090000, esx esx09, case other")
+        self.claim("2026-11-20 10:20:00", "run 20261120-090000, esx esx09, case other2", reg=True)
+        self.claim("2026-11-20 10:28:00", "run 20261120-080000, esx esx08, case dead")
+        dead = os.path.join(e.tcgen, "runs", "20261120-080000")
+        os.makedirs(dead)
+        with open(os.path.join(dead, "esx08.state"), "w") as f:
+            f.write("state=running\n")
+        with open(os.path.join(dead, "esx08.pid"), "w") as f:
+            f.write("999999\n")
+        self.claim("2026-11-18 10:00:00", "run old, esx esx09, case gone")
+        res, plan = self.gen([case("m1", [vm("esx01ev01", "job_a")], seq_start="10:12")])
+        rc, out = e.tcrun("check", plan)
+        self.assertIn("[PROBLEM] case m1: the start time 2026-11-20 10:12 is less than 5 min from the job start 2026-11-20 10:12:00 of "
+                      "run 20261120-090000, esx esx09, case other.", out)
+        cron = e.start_cron()
+        rc, out = e.tcrun("run", plan, "esx01", timeout=600)
+        log = self.log()
+        self.assertEqual(rc, 0, self.ctx(out))
+        self.assertIn("WARN the start time 2026-11-20 10:12 of case m1 is less than 5 min from the job start 2026-11-20 10:12:00 of "
+                      "run 20261120-090000, esx esx09, case other.", log)
+        self.assert_order(log, ["spacing: the job of run 20261120-090000, esx esx09, case other starts 2026-11-20 10:12:00, less than 5 min "
+                                "from 2026-11-20 10:12:00. This job starts at 2026-11-20 10:17:00",
+                                "spacing: the job of run 20261120-090000, esx esx09, case other2 starts 2026-11-20 10:20:00, less than 5 min "
+                                "from 2026-11-20 10:17:00. This job starts at 2026-11-20 10:25:00",
+                                "times: job start 2026-11-20 10:25:00"])
+        r = self.results()[0]
+        self.assertEqual(r["job_start"], "2026-11-20 10:25:00")
+        self.assertEqual(self.fired(cron, "esx01ev01", "job.sh"), [epoch("2026-11-20 10:25:00")])
+        own = self.minutes()
+        self.assertEqual(own, {int(epoch("2026-11-20 10:12:00")): "run 20261120-090000, esx esx09, case other",
+                               int(epoch("2026-11-20 10:20:00")): "run 20261120-090000, esx esx09, case other2",
+                               int(epoch("2026-11-20 10:25:00")): "run %s, esx esx01, case m1" % RID},
+                         "다른 실행의 기록은 그대로. 죽은 진행의 미래 기록과 하루 넘게 지난 기록은 지움. 쓰지 않은 10:12 기록은 돌려줌")
+        self.assertTrue(os.path.exists(os.path.join(e.tcgen, "minutes", str(int(epoch("2026-11-20 10:25:00"))), "reg")),
+                        "등록을 마친 잡의 기록에는 reg")
+        self.assertFalse(os.path.exists(os.path.join(e.tcgen, "minutes", ".lock")), "잠금은 남지 않음")
+
+    def test_unused_start_times_are_given_back_when_the_run_ends(self):
+        """멈춘 실행은 시작하지 않은 케이스의 시작 시각 기록을 지운다. 다시 생성한 실행이 그 시각을 그대로 쓸 수 있다."""
+        e = self.e
+        self.two_vms(vm1={"poweron": "fail", "state": "off"})
+        res, plan = self.gen([case("u1", [vm("esx01ev01", "job_a")], seq_start="10:30"),
+                              case("u2", [vm("esx01ev02", "job_a")], seq_start="11:00")], seq_prep_lead_min=25)
+        rc, out = e.tcrun("start", plan)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(sorted(self.minutes()), [int(epoch("2026-11-20 10:30:00")), int(epoch("2026-11-20 11:00:00"))],
+                         "start 가 적은 시작 시각을 먼저 기록(진행은 10:05 까지 준비를 기다리는 중)")
+        e.wait_for(lambda: e.state(RID, "esx01").get("state") == "paused", seconds=240, what="켜기 실패로 멈춤")
+        e.wait_for(lambda: not os.path.exists(os.path.join(e.tcgen, "runs", RID, "esx01.pid")), what="진행 끝")
+        self.assertEqual(self.minutes(), {}, "멈춘 실행의 기록을 모두 돌려줌(등록한 잡이 없음)")
+
     def test_runner_that_died_is_reported_and_does_not_block_a_new_run(self):
         """진행 프로세스가 사라지면(점프 VM 재부팅 등) status 가 died 로 알리고, 같은 ESX 호스트의 새 실행을 막지 않는다."""
         import signal
@@ -858,7 +1086,7 @@ class MultiHostAndCheckTests(TcrunBase):
         p.wait()
         rc, out = e.tcrun("status")
         self.assertIn("== run %s  esx esx01 : died (the runner is not running any more." % RID, out)
-        self.assertEqual(e.tcrun("stop")[1].strip(), "no running tcrun")
+        self.assertTrue(e.tcrun("stop")[1].startswith("no running tcrun\n"))
         res2, plan2 = self.gen([case("z2", [vm("esx01ev02", "job_a")])], now=GEN + dt.timedelta(seconds=30))
         rc, out = e.tcrun("start", plan2)
         self.assertIn("started: run %s esx esx01" % res2["run_id"], out)
@@ -881,17 +1109,18 @@ class MultiHostAndCheckTests(TcrunBase):
         res, plan = self.gen(cases)
         before = (e.vmx("esx01", "esx01ev01"), e.vm_crontab("esx01ev01"), e.esx_crontab("esx01"))
         rc, out = e.tcrun("check", plan)
-        for word in ("Nothing is changed by this check.", "[ok] log folder " + e.log, "== ESX host esx01",
+        for word in ("Nothing is changed by this check.", "[ok] folder %s: 1 MB can be written" % e.log, "== ESX host esx01",
                      "[ok] esx esx01 (esx01): ssh key login works, host name esx01", "[ok] esx esx01: python3 found",
                      "[ok] esx esx01: vim-cmd found", "[ok] esx esx01: esxcli found",
                      "TCGEN-VM esx01ev01 vmid=10 power=on vmx=", 'TCGEN-SET esx01ev01 sched.mem.pin: (none) -> "TRUE"  [change]',
                      'TCGEN-SET esx01ev02 numa.nodeAffinity: "0" -> "0"  [same]',
                      "TCGEN-HOST /Numa/LocalityWeightActionAffinity (integer): 130 -> 0  [change]",
-                     "[ok] settings: 3 value(s) differ. The VMs of this case will be shut down and powered on.",
+                     "[ok] settings and VM power: 3 value(s) differ. The run changes them before the job",
+                     "TCGEN-POWER esx01ev01 now=on want=on  [same]",
                      "[ok] vm esx01ev01 (esx01ev01): ssh login works, clock", "tcgen lines in crontab: 0",
                      "== ESX host esx02", "[PROBLEM] esx esx02 (esx02): ssh key login failed (exit 255: root@esx02: Permission denied",
-                     "sh ~/.tcgen/tcrun key", "[PROBLEM] settings of case n2 not checked (no ESX login)",
-                     "== ESX host noesx", "(no settings and no ESX monitoring in the cases of this host: no ESX login needed)",
+                     "sh %s/tcrun key" % e.tcgen, "[PROBLEM] settings and VM power of case n2 not checked (no ESX login)",
+                     "== ESX host noesx", "(cases without an ESX host: no ESX login. The power of their VMs is not handled",
                      "[PROBLEM] vm lost01 (lost01): ssh login failed (exit 255: ssh: connect to host lost01 port 22: Connection refused)",
                      "CHECK RESULT: 3 problem(s). Fix them before block S.",
                      "saved: %s/tcrun-%s-check.log" % (e.log, RID)):
@@ -914,11 +1143,12 @@ class MultiHostAndCheckTests(TcrunBase):
         with open(os.path.join(e.tcgen, "id_esx.pub")) as f:
             pub = f.read().strip()
         self.assertIn("echo '%s' >> /etc/ssh/keys-root/authorized_keys" % pub, out)
-        self.assertIn("sh ~/.tcgen/esxssh <esx host> hostname", out)
+        self.assertIn("sh %s/esxssh <esx host> hostname" % e.tcgen, out)
         self.assertEqual(e.tcrun("version"), (0, core.VERSION + "\n"))
         rc, out = e.tcrun()
         self.assertEqual(rc, 2)
-        self.assertIn("usage: sh ~/.tcgen/tcrun check <plan> | start <plan> | run <plan> <esx> | status [-a] | stop [esx] | key | version", out)
+        self.assertIn("usage: sh %s/tcrun check <plan> | start <plan> | run <plan> <esx> | status [-a] | stop [esx] | cancel [esx] | "
+                      "key | version" % e.tcgen, out)
         self.assertEqual(e.tcrun("status")[1].strip(), "no run on this jump VM yet")
         rc, out = e.tcrun("run", os.path.join(e.root, "nofile"), "esx01")
         self.assertEqual(rc, 2)
@@ -939,6 +1169,160 @@ class MultiHostAndCheckTests(TcrunBase):
 
 
 @unittest.skipUnless(fakeenv.HAVE and fakeenv.shutil.which("dash"), "dash 필요")
+class CancelAndStatusTests(TcrunBase):
+    def test_cancel_while_the_job_runs(self):
+        """cancel: 진행을 바로 끝내고 crontab 줄을 지우고, 시작된 모니터링에는 중지 명령을 실행한다. 잡은 끝내지 않고 보인다."""
+        e = self.e
+        self.two_vms()
+        res, plan = self.gen([case("x1", [vm("esx01ev01", "job_long", ["gmon"])], esx_monitors=["hmon"]),
+                              case("x2", [vm("esx01ev01", "job_a")], seq_start="13:00")])
+        cron = e.start_cron()
+        p = e.tcrun_bg("run", plan, "esx01")
+        e.wait_for(lambda: "the process is seen on every VM" in self.log(), seconds=240, what="잡 실행 중")
+        self.assertEqual(len(self.tc_lines("esx01ev01")), 2, "모니터링 시작 줄과 잡 줄")
+        rc, out = e.tcrun("cancel")
+        self.assertEqual(rc, 0, out)
+        p.wait(timeout=60)
+        self.assertIn("== esx esx01: cancelling run %s (state running, case x1, step wait-job)" % RID, out)
+        self.assertIn("the runner (pid %d) was ended at step wait-job" % p.pid, out)
+        self.assertIn("crontab lines of case x1 removed", out)
+        self.assertIn("monitoring stop: vm esx01ev01 (exit 0)", out)
+        self.assertIn("monitoring stop: esx esx01 (exit 0)", out)
+        self.assertIn("job on vm esx01ev01: 1 process(es) match 'simLong'. tcrun does not end jobs.", out)
+        self.assertIn("cancelled. Settings that this run applied stay as they are.", out)
+        self.assertEqual(self.tc_lines("esx01ev01"), [], "VM 의 줄을 모두 지움")
+        self.assertEqual(e.esx_crontab("esx01"), fakeenv.ESX_DEFAULT_CRON.splitlines(), "ESX 의 줄도 지움")
+        self.assertEqual([x[:2] for x in e.vm_file("esx01ev01", "mon.log")], [["start", "g"], ["stop", "g"]],
+                         "VM 모니터링은 중지 명령을 한 번 실행")
+        self.assertTrue(os.listdir(os.path.join(e.vm_dir("esx01ev01"), "proc")), "잡은 끝내지 않음")
+        st = e.state(RID, "esx01")
+        self.assertEqual(st["state"], "cancelled")
+        self.assertEqual(self.results()[-1]["status"], "cancelled")
+        self.assertNotIn(int(epoch("2026-11-20 13:00:00")), self.minutes(), "쓰지 않은 시작 시각 기록을 돌려줌")
+        self.assertIn("== run %s  esx esx01 : cancelled" % RID, e.tcrun("status")[1])
+        self.assertIn("run %s was cancelled already" % RID, e.tcrun("cancel")[1])
+
+    def test_cancel_before_the_job_start(self):
+        """잡 시작 전 cancel: 줄을 지워 모니터링과 잡이 시작되지 않는다. 시작 전이므로 중지 명령은 실행하지 않는다."""
+        e = self.e
+        self.two_vms()
+        res, plan = self.gen([case("y1", [vm("esx01ev01", "job_a", ["gmon"])], seq_start="10:12")])
+        cron = e.start_cron()
+        p = e.tcrun_bg("run", plan, "esx01")
+        e.wait_for(lambda: "times: monitoring start" in self.log(), seconds=240, what="등록")
+        rc, out = e.tcrun("cancel", "esx01")
+        p.wait(timeout=60)
+        self.assertNotIn("monitoring stop:", out)
+        self.assertIn("job on vm esx01ev01: 0 process(es) match 'simA'", out)
+        self.assertEqual(self.tc_lines("esx01ev01"), [])
+        self.assertEqual(self.minutes(), {}, "등록했던 시작 시각도 아직 오지 않았으므로 돌려줌")
+        time.sleep(max(0, epoch("2026-11-20 10:13:00") - e.now()) / e.speed)
+        self.assertEqual(cron.fired, [], "10:11 모니터링, 10:12 잡 모두 시작되지 않음")
+        self.assertEqual(e.state(RID, "esx01")["state"], "cancelled")
+
+    def minutes(self):
+        return MultiHostAndCheckTests.minutes(self)
+
+    def test_status_shows_every_host_of_the_run(self):
+        """status 는 실행의 모든 ESX 호스트를 보인다. 멈춘 호스트는 이유를, 상태 파일이 없는 호스트는 시작하지 못했다고 보인다.
+        stop 은 실행 중인 호스트에만 적용하고 나머지는 상태를 알린다."""
+        e = self.e
+        self.two_vms()
+        e.add_vm("esx02ev01")
+        e.add_esx("esx02", vms=[("esx02ev01", {"state": "off", "poweron": "fail"})])
+        res, plan = self.gen([case("s1", [vm("esx01ev01", "job_long")]), case("s2", [vm("esx02ev01", "job_a")], esx="esx02")])
+        with open(plan) as f:
+            text = f.read()
+        with open(plan, "w") as f:      # esx03: 진행이 시작하자마자 끝나 상태 파일을 쓰지 못하는 호스트(주소가 잘못됨)
+            f.write(text.replace("CHAIN esx02\n", "CHAIN esx02\nADDR esx03 -bad\nCHAIN esx03\n").replace(
+                "END 002\n", "END 002\nCASE 003 esx03 s3\nMAXWAIT 003 0\nVM 003 esx03ev01 esx03ev01\nEND 003\n"))
+        e.start_cron()
+        rc, out = e.tcrun("start", plan)
+        self.assertIn("==== esx03: the runner did not start:", out)
+        e.wait_for(lambda: e.state(RID, "esx02").get("state") == "paused", seconds=240, what="esx02 멈춤")
+        rc, out = e.tcrun("status")
+        self.assertIn("== run %s  esx esx01 : running" % RID, out)
+        self.assertIn("== run %s  esx esx02 : paused" % RID, out)
+        self.assertIn("power on of vm esx02ev01 failed", out)
+        self.assertIn("== run %s  esx esx03 : not started (no state file." % RID, out)
+        self.assertIn("tcrun: bad ESX address in the plan for esx03", out)
+        rc, out = e.tcrun("stop")
+        self.assertIn("stop requested: run %s esx esx01" % RID, out)
+        self.assertIn("run %s esx esx02: not running (paused: power on of vm esx02ev01 failed" % RID, out)
+        self.assertIn("run %s esx esx03: not running (not started)" % RID, out)
+        e.wait_for(lambda: e.state(RID, "esx01").get("state") == "stopped", seconds=240, what="esx01 멈춤")
+
+    def test_refused_login_is_not_tried_again(self):
+        """VM 을 켠 뒤 ssh 로그인이 거부되면(Permission denied) 다시 시도하지 않는다(계정 잠금 방지). 로그인 배너는 출력하지 않는다."""
+        e = self.e
+        with open(os.path.join(e.root, "banner"), "w") as f:
+            f.write("Access is only available to authorized users. Activity is monitored.\n")
+        e.add_vm("esx01ev01")
+        e.add_esx("esx01", vms=[("esx01ev01", {"state": "off", "boot_sec": 0})])
+        open(os.path.join(e.vm_dir("esx01ev01"), "deny"), "w").close()
+        res, plan = self.gen([case("r1", [vm("esx01ev01", "job_a")])])
+        rc, out = e.tcrun("run", plan, "esx01", timeout=600)
+        self.assertEqual(rc, 1, self.ctx(out))
+        st = e.state(RID, "esx01")
+        self.assertIn("vm esx01ev01: ssh login was refused (esx01ev01: Permission denied (publickey,password).). Not tried again", st["text"])
+        with open(os.path.join(e.root, "ssh_calls.txt")) as f:
+            calls = f.read().splitlines()
+        self.assertEqual(calls.count("deny esx01ev01"), 1, "한 번만 시도")
+        self.assertNotIn("Access is only available", self.log(), "LogLevel=ERROR 라서 배너가 출력에 섞이지 않음")
+
+    def test_check_shows_the_ssh_error_line(self):
+        """ssh 가 실패하면 출력의 첫 줄이 아니라 ssh 의 오류 줄을 보인다."""
+        e = self.e
+        self.two_vms()
+        open(os.path.join(e.vm_dir("esx01ev02"), "down"), "w").close()
+        res, plan = self.gen([case("b1", [vm("esx01ev01", "job_a"), vm("esx01ev02", "job_a")])])
+        rc, out = e.tcrun("check", plan)
+        self.assertIn("[PROBLEM] vm esx01ev02 (esx01ev02): ssh login failed (exit 255: ssh: connect to host esx01ev02 port 22: "
+                      "Connection refused)", out)
+
+    def test_folders_that_cannot_be_written(self):
+        """작업 폴더나 로그 폴더에 1 MB 를 쓸 수 없으면(디스크, quota) start 는 시작하지 않고 check 는 문제로 알린다."""
+        e = self.e
+        self.two_vms()
+        res, plan = self.gen([case("w1", [vm("esx01ev01", "job_a")])])
+        rd = os.path.dirname(plan)
+        os.chmod(rd, 0o500)
+        try:
+            rc, out = e.tcrun("start", plan)
+            self.assertEqual(rc, 2, out)
+            self.assertIn("==== 1 MB cannot be written in %s (disk full or disk quota of the account" % rd, out)
+            self.assertIn("Nothing started.", out)
+        finally:
+            os.chmod(rd, 0o700)
+        self.assertEqual(e.state(RID, "esx01"), {})
+        os.chmod(e.log, 0o500)
+        try:
+            rc, out = e.tcrun("check", plan)
+            self.assertIn("[PROBLEM] folder %s: 1 MB cannot be written" % e.log, out)
+            self.assertIn("[ok] folder %s: 1 MB can be written" % e.tcgen, out)
+        finally:
+            os.chmod(e.log, 0o700)
+
+
+class WorkFolderTests(TcrunBase):
+    JDIR = True
+
+    def test_work_folder_outside_the_home(self):
+        """작업 폴더를 홈 밖에 두면 진행 스크립트, 키, 비밀번호, 실행 기록, known_hosts 가 모두 그 폴더에 있고 홈에는 쓰지 않는다."""
+        e = self.e
+        self.assertTrue(e.tcgen.endswith("/data/tcgen"))
+        self.two_vms()
+        res, plan = self.gen([case("f1", [vm("esx01ev01", "job_a")], esx_profiles=["numa0"])])
+        self.assertTrue(plan.startswith(e.tcgen + "/runs/"))
+        e.start_cron()
+        rc, out = e.tcrun("start", plan)
+        self.assertIn("status: sh %s/tcrun status" % e.tcgen, out)
+        e.wait_for(lambda: e.state(RID, "esx01").get("state") == "done", seconds=240, what="완료")
+        self.assertFalse(os.path.exists(os.path.join(e.jump, ".tcgen")), "홈의 ~/.tcgen 을 쓰지 않음")
+        self.assertTrue(os.path.isdir(os.path.join(e.tcgen, "minutes")))
+        self.assertIn("== run %s  esx esx01 : done" % RID, e.tcrun("status")[1])
+
+
 class DashTests(TcrunBase):
     """모든 sh 호출을 dash 로 바꿔 실행한다: tcrun 자신, VM 에 보내는 글, ESX 에 보내는 글, cron 이 실행하는 줄."""
     DASH = True

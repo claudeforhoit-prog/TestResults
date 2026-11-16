@@ -40,7 +40,7 @@ import shutil
 import sys
 import time
 
-VERSION = "2.5"
+VERSION = "2.6"
 KST_TO_UTC = dt.timedelta(hours=9)
 CHUNK = 100            # 붙여넣는 글 한 줄에 담는 명령 조각 길이(문자 수)
 NONE_JOB = "(없음)"
@@ -78,10 +78,13 @@ DEFAULT_SETTINGS = {
     "vm_prefix": "ev",         # VM 이름 = ESX 호스트 이름 + 이 값 + 두 자리 번호 (ev01, ev02 ...)
     "default_vms": 2,          # 새 케이스의 VM 수
     "run_mode": "seq",         # 진행 방식: seq = 순서 실행, time = 시각 지정(v1.4 방식)
-    "jump_log_dir": "",        # 순서 실행: 점프 VM 의 로그 폴더. 비우면 ~/tcgen_log
+    "jump_log_dir": "",        # 순서 실행: 점프 VM 의 로그 폴더. 비우면 ~/tcgen_log (작업 폴더를 적었으면 <작업 폴더>/log)
+    "jump_dir": "",            # 순서 실행: 점프 VM 작업 폴더(tcrun, ssh 키, VM 비밀번호, 실행 기록). 비우면 ~/.tcgen
     "esx_addr": "",            # 순서 실행: ESX 접속 주소 '호스트이름=주소;호스트이름=주소'. 비우면 ESX 호스트 이름으로 접속
-    "seq_settle_min": 10,      # 순서 실행: VM 을 다시 켠 케이스는 VM 켜기 완료 N분 뒤부터 잡 시작 (0 = 기다리지 않음)
+    "seq_settle_min": 10,      # 순서 실행: VM 을 켠 케이스는 마지막으로 켠 VM 의 준비(1GB page backing, ssh 로그인) N분 뒤부터 잡 시작 (0 = 기다리지 않음)
     "seq_gap_min": 30,         # 순서 실행: 앞 케이스의 잡이 끝난 뒤 다음 케이스의 잡을 시작하기까지 최소 N분 (0 = 기다리지 않음)
+    "seq_start_spacing_min": 5,    # 순서 실행: 모든 잡 시작은 서로 N분 이상 떨어진다(ESX 호스트가 달라도, 이 점프 VM 의 다른 실행과도)
+    "seq_prep_lead_min": 60,   # 순서 실행: 시작 시각을 적은 케이스는 그 시각 N분 전에 준비(설정 적용, VM 전원)를 시작한다 (0 = 차례가 오면 바로)
     "seq_poll_sec": 1800,      # 순서 실행: 잡 종료 확인 간격(초). 화면에서는 분으로 고친다. 잡이 실행되는 동안 VM 에 접속하는 주기라서 길게 둔다
     "seq_first_check_sec": 60, # 순서 실행: 잡 시작 뒤 프로세스가 떴는지 처음 확인하는 때(초). 한 번만 확인하고 그 뒤로는 위 간격을 따른다
     "seq_gone_count": 3,       # 순서 실행: 프로세스가 연속으로 이 횟수만큼 없으면 잡 종료로 판정
@@ -91,7 +94,8 @@ DEFAULT_SETTINGS = {
     "seq_shutdown_wait_min": 10,   # 순서 실행: 게스트 종료를 기다리는 최대 시간. 넘으면 전원 끄기
 }
 RUN_MODES = ("seq", "time")
-SEQ_INT_SETTINGS = (("seq_settle_min", "VM 다시 켠 뒤 잡 시작까지 최소 분", 0), ("seq_gap_min", "케이스 사이 간격 분", 0),
+SEQ_INT_SETTINGS = (("seq_settle_min", "VM 켠 뒤 잡 시작까지 최소 분", 0), ("seq_gap_min", "케이스 사이 간격 분", 0),
+                    ("seq_start_spacing_min", "잡 시작 최소 간격 분", 1), ("seq_prep_lead_min", "시작 시각 준비 분", 0),
                     ("seq_poll_sec", "잡 종료 확인 간격(초)", 5), ("seq_first_check_sec", "잡 시작 뒤 첫 확인(초)", 1),
                     ("seq_gone_count", "연속 없음 횟수", 1), ("seq_start_wait_min", "시작 대기 분", 1),
                     ("seq_poweron_wait_min", "VM 켜기 대기 분", 1), ("seq_boot_wait_min", "VM 부팅 대기 분", 1),
@@ -302,9 +306,10 @@ def _names(items):
 
 def _clean_vm(v):
     job = "" if v.get("job") is None else str(v.get("job")).strip()
+    power = "" if v.get("power") is None else str(v.get("power")).strip().lower()
     return {"name": "" if v.get("name") is None else str(v.get("name")).strip(),
             "job": job or NONE_JOB, "monitors": _names(v.get("monitors")), "end_ref": bool(v.get("end_ref", False)),
-            "profiles": _names(v.get("profiles"))}
+            "profiles": _names(v.get("profiles")), "power": "off" if power in ("off", "끔") else "on"}
 
 
 def _clean_case(c):
@@ -331,7 +336,8 @@ def _clean_case(c):
 
 # 테스트 케이스 CSV: 화면의 [다른 이름으로 저장] 이 만드는 형식. 케이스 행 아래에 그 케이스의 VM 행이 온다.
 CASE_CSV_HEADER = ["구분", "적용", "케이스 이름", "설명", "ESX 호스트", "VM 이름", "잡", "모니터링", "설정", "최대 대기", "테스트 그룹",
-                   "종료 기준 VM", "간격", "잡 시작", "모니터링 중지", "모니터링 중지 시각", "잡 종료 (리포트)", "시작 시각 (순서 실행)"]
+                   "종료 기준 VM", "간격", "잡 시작", "모니터링 중지", "모니터링 중지 시각", "잡 종료 (리포트)", "시작 시각 (순서 실행)",
+                   "전원"]
 STOP_LABELS = {"auto": "자동", "manual": "직접 입력", "none": "중지 없음"}
 CSV_TRUE = ("예", "Y", "YES", "1", "TRUE", "V", "O")
 
@@ -367,10 +373,10 @@ def cases_to_csv(cases):
         c = _clean_case(c)
         w.writerow(["케이스", "예" if c["applied"] else "", c["name"], c["desc"], c["esx"], "", "", _join_names(c["esx_monitors"]),
                     _join_names(c["esx_profiles"]), c["max_wait"], c["group"], "", c["interval"], c["start"],
-                    STOP_LABELS[c["stop_mode"]], c["stop_time"], c["end_time"], c["seq_start"]])
+                    STOP_LABELS[c["stop_mode"]], c["stop_time"], c["end_time"], c["seq_start"], ""])
         for v in c["vms"]:
             w.writerow(["VM", "", "", "", "", v["name"], v["job"], _join_names(v["monitors"]), _join_names(v["profiles"]), "", "",
-                        "기준" if v["end_ref"] else "", "", "", "", "", "", ""])
+                        "기준" if v["end_ref"] else "", "", "", "", "", "", "", POWER_LABELS[v["power"]]])
     return buf.getvalue()
 
 
@@ -404,6 +410,7 @@ def cases_from_csv(text):
             if not out:
                 raise ValueError("데이터 %d번째 행: 케이스 행보다 VM 행이 먼저 나옴" % n)
             out[-1]["vms"].append({"name": cell(r, "VM 이름"), "job": cell(r, "잡") or NONE_JOB, "monitors": _split_names(cell(r, "모니터링")),
+                                   "power": cell(r, "전원"),
                                    "profiles": _split_names(cell(r, "설정")), "end_ref": cell(r, "종료 기준 VM") != ""})
         else:
             raise ValueError("데이터 %d번째 행: 구분 칸은 '케이스' 또는 'VM' 이어야 함 ('%s')" % (n, cell(r, "구분")))
@@ -492,8 +499,11 @@ def next_vm_number(c, prefix="ev"):
     return max(nums) + 1 if nums else len(c.get("vms") or []) + 1
 
 
+POWER_LABELS = {"on": "켬", "off": "끔"}
+
+
 def new_vm(name=""):
-    return {"name": name, "job": NONE_JOB, "monitors": [], "end_ref": False, "profiles": []}
+    return {"name": name, "job": NONE_JOB, "monitors": [], "end_ref": False, "profiles": [], "power": "on"}
 
 
 def new_case(esx="", start="", count=2, prefix="ev"):
@@ -1244,10 +1254,10 @@ WIPE_LINES = [
 ]
 
 
-def wipe_block(host, user):
-    """VM crontab 전체 삭제 블록 한 대분. B 블록과 같은 계정, 같은 방법(~/.tcgen/vmssh)으로 접속한다."""
+def wipe_block(host, user, jdir=None):
+    """VM crontab 전체 삭제 블록 한 대분. B 블록과 같은 계정, 같은 방법(작업 폴더의 vmssh, 시각 지정은 ~/.tcgen)으로 접속한다."""
     target = "%s@%s" % (user, host) if user else host
-    out = ["sh ~/.tcgen/vmssh %s << TCEOF" % target] + [_hd(x) for x in WIPE_LINES] + ["TCEOF"]
+    out = ["sh %s/vmssh %s << TCEOF" % (jdir or DEFAULT_JUMP_DIR, target)] + [_hd(x) for x in WIPE_LINES] + ["TCEOF"]
     return "\n".join(out) + "\n"
 
 
@@ -1681,12 +1691,14 @@ def format_case_profiles(c):
 # 점프 VM 의 ~/.tcgen/tcrun 이 plan 을 읽어 ESX 호스트별로 케이스를 표의 순서대로 진행한다. plan 형식은 DEVELOPER.md 5절.
 PLAN_FORMAT = "TCGEN-PLAN 2"
 DEFAULT_JUMP_LOG = "~/tcgen_log"
+DEFAULT_JUMP_DIR = "~/.tcgen"
 JUMP_DIR_RE = re.compile(r"^(~/|/)[A-Za-z0-9._/+@,:-]*$")
 ADDR_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
 USER_RE = re.compile(r"^[A-Za-z0-9._][A-Za-z0-9._-]*$")
 HOST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 PROC_MAX = 80
-SEQ_PLAN_NAMES = {"seq_settle_min": "SETTLE_MIN", "seq_gap_min": "GAP_MIN", "seq_poll_sec": "POLL_SEC",
+SEQ_PLAN_NAMES = {"seq_settle_min": "SETTLE_MIN", "seq_gap_min": "GAP_MIN", "seq_start_spacing_min": "SPACING_MIN",
+                  "seq_prep_lead_min": "PREP_LEAD_MIN", "seq_poll_sec": "POLL_SEC",
                   "seq_first_check_sec": "FIRST_CHECK_SEC", "seq_gone_count": "GONE_COUNT",
                   "seq_start_wait_min": "START_WAIT_MIN", "seq_poweron_wait_min": "POWERON_WAIT_MIN",
                   "seq_boot_wait_min": "BOOT_WAIT_MIN", "seq_shutdown_wait_min": "SHUTDOWN_WAIT_MIN"}
@@ -1697,7 +1709,25 @@ def run_mode(settings):
 
 
 def jump_log_dir(settings):
-    return ((settings or {}).get("jump_log_dir") or "").strip() or DEFAULT_JUMP_LOG
+    """점프 VM 로그 폴더. 비우면 ~/tcgen_log, 작업 폴더를 따로 적었으면 <작업 폴더>/log (홈 폴더를 쓰지 않게)."""
+    d = ((settings or {}).get("jump_log_dir") or "").strip()
+    if d:
+        return d
+    jd = ((settings or {}).get("jump_dir") or "").strip().rstrip("/")
+    return (jd + "/log") if jd and jd != DEFAULT_JUMP_DIR else DEFAULT_JUMP_LOG
+
+
+def jump_dir(settings):
+    """점프 VM 작업 폴더(화면에 적은 글 그대로, 끝의 / 는 뗀다). 비우면 ~/.tcgen."""
+    d = ((settings or {}).get("jump_dir") or "").strip() or DEFAULT_JUMP_DIR
+    return d.rstrip("/") or d
+
+
+def sh_path(path):
+    """점프 VM 의 셸 글에 넣는 경로: ~/ 로 시작하면 $HOME/ 로 바꾼다."""
+    if path == "~":
+        return "$HOME"
+    return "$HOME/" + path[2:] if path.startswith("~/") else path
 
 
 def parse_esx_addr(text):
@@ -1753,6 +1783,7 @@ def build_seq(cases, run_cmds, mon_cmds, profiles, settings, now=None):
     now = (now or dt.datetime.now()).replace(microsecond=0)
     errors, warnings, plan = [], [], []
     last_fixed = {}                     # ESX 호스트별로 앞에서 지정한 시작 시각 (순서가 거꾸로면 경고)
+    fixed_at = {}                       # 지정한 시작 시각 -> 그 케이스. 모든 잡 시작은 서로 '잡 시작 최소 간격' 이상 떨어진다(ESX 호스트가 달라도)
     profiles = profiles or []
     try:
         lead = int(settings.get("mon_lead_min", DEFAULT_SETTINGS["mon_lead_min"]))
@@ -1771,9 +1802,14 @@ def build_seq(cases, run_cmds, mon_cmds, profiles, settings, now=None):
             errors.append("설정: %s 은(는) %d 이상의 정수" % (label, low))
             val = DEFAULT_SETTINGS[key]
         sets.append((SEQ_PLAN_NAMES[key], val))
+    spacing = dict(sets).get("SPACING_MIN", DEFAULT_SETTINGS["seq_start_spacing_min"])
     logdir = jump_log_dir(settings)
     if not JUMP_DIR_RE.match(logdir):
         errors.append("설정: 점프 VM 로그 폴더는 / 또는 ~/ 로 시작하고 영문, 숫자, . _ - / + @ , : 만 사용 (공백과 한글 불가): '%s'" % logdir)
+    jdir = jump_dir(settings)
+    if not JUMP_DIR_RE.match(jdir) or jdir in ("/", "~") or "/../" in jdir + "/" or "/./" in jdir + "/":
+        errors.append("설정: 점프 VM 작업 폴더는 / 또는 ~/ 로 시작하는 폴더 경로이고 영문, 숫자, . _ - / + @ , : 만 사용 "
+                      "(공백과 한글 불가, . 이나 .. 경로 불가): '%s'" % jdir)
     addr, addr_errors = parse_esx_addr(settings.get("esx_addr"))
     errors += addr_errors
     user = (settings.get("vm_user") or "").strip()
@@ -1790,7 +1826,7 @@ def build_seq(cases, run_cmds, mon_cmds, profiles, settings, now=None):
     for p in profiles:
         if (p.get("name") or "").strip() and not NAME_RE.match(p["name"].strip()):
             errors.append("탭 3 설정 프로파일: 프로파일 이름은 영문, 숫자, . _ - 만 사용 ('%s')" % p["name"])
-    common = {"sets": sets, "logdir": logdir, "addr": addr, "user": user, "lead": lead}
+    common = {"sets": sets, "logdir": logdir, "addr": addr, "user": user, "lead": lead, "jdir": jdir}
     if errors:
         return plan, errors, warnings, common
     run_by = {r["name"].strip(): r for r in run_cmds if (r.get("name") or "").strip()}
@@ -1832,19 +1868,29 @@ def build_seq(cases, run_cmds, mon_cmds, profiles, settings, now=None):
         esx_host = (c.get("esx") or "").strip()
         esx_mons = list(c.get("esx_monitors") or [])
         esx_profs = list(c.get("esx_profiles") or [])
-        used = [v for v in (c.get("vms") or []) if _has_job(v) or v.get("monitors") or v.get("profiles")]
+        # ESX 호스트가 있는 케이스: 이름이 있는 VM 행은 모두 이 케이스의 VM 이다(전원을 맞춘다. 전원 칸이 끔이 아니면 켠다).
+        # ESX 호스트가 없는 케이스: 전원을 다룰 수 없으므로 잡, 모니터링, 설정이 있는 VM 행만 쓴다.
+        def _off(v):
+            return (v.get("power") or "on") == "off"
+        used = [v for v in (c.get("vms") or []) if _has_job(v) or v.get("monitors") or v.get("profiles") or _off(v)
+                or (esx_host and (v.get("name") or "").strip())]
         jobs = [v for v in used if _has_job(v)]
+        offs = [v for v in used if _off(v)]
         has_mon = bool(esx_mons) or any(v.get("monitors") for v in used)
         has_set = bool(esx_profs) or any(v.get("profiles") for v in used)
-        if not used and not esx_mons and not esx_profs:
-            warnings.append("%s: 잡, 모니터링, 설정이 하나도 없어 건너뜀" % label)
+        if not jobs and not has_mon and not has_set and not offs:
+            warnings.append("%s: 잡, 모니터링, 설정이 하나도 없고 전원을 끌 VM 도 없어 건너뜀" % label)
             continue
         before = len(errors)
+        for v in offs:
+            if _has_job(v) or v.get("monitors"):
+                errors.append("%s: VM '%s' 은 전원 끔인데 잡이나 모니터링이 있음. 전원을 켬으로 바꾸거나 잡과 모니터링을 (없음)으로 할 것"
+                              % (label, v.get("name") or "이름 없음"))
         if has_mon and not jobs:
             errors.append("%s: 모니터링만 있고 잡이 없음. 순서 실행은 잡의 프로세스가 끝난 것을 확인한 뒤 모니터링을 중지하므로 "
                           "잡이 하나 이상 있어야 함" % label)
-        if (esx_mons or has_set) and not HOST_RE.match(esx_host):
-            errors.append("%s: ESX 호스트 이름이 비었거나 맞지 않음 ('%s'). 설정 적용과 ESX 모니터링에는 ESX 호스트가 있어야 하고, "
+        if (esx_mons or has_set or offs) and not HOST_RE.match(esx_host):
+            errors.append("%s: ESX 호스트 이름이 비었거나 맞지 않음 ('%s'). 설정 적용, ESX 모니터링, VM 전원 끔에는 ESX 호스트가 있어야 하고, "
                           "이름은 영문이나 숫자로 시작해 영문, 숫자, . _ - 만 사용" % (label, esx_host))
         elif esx_host and not HOST_RE.match(esx_host):
             errors.append("%s: ESX 호스트 이름은 영문이나 숫자로 시작해 영문, 숫자, . _ - 만 사용 ('%s')" % (label, esx_host))
@@ -1874,10 +1920,16 @@ def build_seq(cases, run_cmds, mon_cmds, profiles, settings, now=None):
             if start_at <= now:
                 errors.append("%s: 시작 시각 %s 이(가) 이미 지났음 (지금 %s). 시각을 고치거나 비울 것(비우면 자동)"
                               % (label, fmt_dt(start_at), fmt_dt(now)))
-            elif chain in last_fixed and start_at <= last_fixed[chain]:
-                warnings.append("%s: 시작 시각 %s 이(가) 앞 케이스의 시작 시각 %s 보다 빠르거나 같음. 앞 케이스가 끝난 뒤 가능한 "
+            elif any(abs((start_at - t).total_seconds()) < spacing * 60 for t in fixed_at):
+                t = min(fixed_at, key=lambda x: abs((start_at - x).total_seconds()))
+                errors.append("%s: 시작 시각 %s 이(가) %s 의 시작 시각 %s 과 %d분 이상 떨어져 있지 않음. 모든 잡은 서로 %d분 이상 떨어져 "
+                              "시작해야 함(ESX 호스트가 달라도. 설정 영역의 '잡 시작 최소 간격')"
+                              % (label, fmt_dt(start_at), fixed_at[t], fmt_dt(t), spacing, spacing))
+            elif chain in last_fixed and start_at < last_fixed[chain]:
+                warnings.append("%s: 시작 시각 %s 이(가) 앞 케이스의 시작 시각 %s 보다 빠름. 앞 케이스가 끝난 뒤 가능한 "
                                 "가장 이른 시각에 시작함" % (label, fmt_dt(start_at), fmt_dt(last_fixed[chain])))
             last_fixed[chain] = max(start_at, last_fixed.get(chain, start_at))
+            fixed_at.setdefault(start_at, label)
         pc = {"index": i, "name": name, "esx": esx_host, "chain": chain, "vms": [], "host_opts": [],
               "ems": [], "emx": [], "epat": "", "max_wait": max_wait, "has_mon": has_mon, "start_at": start_at,
               "group": _one_line(c.get("group")), "desc": _one_line(c.get("desc")),
@@ -1934,7 +1986,8 @@ def build_seq(cases, run_cmds, mon_cmds, profiles, settings, now=None):
         for v in used:
             vname = v.get("name") or ""
             vm = {"name": vname, "target": ("%s@%s" % (user, vname)) if user else vname, "ms": [], "mx": [], "job": "",
-                  "proc": "", "proc_name": "", "job_name": "", "pat": "", "set": [], "monitors": list(v.get("monitors") or [])}
+                  "proc": "", "proc_name": "", "job_name": "", "pat": "", "set": [], "monitors": list(v.get("monitors") or []),
+                  "power": "off" if _off(v) else "on"}
             vm["set"] = pick_profiles(list(v.get("profiles") or []), "VM", "VM 행 (%s)" % vname)
             for key, value in vm["set"]:
                 entry("VM", vname, "설정", "+".join(v.get("profiles") or []), "", "",
@@ -2022,6 +2075,7 @@ def plan_text(plan, common, run_id, now):
         out.append("RPTB %s %s" % (s, _csv_line([";".join(pc["report_vms"]), ";".join(pc["end_refs"])])))
         for vm in pc["vms"]:
             out.append("VM %s %s %s" % (s, vm["name"], vm["target"]))
+        out += ["OFF %s %s" % (s, vm["name"]) for vm in pc["vms"] if vm["power"] == "off"]
         out += ["AH %s %s=%s" % (s, k, v) for k, v in pc["host_opts"]]
         for vm in pc["vms"]:
             out += ["AV %s %s %s=%s" % (s, vm["name"], k, v) for k, v in vm["set"]]
@@ -2042,12 +2096,35 @@ def plan_text(plan, common, run_id, now):
 
 
 def plan_view(plan, common, run_id):
-    """화면에 보이는 실행 계획: 케이스마다 점프 VM 이 하는 일과 등록할 명령."""
+    """화면에 보이는 실행 계획. 공통 규칙을 맨 위에 한 번 적고, 케이스마다 그 케이스에만 해당하는 값을 항목별로 적는다."""
     sets = dict(common["sets"])
     lead, settle, gap = sets["MON_LEAD_MIN"], sets["SETTLE_MIN"], sets.get("GAP_MIN", 0)
-    out = ["실행 ID %s. 점프 VM 로그 폴더 %s." % (run_id, common["logdir"]),
-           "ESX 호스트마다 케이스를 표의 순서대로 진행한다. ESX 호스트가 여러 대이면 호스트끼리는 서로 기다리지 않는다.",
-           "시각은 점프 VM 이 실행할 때 정한다. 실제 시각은 로그 폴더의 tcrun-%s-<ESX 호스트>.log 와 -result.csv 에 기록된다." % run_id]
+    spacing, prep, shut = sets.get("SPACING_MIN", 5), sets.get("PREP_LEAD_MIN", 60), sets.get("SHUTDOWN_WAIT_MIN", 10)
+    poll, first, gone = sets["POLL_SEC"], sets.get("FIRST_CHECK_SEC", 60), sets["GONE_COUNT"]
+    every = ("%d분" % (poll // 60)) if poll % 60 == 0 else ("%d초" % poll)
+    jdir = common.get("jdir") or DEFAULT_JUMP_DIR
+    out = ["실행 ID %s" % run_id,
+           "점프 VM 작업 폴더 %s, 로그 폴더 %s (진행 로그 tcrun-%s-<ESX 호스트>.log)" % (jdir, common["logdir"], run_id),
+           "진행 확인 sh %s/tcrun status, 멈추기 sh %s/tcrun stop, 취소 sh %s/tcrun cancel" % (jdir, jdir, jdir),
+           "",
+           "[공통 규칙]",
+           "- 순서: ESX 호스트마다 표의 순서대로 진행한다. 호스트끼리는 서로 기다리지 않는다.",
+           "- 잡 시작 간격: 모든 잡 시작은 서로 %d분 이상 떨어진다(다른 ESX 호스트, 이 점프 VM 의 다른 실행 포함). "
+           "가까우면 뒤에 정한 잡을 %d분 뒤로 옮긴다." % (spacing, spacing),
+           "- 설정 적용: 값이 모두 같으면 VM 을 끄지 않는다. 하나라도 다르면 케이스의 VM 을 모두 끄고 바꾼다.",
+           "- VM 전원: 끔인 VM 은 끈다(게스트 종료, %d분 안에 꺼지지 않으면 전원 끄기). 켬인 VM 은 표의 순서대로 하나씩 켠다. "
+           "VM 마다 켜기 작업, 1GB page backing 완료(1GB page 를 쓰는 VM), ssh 로그인을 확인한 뒤 다음 VM 을 켠다." % shut]
+    if settle > 0:
+        out.append("- 켠 뒤 대기: VM 을 켠 케이스는 마지막 VM 의 준비가 끝나고 %d분 뒤에 잡을 시작한다. 켜져 있던 VM 만 쓰면 기다리지 않는다." % settle)
+    else:
+        out.append("- 켠 뒤 대기: 없음(설정값 0분).")
+    out.append("- 모니터링: 잡 시작 %d분 전에 시작하고, 잡 종료를 확인한 뒤 중지 명령을 실행한다." % lead)
+    out.append("- 시작 시각: 비우면 앞 케이스의 잡이 끝나고 %d분 뒤. 적으면 그 시각에 시작하고, 설정 적용과 VM 전원 맞추기는 "
+               "%s." % (gap, ("그 시각 %d분 전에 시작한다" % prep) if prep > 0 else "차례가 오는 대로 한다"))
+    out.append("- 잡 종료 확인: 잡 시작 %d초 뒤 한 번, 그 뒤 %s마다 프로세스를 찾는다. %d회 연속 없으면 종료로 본다."
+               % (first, every, gone))
+    if poll > 120:
+        out.append("- 종료를 아는 시점은 실제 종료보다 최대 %s 늦다. 그래서 리포트용 CSV 의 잡 종료 시각은 비워 둔다." % every)
     chains = []
     for pc in plan:
         if pc["chain"] not in chains:
@@ -2056,123 +2133,125 @@ def plan_view(plan, common, run_id):
     def jobs_of(pc):
         return [vm for vm in pc["vms"] if vm["job"]]
 
+    def items(label, rows, none="없음"):
+        if not rows:
+            out.append("   %s: %s" % (label, none))
+            return
+        out.append("   %s:" % label)
+        out.extend("     - " + r for r in rows)
+
     for ch in chains:
         mine = [pc for pc in plan if pc["chain"] == ch]
         out.append("")
         if ch == "-":
-            out.append("[ESX 호스트를 적지 않은 케이스] %d개" % len(mine))
+            out.append("[ESX 호스트 없음] 케이스 %d개. VM 전원과 설정은 다루지 않는다. VM 이 켜져 있어야 한다." % len(mine))
         else:
             via = common["addr"].get(ch)
-            out.append("[ESX 호스트 %s%s] 케이스 %d개" % (ch, (" (접속 주소 %s)" % via) if via else "", len(mine)))
+            out.append("[ESX 호스트 %s]%s 케이스 %d개" % (ch, (" 접속 주소 %s," % via) if via else "", len(mine)))
         for n, pc in enumerate(mine, 1):
             out.append("%d. %s" % (n, pc["name"]))
-            names = [vm["name"] for vm in pc["vms"]]
-            if pc["host_opts"] or any(vm["set"] for vm in pc["vms"]):
-                if names:
-                    how = ("%s 순서로 하나씩 켠다" % ", ".join(names)) if len(names) > 1 else ("%s 을 켠다" % names[0])
-                    out.append("   설정 적용: 아래 값과 현재 값이 모두 같으면 VM 을 끄지 않는다. 하나라도 다르면 이 케이스의 VM 을 "
-                               "종료하고 값을 바꾼 뒤 %s." % how)
-                    if jobs_of(pc) and settle > 0:
-                        out.append("   VM 을 다시 켠 경우 잡은 마지막 VM 의 ssh 로그인을 확인한 시각에서 %d분 이상 지난 뒤에 시작한다." % settle)
-                    elif jobs_of(pc):
-                        out.append("   VM 을 다시 켠 뒤 잡 시작까지 따로 기다리지 않는다(설정값 0분).")
-                else:
-                    out.append("   설정 적용: 아래 ESX 호스트 값이 현재 값과 다르면 바꾼다. 이 케이스에는 VM 이 없어 VM 을 끄거나 켜지 않는다.")
-                for key, value in pc["host_opts"]:
-                    out.append("     ESX 호스트 %s = %s" % (key, value))
-                for vm in pc["vms"]:
-                    for key, value in vm["set"]:
-                        out.append(("     %s %s = \"%s\"" % (vm["name"], key, value)) if value != ""
-                                   else "     %s %s (이 키의 줄을 삭제)" % (vm["name"], key))
             jobs = jobs_of(pc)
+            first_job = not any(jobs_of(q) for q in mine[:n - 1])
             if not jobs:
-                out.append("   잡과 모니터링이 없다. 설정만 적용하고 다음 케이스로 넘어간다.")
+                start = "잡 없음. 설정과 VM 전원만 맞추고 다음 케이스로 넘어간다."
+            elif pc.get("start_at"):
+                start = "지정 %s" % pc["start_at"].strftime("%Y-%m-%d %H:%M")
+                if prep > 0:
+                    start += ". 준비(설정, VM 전원)는 %s 부터" % (pc["start_at"] - dt.timedelta(minutes=prep)).strftime("%Y-%m-%d %H:%M")
+            elif first_job:
+                start = "자동. 이 ESX 호스트의 첫 잡이라 준비가 끝나는 대로"
+            elif gap > 0:
+                start = "자동. 앞 케이스의 잡이 끝나고 %d분 뒤" % gap
+            else:
+                start = "자동. 앞 케이스가 끝나면 바로"
+            out.append("   시작: " + start)
+            if ch != "-" and pc["vms"]:
+                out.append("   VM 전원: " + ", ".join("%s %s" % (vm["name"], POWER_LABELS[vm["power"]]) for vm in pc["vms"]))
+            sets_rows = ["ESX 호스트 %s = %s" % (k, v) for k, v in pc["host_opts"]]
+            for vm in pc["vms"]:
+                sets_rows += [('%s %s = "%s"' % (vm["name"], k, v)) if v != "" else "%s %s (이 키의 줄을 삭제)" % (vm["name"], k)
+                              for k, v in vm["set"]]
+            if ch != "-" or sets_rows:
+                items("설정", sets_rows)
+            if not jobs:
                 continue
             by_kind = {}
             for e in pc["entries"]:
                 by_kind.setdefault(e["kind"], []).append(e)
-            first_job = not any(jobs_of(q) for q in mine[:n - 1])       # 이 ESX 호스트에서 잡이 있는 첫 케이스
-            if pc.get("start_at"):
-                out.append("   시작 시각(지정): 잡을 %s 에 시작한다. 설정 적용과 VM 켜기는 그 전에 미리 한다. 앞 케이스가 그때까지 끝나지 "
-                           "않았거나 VM 을 다시 켠 뒤의 대기가 남았으면 가능한 가장 이른 시각에 시작하고 로그에 WARN 을 남긴다."
-                           % pc["start_at"].strftime("%Y-%m-%d %H:%M"))
-            elif first_job:
-                out.append("   시작 시각(자동): 앞 케이스가 없으므로 준비가 끝나는 대로 시작한다.")
-            elif gap > 0:
-                out.append("   시작 시각(자동): 앞 케이스의 잡이 끝난 시각에서 %d분 이상 지난 뒤에 잡을 시작한다(케이스 사이 간격)." % gap)
-            else:
-                out.append("   시작 시각(자동): 앞 케이스가 끝나면 이어서 시작한다(케이스 사이 간격 0분).")
+            items("모니터링", ["%s%s %s: %s" % (e["host"], " (ESX)" if e["role"] == "ESX" else "", e["name"], e["cmd"])
+                              for e in by_kind.get("모니터링 시작", [])])
+            items("잡 (잡이 있는 VM 은 같은 분에 시작)",
+                  ["%s %s (프로세스 이름 %s): %s" % (vm["name"], vm["job_name"], vm["proc_name"], next(
+                      e["cmd"] for e in by_kind.get("잡", []) if e["host"] == vm["name"])) for vm in jobs])
             if pc["has_mon"]:
-                out.append("   모니터링 시작: 잡 시작 %d분 전. crontab 에 등록한다(시작 시각에 따로 정한 것이 없으면 등록 1~2분 뒤의 분)." % lead)
-                for e in by_kind.get("모니터링 시작", []):
-                    out.append("     %s%s %s: %s" % (e["host"], " (ESX)" if e["role"] == "ESX" else "", e["name"], e["cmd"]))
-                out.append("   잡 시작: 모니터링 시작 %d분 뒤. 잡이 있는 모든 VM 이 같은 분에 시작한다." % lead)
-            else:
-                out.append("   잡 시작: crontab 에 등록한다(시작 시각에 따로 정한 것이 없으면 등록 1~2분 뒤의 분). 잡이 있는 모든 VM 이 같은 분에 시작한다.")
-            for vm in jobs:
-                out.append("     %s %s: %s" % (vm["name"], vm["job_name"], next(
-                    e["cmd"] for e in by_kind.get("잡", []) if e["host"] == vm["name"])))
-                out.append("       프로세스 이름: %s" % vm["proc_name"])
-            poll = sets["POLL_SEC"]
-            every = ("%d분" % (poll // 60)) if poll % 60 == 0 else ("%d초" % poll)
-            out.append("   잡 종료 확인: 잡 시작 %d초 뒤에 한 번, 그 뒤 %s마다 각 VM 에서 프로세스를 찾는다(잡이 실행되는 동안 VM 접속을 줄이기 위한 "
-                       "간격). 모든 VM 에서 한 번 이상 보인 뒤 %d회 연속으로 없으면 종료로 판정한다. 최대 대기 %s."
-                       % (sets.get("FIRST_CHECK_SEC", 60), every, sets["GONE_COUNT"],
-                          fmt_interval(dt.timedelta(minutes=pc["max_wait"])) if pc["max_wait"] else "제한 없음"))
-            if poll > 120:
-                out.append("   종료를 아는 시점은 실제 종료보다 최대 %s 늦다. 리포트용 CSV 의 잡 종료 시각은 비워 둔다(성능 리포트 생성기가 정한다)." % every)
-            if by_kind.get("모니터링 중지"):
-                out.append("   모니터링 중지: 종료 판정 1~2분 뒤의 분에 중지 명령을 실행하고, 이 케이스의 crontab 줄을 지운다.")
-                for e in by_kind["모니터링 중지"]:
-                    out.append("     %s%s %s: %s" % (e["host"], " (ESX)" if e["role"] == "ESX" else "", e["name"], e["cmd"]))
-            elif pc["has_mon"]:
-                out.append("   모니터링 중지 명령이 없다. 종료 판정 뒤 이 케이스의 crontab 줄만 지운다.")
-            else:
-                out.append("   종료 판정 뒤 이 케이스의 crontab 줄을 지운다.")
+                items("모니터링 중지", ["%s%s %s: %s" % (e["host"], " (ESX)" if e["role"] == "ESX" else "", e["name"], e["cmd"])
+                                    for e in by_kind.get("모니터링 중지", [])], none="중지 명령 없음. crontab 줄만 지운다")
+            out.append("   최대 대기: %s" % (fmt_interval(dt.timedelta(minutes=pc["max_wait"])) if pc["max_wait"] else "제한 없음"))
     return "\n".join(out) + "\n"
 
 
-# 점프 VM 의 ~/.tcgen/esxssh: ESX 호스트에 키로 접속한다(비밀번호를 묻지 않음, 계정 root). 표준 입력은 그대로 넘긴다.
-ESXSSH_LINES = [
-    'O="-i $HOME/.tcgen/id_esx -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=30 -o ServerAliveCountMax=6"',
-    "if ssh -G -o StrictHostKeyChecking=accept-new localhost >/dev/null 2>&1; then",
-    '  O="$O -o StrictHostKeyChecking=accept-new"',
-    "else",
-    '  O="$O -o StrictHostKeyChecking=no"',
-    "fi",
-    'if [ $# -lt 1 ]; then echo "usage: sh ~/.tcgen/esxssh <esx host> [command]"; exit 2; fi',
-    'H="$1"; shift',
-    'exec ssh $O -l root "$H" "$@"',
-]
+# 점프 VM 작업 폴더(기본 ~/.tcgen)의 esxssh: ESX 호스트에 키로 접속한다(비밀번호를 묻지 않음, 계정 root). 표준 입력은 그대로 넘긴다.
+# LogLevel=ERROR: 로그인 배너와 'Permanently added' 안내를 출력하지 않고 오류만 출력한다. known_hosts 도 작업 폴더에 둔다.
+def esxssh_lines(jdir=DEFAULT_JUMP_DIR):
+    sh = sh_path(jdir)
+    return [
+        'O="-i %s/id_esx -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=30 -o ServerAliveCountMax=6"' % sh,
+        'O="$O -o LogLevel=ERROR -o UserKnownHostsFile=%s/known_hosts"' % sh,
+        "if ssh -G -o StrictHostKeyChecking=accept-new localhost >/dev/null 2>&1; then",
+        '  O="$O -o StrictHostKeyChecking=accept-new"',
+        "else",
+        '  O="$O -o StrictHostKeyChecking=no"',
+        "fi",
+        'if [ $# -lt 1 ]; then echo "usage: sh %s/esxssh <esx host> [command]"; exit 2; fi' % jdir,
+        'H="$1"; shift',
+        'exec ssh $O -l root "$H" "$@"',
+    ]
 
-# 점프 VM 의 ~/.tcgen/postsetup: A 블록의 마지막 줄이 실행한다. ESX 호스트에 키를 등록하는 한 줄을 보여 주고,
+
+# 작업 폴더의 postsetup: A 블록의 마지막 줄이 실행한다. ESX 호스트에 키를 등록하는 한 줄을 보여 주고,
 # VM 비밀번호가 아직 없을 때만 setpw 로 입력받는다(이미 있으면 바꾸는 방법만 알린다).
-POSTSETUP_LINES = [
-    "D=$HOME/.tcgen",
-    "echo",
-    "if [ -s $D/id_esx.pub ]; then",
-    '  echo "== ESX key login. Paste this ONE line into the root SSH session of each ESX host (once per host):"',
-    "  echo",
-    "  echo \"echo '`cat $D/id_esx.pub`' >> /etc/ssh/keys-root/authorized_keys\"",
-    "  echo",
-    '  echo "== Then check from this jump VM. It must print the ESX host name without asking for a password:"',
-    '  echo "sh ~/.tcgen/esxssh <esx host> hostname"',
-    "else",
-    '  echo "==== no ssh key for ESX hosts ($D/id_esx.pub). Paste block A again."',
-    "fi",
-    "echo",
-    "if [ -s $D/vmpw ]; then",
-    '  echo "== VM password: already saved in $D/vmpw. To change it: sh ~/.tcgen/setpw"',
-    "else",
-    "  sh $D/setpw",
-    "fi",
-]
+def postsetup_lines(jdir=DEFAULT_JUMP_DIR):
+    return [
+        "D=%s" % sh_path(jdir),
+        "echo",
+        "if [ -s $D/id_esx.pub ]; then",
+        '  echo "== ESX key login. Paste this ONE line into the root SSH session of each ESX host (once per host):"',
+        "  echo",
+        "  echo \"echo '`cat $D/id_esx.pub`' >> /etc/ssh/keys-root/authorized_keys\"",
+        "  echo",
+        '  echo "== Then check from this jump VM. It must print the ESX host name without asking for a password:"',
+        '  echo "sh %s/esxssh <esx host> hostname"' % jdir,
+        "else",
+        '  echo "==== no ssh key for ESX hosts ($D/id_esx.pub). Paste block A again."',
+        "fi",
+        "echo",
+        "if [ -s $D/vmpw ]; then",
+        '  echo "== VM password: already saved in $D/vmpw. To change it: sh %s/setpw"' % jdir,
+        "else",
+        "  sh $D/setpw",
+        "fi",
+    ]
+
+
+ESXSSH_LINES = esxssh_lines()
+POSTSETUP_LINES = postsetup_lines()
+
+
+def vmssh_lines(jdir=DEFAULT_JUMP_DIR):
+    """v1.4 의 vmssh 와 같은 글. 작업 폴더만 바꾼다(기본 폴더이면 v1.4 와 글자까지 같다)."""
+    return [VMSSH_LINES[0].replace("$HOME/.tcgen", sh_path(jdir))] + VMSSH_LINES[1:]
+
+
+def setpw_lines(jdir=DEFAULT_JUMP_DIR):
+    """v1.4 의 setpw 와 같은 글. 작업 폴더만 바꾼다(기본 폴더이면 v1.4 와 글자까지 같다)."""
+    return ["D=%s" % sh_path(jdir)] + SETPW_LINES[1:]
+
 
 CK_LINES = [
     "ck() {",
     '  S=`(sha256sum "$D/$1.new" 2>/dev/null || shasum -a 256 "$D/$1.new" 2>/dev/null) | cut -c1-64`',
     '  if [ "$S" = "$2" ]; then mv -f "$D/$1.new" "$D/$1"; chmod $3 "$D/$1"; echo "OK      $D/$1"',
-    '  else rm -f "$D/$1.new"; echo "FAILED  $D/$1 (sha256 differs. Paste block A again)"; fi',
+    '  else rm -f "$D/$1.new"; echo "FAILED  $D/$1 (sha256 differs. Paste block A again. Check the free space and quota of $D)"; fi',
     "}",
 ]
 
@@ -2200,24 +2279,37 @@ def gz_b64_decode(lines):
     return gzip.decompress(base64.b64decode("".join(lines)))
 
 
-def jump_files():
-    """순서 실행에서 점프 VM 의 ~/.tcgen 에 설치하는 파일의 이름과 내용. vmssh, askpass, setpw 는 v1.4 와 같다."""
+def jump_sources(jdir=DEFAULT_JUMP_DIR):
+    """작업 폴더에 printf 줄로 만드는 짧은 파일들: (이름, 줄 목록)."""
+    return (("vmssh", vmssh_lines(jdir)), ("setpw", setpw_lines(jdir)), ("esxssh", esxssh_lines(jdir)),
+            ("postsetup", postsetup_lines(jdir)))
+
+
+def jump_files(jdir=DEFAULT_JUMP_DIR):
+    """순서 실행에서 점프 VM 작업 폴더(기본 ~/.tcgen)에 설치하는 파일의 이름과 내용.
+    vmssh, askpass, setpw 는 v1.4 와 같은 글이고 폴더 경로만 작업 폴더를 따른다. tcrun 은 자기 위치를 작업 폴더로 쓴다."""
     import tcgen_payload as payload
-    files = [("askpass", 'cat "$HOME/.tcgen/vmpw"\n')]
-    for name, src in (("vmssh", VMSSH_LINES), ("setpw", SETPW_LINES), ("esxssh", ESXSSH_LINES), ("postsetup", POSTSETUP_LINES)):
+    files = [("askpass", 'cat "%s/vmpw"\n' % sh_path(jdir))]
+    for name, src in jump_sources(jdir):
         files.append((name, "".join(x + "\n" for x in src)))
     files += [("tcrun", payload.TCRUN_SH), ("tcgen_apply.py", payload.APPLY_PY)]
     return files
 
 
-def seq_setup_block():
+def seq_setup_block(jdir=DEFAULT_JUMP_DIR):
     """순서 실행의 A 블록(점프 VM 최초 1회): v1.4 의 askpass, vmssh, setpw 에 esxssh, postsetup, tcrun, tcgen_apply.py 를 더해
-    설치하고, ESX 접속용 ssh 키가 없으면 만든다. 큰 파일 둘은 gzip 뒤 base64 로 넣고 설치 뒤 sha256 을 확인한다."""
-    files = dict(jump_files())
+    작업 폴더(기본 ~/.tcgen)에 설치하고, ESX 접속용 ssh 키가 없으면 만든다. 큰 파일 둘은 gzip 뒤 base64 로 넣고 설치 뒤 sha256 을
+    확인한다. 작업 폴더가 ~/.tcgen 이 아니면 ~/.tcgen 에 있던 ssh 키와 VM 비밀번호를 새 폴더로 복사한다(ESX 에 키를 다시 등록하지 않게)."""
+    files = dict(jump_files(jdir))
+    sh = sh_path(jdir)
     body = ["umask 077",
-            "D=$HOME/.tcgen; mkdir -p $D/runs",
-            "printf '%s\\n' 'cat \"$HOME/.tcgen/vmpw\"' > $D/askpass"]
-    for name, src in (("vmssh", VMSSH_LINES), ("setpw", SETPW_LINES), ("esxssh", ESXSSH_LINES), ("postsetup", POSTSETUP_LINES)):
+            "D=%s; mkdir -p $D/runs || { echo \"==== cannot create $D\"; exit 1; }" % sh]
+    if jdir != DEFAULT_JUMP_DIR:
+        body += ['for F in id_esx id_esx.pub vmpw; do',
+                 '  if [ ! -s $D/$F ] && [ -s $HOME/.tcgen/$F ]; then cp -p $HOME/.tcgen/$F $D/$F && echo "copied:  $HOME/.tcgen/$F -> $D/$F"; fi',
+                 'done']
+    body += ["printf '%%s\\n' 'cat \"%s/vmpw\"' > $D/askpass" % sh]
+    for name, src in jump_sources(jdir):
         body.append(": > $D/%s" % name)
         for v in src:
             body += _printf_lines(v, "$D/%s" % name)
@@ -2232,13 +2324,13 @@ def seq_setup_block():
         out.append("TCB64")
         out.append(_hd("ck %s %s %s" % (name, hashlib.sha256(data).hexdigest(), mode)))
     out += [_hd(x) for x in KEYGEN_LINES]
-    out += ["TCSETUP", "sh ~/.tcgen/postsetup"]
+    out += ["TCSETUP", "sh %s/postsetup" % jdir]
     return "\n".join(out) + "\n"
 
 
-def _seq_plan_block(plan_bytes, run_id, action):
+def _seq_plan_block(plan_bytes, run_id, action, jdir=DEFAULT_JUMP_DIR):
     sha = hashlib.sha256(plan_bytes).hexdigest()
-    head = ["D=$HOME/.tcgen; R=$D/runs/%s" % run_id,
+    head = ["D=%s; R=$D/runs/%s" % (sh_path(jdir), run_id),
             "V=`sh $D/tcrun version 2>/dev/null`",
             'if [ "$V" = "%s" ]; then' % VERSION,
             "  mkdir -p $R",
@@ -2248,7 +2340,7 @@ def _seq_plan_block(plan_bytes, run_id, action):
             "    mv -f $R/plan.new $R/plan",
             "    sh $D/tcrun %s $R/plan < /dev/null" % action,
             "  else",
-            '    echo "==== plan FAILED (sha256 differs). Nothing was started. Paste this block again."',
+            '    echo "==== plan FAILED (sha256 differs). Nothing was started. Check the free space and quota of $D, then paste this block again."',
             "  fi",
             "else",
             '  echo "==== tcrun on this jump VM is ${V:-not installed}, tcgen is %s. Nothing was started. Paste block A again."' % VERSION,
@@ -2257,14 +2349,14 @@ def _seq_plan_block(plan_bytes, run_id, action):
     return "\n".join(out) + "\n"
 
 
-def seq_check_block(plan_bytes, run_id):
+def seq_check_block(plan_bytes, run_id, jdir=DEFAULT_JUMP_DIR):
     """점검 블록(P): plan 을 올리고 tcrun check 를 실행한다. 아무것도 바꾸지 않는다."""
-    return _seq_plan_block(plan_bytes, run_id, "check")
+    return _seq_plan_block(plan_bytes, run_id, "check", jdir)
 
 
-def seq_run_block(plan_bytes, run_id):
+def seq_run_block(plan_bytes, run_id, jdir=DEFAULT_JUMP_DIR):
     """실행 블록(S): plan 을 올리고 ESX 호스트별 진행을 백그라운드로 시작한다."""
-    return _seq_plan_block(plan_bytes, run_id, "start")
+    return _seq_plan_block(plan_bytes, run_id, "start", jdir)
 
 
 RECORD_HEADER_SEQ = RECORD_HEADER + ["진행 방식", "설정", "실행 ID"]
@@ -2304,7 +2396,8 @@ def generate_seq(cases, run_cmds, mon_cmds, profiles, settings, now=None, write=
     plan, errors, warnings, common = build_seq(cases, run_cmds, mon_cmds, profiles, settings, now=now)
     run_id = now.strftime("%Y%m%d-%H%M%S")
     res = {"mode": "seq", "errors": errors, "warnings": warnings, "entries": [], "sched": [], "vm": "", "esx": {},
-           "setup": seq_setup_block(), "check": "", "run": "", "plan": "", "plan_view": "", "run_id": run_id,
+           "setup": seq_setup_block(common.get("jdir") or DEFAULT_JUMP_DIR), "check": "", "run": "", "plan": "", "plan_view": "",
+           "run_id": run_id, "jump_dir": common.get("jdir") or DEFAULT_JUMP_DIR,
            "record": "", "log": "", "record_rows": 0, "record_added": [], "record_backup": None, "gen_time": now,
            "vm_wipe": "", "wipe_hosts": [], "wipe_conflicts": [], "chains": [], "cases": plan,
            "jump_log_dir": common["logdir"]}
@@ -2320,8 +2413,8 @@ def generate_seq(cases, run_cmds, mon_cmds, profiles, settings, now=None, write=
     data = text.encode("utf-8")
     res["plan"] = text
     res["plan_view"] = plan_view(plan, common, run_id)
-    res["check"] = seq_check_block(data, run_id)
-    res["run"] = seq_run_block(data, run_id)
+    res["check"] = seq_check_block(data, run_id, common["jdir"])
+    res["run"] = seq_run_block(data, run_id, common["jdir"])
     res["entries"] = [e for pc in plan for e in pc["entries"]]
     for pc in plan:
         if pc["chain"] not in res["chains"]:
@@ -2329,7 +2422,7 @@ def generate_seq(cases, run_cmds, mon_cmds, profiles, settings, now=None, write=
         for vm in pc["vms"]:
             if vm["pat"] and vm["name"] not in res["wipe_hosts"]:
                 res["wipe_hosts"].append(vm["name"])
-    res["vm_wipe"] = "".join(wipe_block(h, common["user"]) for h in res["wipe_hosts"])
+    res["vm_wipe"] = "".join(wipe_block(h, common["user"], common["jdir"]) for h in res["wipe_hosts"])
     if write:
         res["record"], res["log"], res["record_rows"], res["record_added"], res["record_backup"] = write_records_seq(
             settings, plan, now, run_id, backup_dir=backup_dir)

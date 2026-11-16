@@ -40,13 +40,13 @@ KST = dt.timezone(dt.timedelta(hours=9))
 SPEED = float(os.environ.get("TCGEN_TEST_SPEED", "30"))
 
 FAKE_SSH = r"""#!/bin/sh
-KEY=; LOGIN=
+KEY=; LOGIN=; QUIET=
 while [ $# -gt 0 ]; do
   case "$1" in
     -G) echo "stricthostkeychecking accept-new"; exit 0 ;;
     -i) KEY=$2; shift 2 ;;
     -l) LOGIN=$2; shift 2 ;;
-    -o) shift 2 ;;
+    -o) [ "$2" = LogLevel=ERROR ] && QUIET=1; shift 2 ;;
     -*) shift ;;
     *) break ;;
   esac
@@ -63,8 +63,9 @@ if [ -n "$KEY" ] || [ "$LOGIN" = root ]; then
   [ -f "$d/authorized" ] || { echo "root@$h: Permission denied (publickey,keyboard-interactive)." >&2; exit 255; }
   echo "esx $h $*" >> "$FAKE_ROOT/ssh_calls.txt"
   HOME=$d; TCGEN_TMP=$d/tmp; TCGEN_CRON_DIR=$d/cron; TCGEN_VMFS_ROOT=$d/vmfs; TCGEN_POLL_SEC=0.05
+  TCGEN_LPAGE_POLL_SEC=`cat "$FAKE_ROOT/lpage_poll"`
   FAKE_ESX_HOME=$d; FAKE_HOST=$h; TZ=UTC; FAKE_CLOCK_OFFSET=`cat "$d/clock_offset" 2>/dev/null`
-  export HOME TCGEN_TMP TCGEN_CRON_DIR TCGEN_VMFS_ROOT TCGEN_POLL_SEC FAKE_ESX_HOME FAKE_HOST TZ FAKE_CLOCK_OFFSET
+  export HOME TCGEN_TMP TCGEN_CRON_DIR TCGEN_VMFS_ROOT TCGEN_POLL_SEC TCGEN_LPAGE_POLL_SEC FAKE_ESX_HOME FAKE_HOST TZ FAKE_CLOCK_OFFSET
   cd "$d" || exit 1
   [ $# -gt 0 ] || exit 0
   exec "$@"
@@ -84,6 +85,9 @@ if [ -s "$d/ssh_fail" ]; then
   n=`cat "$d/ssh_fail"`
   if [ "$n" -gt 0 ]; then echo $((n - 1)) > "$d/ssh_fail"; echo "ssh: connect to host $h port 22: Connection timed out" >&2; exit 255; fi
 fi
+# login banner of sshd (Banner): the ssh client prints it unless LogLevel is ERROR or lower
+[ -f "$FAKE_ROOT/banner" ] && [ -z "$QUIET" ] && cat "$FAKE_ROOT/banner" >&2
+if [ -f "$d/deny" ]; then echo "deny $t" >> "$FAKE_ROOT/ssh_calls.txt"; echo "$t: Permission denied (publickey,password)." >&2; exit 255; fi
 echo "vm $t" >> "$FAKE_ROOT/ssh_calls.txt"
 HOME=$d; FAKE_CRONTAB=$d/crontab.txt; FAKE_HOST=$h; FAKE_CLOCK_OFFSET=`cat "$d/clock_offset" 2>/dev/null`
 export HOME FAKE_CRONTAB FAKE_HOST FAKE_CLOCK_OFFSET
@@ -299,6 +303,7 @@ elif cmd == "vmsvc/power.on":
         d = load()
         vm = next(v for v in d["vms"] if v["id"] == args[1])
     vm["state"] = "on"
+    vm["on_at"] = vnow()
     save(d)
     mark_down(vm, int(vnow() + float(vm.get("boot_sec", 60))))
     if vm.get("poweron") == "hang":        # the VM is powered on, but vim-cmd does not return
@@ -323,6 +328,15 @@ path = os.path.join(home, "adv.json")
 args = sys.argv[1:]
 with open(os.path.join(home, "calls.log"), "a") as f:
     f.write("esxcli %%s\n" %% " ".join(args))
+if args[:3] == ["vm", "process", "list"]:          # running VMs: World ID, VMX Cartel ID, Display Name (KB 1014165 form)
+    with open(os.path.join(home, "vms.json")) as f:
+        vms = json.load(f)["vms"]
+    for v in vms:
+        if v["state"] in ("on", "shutting"):
+            w = 100000 + int(v["id"])
+            sys.stdout.write("%%s\n   World ID: %%d\n   Process ID: 0\n   VMX Cartel ID: %%d\n   UUID: 42 0a\n   Display Name: %%s\n"
+                             "   Config File: /vmfs/volumes/%%s/%%s\n\n" %% (v["name"], w, w - 1, v["name"], v["ds"], v["file"]))
+    sys.exit(0)
 if args[:3] != ["system", "settings", "advanced"] or len(args) < 6 or args[3] not in ("list", "set") or args[4] != "-o":
     sys.stderr.write("Error: Unknown command or namespace %%s\n" %% " ".join(args))
     sys.exit(1)
@@ -383,6 +397,46 @@ guestOS = "rhel8-64"
 """
 
 
+def vmx_1g(name, mem_mb=16384):
+    """1GB page 를 켠 VM 의 .vmx (sched.mem.lpage.enable1GPage = TRUE, 목표 backing 수 = mem_mb // 1024)."""
+    return (VMX_TEMPLATE % {"name": name}).replace('memSize = "16384"', 'memSize = "%d"' % mem_mb) + \
+        'sched.mem.lpage.enable1GPage = "TRUE"\n'
+
+
+FAKE_VSISH = r'''#!%s
+# fake vsish -e ls|get /memory/lpage/vmLpage/<world id>: 1GB page backings grow with the virtual clock after power on
+import json, os, sys, time
+
+home, root = os.environ["FAKE_ESX_HOME"], os.environ["FAKE_ROOT"]
+args = sys.argv[1:]
+with open(os.path.join(home, "calls.log"), "a") as f:
+    f.write("vsish %%s\n" %% " ".join(args))
+with open(os.path.join(root, "clock")) as f:
+    r0, v0, sp = [float(x) for x in f.read().split()]
+vnow = v0 + (time.time() - r0) * sp
+with open(os.path.join(home, "vms.json")) as f:
+    vms = json.load(f)["vms"]
+live = dict((str(100000 + int(v["id"])), v) for v in vms if v["state"] in ("on", "shutting") and v.get("lpage_node", True))
+if len(args) == 3 and args[:2] == ["-e", "ls"] and args[2].rstrip("/") == "/memory/lpage/vmLpage":
+    for w in sorted(live):
+        sys.stdout.write(w + "/\n")
+    sys.exit(0)
+if len(args) == 3 and args[:2] == ["-e", "get"] and args[2].startswith("/memory/lpage/vmLpage/"):
+    v = live.get(args[2].rsplit("/", 1)[-1])
+    if v is None:
+        sys.stderr.write("VSI node (195887110)(bad3)/memory/lpage/vmLpage/x: Not found\n")
+        sys.exit(1)
+    cur = int(max(0.0, vnow - float(v.get("on_at", 0))) * float(v.get("lpage_rate", 4)))
+    if v.get("lpage_cap") is not None:
+        cur = min(cur, int(v["lpage_cap"]))
+    sys.stdout.write("VM lpage info {\n   Current number of 2MB page backings:12\n   Current number of 1GB page backings:%%d\n"
+                     "   1GB page backing attempts failed:%%d\n}\n" %% (cur, int(v.get("lpage_failed", 0))))
+    sys.exit(0)
+sys.stderr.write("fake vsish: unknown arguments %%s\n" %% " ".join(args))
+sys.exit(1)
+''' % sys.executable
+
+
 def write_exec(path, text):
     with open(path, "w") as f:
         f.write(text)
@@ -392,7 +446,7 @@ def write_exec(path, text):
 class FakeEnv(object):
     """시험 폴더 하나. 점프 VM 홈(jump), VM 폴더(vms/<이름>), ESX 폴더(esx/<이름>), 가짜 명령(fakebin), 가상 시계(clock)."""
 
-    def __init__(self, speed=None, start="2026-11-20 10:00:20", dash=False, install=True):
+    def __init__(self, speed=None, start="2026-11-20 10:00:20", dash=False, install=True, jdir=False):
         self.speed = float(speed or SPEED)
         self.root = tempfile.mkdtemp(prefix="tcgen_seq_", dir="/tmp")
         r = self.root
@@ -402,7 +456,7 @@ class FakeEnv(object):
             os.makedirs(d)
         for name, text in (("ssh", FAKE_SSH), ("setsid", FAKE_SETSID), ("crontab", FAKE_CRONTAB), ("pgrep", FAKE_PGREP),
                            ("date", FAKE_DATE), ("sleep", FAKE_SLEEP), ("hostname", FAKE_HOSTNAME),
-                           ("ssh-keygen", FAKE_KEYGEN), ("vim-cmd", FAKE_VIMCMD), ("esxcli", FAKE_ESXCLI)):
+                           ("ssh-keygen", FAKE_KEYGEN), ("vim-cmd", FAKE_VIMCMD), ("esxcli", FAKE_ESXCLI), ("vsish", FAKE_VSISH)):
             write_exec(os.path.join(self.fakebin, name), text)
         if dash:
             os.symlink(shutil.which("dash"), os.path.join(self.fakebin, "sh"))     # 모든 sh 호출을 dash 로
@@ -411,9 +465,14 @@ class FakeEnv(object):
         v0 = dt.datetime.strptime(start, "%Y-%m-%d %H:%M:%S").replace(tzinfo=KST).timestamp()
         with open(os.path.join(r, "clock"), "w") as f:
             f.write("%r %r %r\n" % (time.time(), v0, self.speed))
+        with open(os.path.join(r, "lpage_poll"), "w") as f:      # 1GB backing 읽기 간격: 가상 시계로 15초
+            f.write("%.4f\n" % (15.0 / self.speed))
         self.env = {"HOME": self.jump, "PATH": self.fakebin + ":/usr/bin:/bin", "TERM": "dumb", "FAKE_PW": TEST_PW,
                     "FAKE_ROOT": r, "FAKE_VMS": self.vms, "LANG": "C", "USER": "tester", "TZ": "Asia/Seoul"}
         self.tcgen = os.path.join(self.jump, ".tcgen")
+        self.jdir = None                 # jdir=True: 점프 VM 작업 폴더를 홈 밖(<시험 폴더>/data/tcgen)에 둔다
+        if jdir:
+            self.tcgen = self.jdir = os.path.join(r, "data", "tcgen")
         self.cron = None
         self.procs = []
         if install:
@@ -429,7 +488,7 @@ class FakeEnv(object):
     def install_jump(self, key=True, password=True):
         """A 블록을 붙여넣은 뒤와 같은 상태를 만든다(파일 내용은 core.jump_files 와 같음)."""
         os.makedirs(os.path.join(self.tcgen, "runs"), exist_ok=True)
-        for name, text in core.jump_files():
+        for name, text in core.jump_files(self.jdir or core.DEFAULT_JUMP_DIR):
             with open(os.path.join(self.tcgen, name), "w", newline="\n") as f:
                 f.write(text)
             os.chmod(os.path.join(self.tcgen, name), 0o700)
@@ -547,6 +606,8 @@ class FakeEnv(object):
         s.update(record_csv=os.path.join(self.root, "pc", "rec.csv"), log_dir=os.path.join(self.root, "pc"), run_mode="seq",
                  jump_log_dir=self.log, mon_lead_min=1, seq_poll_sec=20, seq_first_check_sec=20, seq_gone_count=2, seq_start_wait_min=3,
                  seq_boot_wait_min=5, seq_shutdown_wait_min=1, seq_settle_min=0, seq_gap_min=0)
+        if self.jdir:
+            s["jump_dir"] = self.jdir
         s.update(over)
         return s
 

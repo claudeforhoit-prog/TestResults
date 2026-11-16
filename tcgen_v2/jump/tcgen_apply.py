@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-tcgen_apply.py 2.5 - apply ESXi host advanced options and VM configuration (.vmx) keys for one test case.
+tcgen_apply.py 2.6 - apply ESXi host advanced options and VM configuration (.vmx) keys for one test case.
 
 Runs ON THE ESXi HOST with the python3 that ships with ESXi. Standard library only, Python 3.5 syntax.
 The tcgen sequence runner (tcrun, on the jump VM) uploads this file to /tmp/tcgen on the host and runs it over ssh.
@@ -13,15 +13,23 @@ Usage (the settings come on standard input, see "spec" below):
   python3 tcgen_apply.py poweron <vm> [secs]   power one VM on and wait until its state is "Powered on".
                                                secs: how long vim-cmd vmsvc/power.on may take (default 5400).
   python3 tcgen_apply.py rollback <tag>        undo what "prepare <tag>" changed (.vmx backups, host options).
+  python3 tcgen_apply.py poweroff <vm> [secs]  guest shutdown, power off after [secs] (default 600) when still on.
+  python3 tcgen_apply.py lpage <vm>            read the 1GB page backing of a powered-on VM once (vsish /memory/lpage/vmLpage).
+  python3 tcgen_apply.py lpagewait <vm> [secs] wait until the 1GB page backing of a powered-on VM is complete (default 5400).
+                                               Complete when the number of 1GB page
+                                               backings reaches memSize / 1024; no increase in 6 readings (15 s apart) = stopped.
 
 spec (one item per line, ASCII):
   opt shutdown_wait <seconds>      how long to wait for the guest shutdown before a hard power off (default 600)
   vm <name>                        every VM of the case, in power-on order
   host </Section/Option>=<value>   ESXi advanced option (esxcli system settings advanced)
   set <vm> <key>=<value>           .vmx key of that VM. An empty value removes the key.
+  off <vm>                         the case wants this VM powered off (check shows it; prepare does not power anything on)
 
 Commands used (Broadcom KB): vim-cmd vmsvc/getallvms, get.summary, power.getstate, power.shutdown, power.off,
 power.on, reload (KB 343248, 320877, 345049, 308360); esxcli system settings advanced list/set (KB 310338).
+1GB page backing: esxcli vm process list (world ID) and vsish -e get /memory/lpage/vmLpage/<id>
+("Current number of 1GB page backings", "1GB page backing attempts failed").
 
 Output: lines for people, plus lines that start with "TCGEN-" for the runner. The last line is always
 "TCGEN-RESULT <word> [text]". Exit status 0 = done, 1 = error. The same lines go to <tmp>/apply.log.
@@ -37,7 +45,7 @@ import subprocess
 import sys
 import time
 
-VERSION = "2.5"
+VERSION = "2.6"
 VMFS_ROOT = os.environ.get("TCGEN_VMFS_ROOT", "/vmfs/volumes")
 TMP = os.environ.get("TCGEN_TMP", "/tmp/tcgen")
 POLL = float(os.environ.get("TCGEN_POLL_SEC", "5"))
@@ -152,7 +160,7 @@ def drop_lock(path):
 
 # ---------------------------------------------------------------- spec
 def read_spec(data):
-    spec = {"vms": [], "host": [], "set": {}, "opt": {"shutdown_wait": 600}}
+    spec = {"vms": [], "host": [], "set": {}, "off": [], "opt": {"shutdown_wait": 600}}
     for raw in data.decode("ascii", "replace").split("\n"):
         line = raw.rstrip("\r")
         if not line.strip() or line.startswith("#"):
@@ -177,6 +185,12 @@ def read_spec(data):
             if name not in spec["set"]:
                 raise Fail("spec: a set line names a VM that has no vm line: %r" % line)
             spec["set"][name].append((key.strip(), value))
+        elif word == "off":
+            name = rest.strip()
+            if name not in spec["set"]:
+                raise Fail("spec: an off line names a VM that has no vm line: %r" % line)
+            if name not in spec["off"]:
+                spec["off"].append(name)
         elif word == "opt":
             key, _, value = rest.partition(" ")
             try:
@@ -457,8 +471,18 @@ def save_state(tag, state):
 # ---------------------------------------------------------------- commands
 def cmd_check(spec):
     vms, host, changes = analyse(spec)
-    if changes:
-        result("wouldchange", "%d value(s) differ" % changes)
+    pon = poff = 0
+    for v in vms:
+        want = "off" if v["name"] in spec["off"] else "on"
+        if want == "on" and v["power"] != "on":
+            pon += 1
+        if want == "off" and v["power"] != "off":
+            poff += 1
+        out("TCGEN-POWER %s now=%s want=%s  [%s]" % (v["name"], v["power"], want, "same" if v["power"] == want else "change"))
+    parts = (["%d value(s) differ" % changes] if changes else []) + (["%d VM(s) to power on" % pon] if pon else []) + \
+        (["%d VM(s) to power off" % poff] if poff else [])
+    if parts:
+        result("wouldchange", ", ".join(parts))
     else:
         result("nochange")
 
@@ -505,7 +529,7 @@ def cmd_poweron(name, seconds):
     row = find_vm(all_vms(), name)
     if power_state(row["id"]) == "on":
         out("%s: already powered on" % name)
-        result("poweredon")
+        result("alreadyon")
         return
     begin = time.time()
     try:
@@ -524,6 +548,130 @@ def cmd_poweron(name, seconds):
         raise Fail("VM '%s' is not 'Powered on' after vim-cmd vmsvc/power.on" % name)
     out("%s: powered on (vim-cmd vmsvc/power.on took %d s)" % (name, int(time.time() - begin)))
     result("poweredon")
+
+
+def cmd_poweroff(name, seconds):
+    row = find_vm(all_vms(), name)
+    state = power_state(row["id"])
+    if state == "off":
+        out("%s: already powered off" % name)
+        result("alreadyoff")
+        return
+    if state == "suspended":
+        raise Fail("VM '%s' is suspended. Resume it or power it off first." % name)
+    shut_down([(name, row["id"])], seconds)
+    result("poweredoff")
+
+
+LPAGE = "/memory/lpage/vmLpage"
+
+
+def lpage_ids(name):
+    """World ID and VMX Cartel ID of a running VM (esxcli vm process list), in that order."""
+    rc, text = run(["esxcli", "vm", "process", "list"])
+    if rc != 0:
+        return []
+    blocks, cur = [], {}
+    for line in text.splitlines():
+        if line.strip() and not line[:1].isspace():
+            if cur:
+                blocks.append(cur)
+            cur = {}
+            continue
+        key, sep, value = line.strip().partition(":")
+        if sep:
+            cur[key.strip()] = value.strip()
+    if cur:
+        blocks.append(cur)
+    for b in blocks:
+        if b.get("Display Name") == name:
+            return [x for x in (b.get("World ID"), b.get("VMX Cartel ID")) if x and x.isdigit()]
+    return []
+
+
+LPAGE_POLL = float(os.environ.get("TCGEN_LPAGE_POLL_SEC", "15"))   # seconds between two readings
+LPAGE_EVERY = 15        # seconds of the time limit that one reading stands for
+LPAGE_STALL = 6         # readings in a row without an increase: the backing has stopped
+LPAGE_NONODE = 8        # readings in a row without a vsish node (about 2 min): the backing cannot be read
+
+
+def lpage_read(name):
+    """One reading of the 1GB page backing: (state, current, target, failed).
+    state: off (1GB pages not set in the .vmx), poweredoff, nonode (no readable vsish node), ok."""
+    row = find_vm(all_vms(), name)
+    lines = read_vmx(vmx_path(row))
+    on = values_of(lines, "sched.mem.lpage.enable1GPage")
+    if not (len(on) == 1 and on[0].strip().upper() == "TRUE"):
+        return "off", 0, 0, 0
+    mem = values_of(lines, "memSize")
+    try:
+        target = int(mem[-1]) // 1024
+    except (IndexError, ValueError):
+        raise Fail("VM '%s': memSize of the .vmx is not a number: %s" % (name, show(mem)))
+    if power_state(row["id"]) != "on":
+        return "poweredoff", 0, target, 0
+    rc, listed = run(["vsish", "-e", "ls", LPAGE + "/"])
+    have = set(x.strip().strip("/") for x in listed.splitlines()) if rc == 0 else set()
+    ids = lpage_ids(name)
+    for vid in [i for i in ids if i in have] + [i for i in ids if i not in have]:
+        rc, text = run(["vsish", "-e", "get", "%s/%s" % (LPAGE, vid)])
+        cur = re.search(r"Current number of 1GB page backings\s*:\s*(\d+)", text, re.I) if rc == 0 else None
+        if not cur:
+            continue
+        failed = re.search(r"1GB page backing attempts failed\s*:\s*(\d+)", text, re.I)
+        return "ok", int(cur.group(1)), target, int(failed.group(1)) if failed else 0
+    return "nonode", 0, target, 0
+
+
+def cmd_lpage(name):
+    """1GB page backing of a VM: TCGEN-LPAGE <current> <target> <failed>, or off (1GB pages not set), poweredoff, nonode."""
+    state, n, target, f = lpage_read(name)
+    text = ("%d %d %d" % (n, target, f)) if state == "ok" else state
+    out("TCGEN-LPAGE " + text)
+    result("lpage", text)
+
+
+def cmd_lpagewait(name, seconds):
+    """Wait until the 1GB page backing of a powered-on VM is complete. Result "lpage <state> [current target failed]":
+    complete, off (1GB pages not set: nothing to wait for), nonode, stalled (no increase, no failed attempts),
+    failed (no increase and failed attempts > 0: the host has no free contiguous 1GB memory), timeout, poweredoff."""
+    tries = max(1, int(seconds) // LPAGE_EVERY)
+    prev, stall, nonode, shown = -1, 0, 0, None
+    state, n, target, f = "nonode", 0, 0, 0
+    begin = time.time()
+    for i in range(tries):
+        if i:
+            time.sleep(LPAGE_POLL)
+        state, n, target, f = lpage_read(name)
+        if state in ("off", "poweredoff"):
+            out("TCGEN-LPAGE " + state)
+            result("lpage", state)
+            return
+        if state == "nonode":
+            nonode += 1
+            if nonode >= LPAGE_NONODE:
+                out("TCGEN-LPAGE nonode")
+                result("lpage", "nonode")
+                return
+            continue
+        nonode = 0
+        line = "TCGEN-LPAGE %d %d %d" % (n, target, f)
+        if line != shown:                       # one line for every change, not for every reading
+            out("%s  (%d s)" % (line, int(time.time() - begin)))
+            shown = line
+        if n >= target:
+            result("lpage", "complete %d %d %d" % (n, target, f))
+            return
+        stall = stall + 1 if (prev >= 0 and n <= prev) else 0
+        if stall >= LPAGE_STALL:
+            result("lpage", "%s %d %d %d" % ("failed" if f > 0 else "stalled", n, target, f))
+            return
+        prev = n
+    if state == "nonode":
+        out("TCGEN-LPAGE nonode")
+        result("lpage", "nonode")
+        return
+    result("lpage", "timeout %d %d %d" % (n, target, f))
 
 
 def cmd_rollback(tag):
@@ -577,8 +725,16 @@ def main(argv):
         elif len(argv) == 3 and argv[1] == "rollback":
             lock = take_lock()
             cmd_rollback(argv[2])
+        elif len(argv) in (3, 4) and argv[1] == "poweroff":
+            lock = take_lock()
+            cmd_poweroff(argv[2], int(argv[3]) if len(argv) == 4 else 600)
+        elif len(argv) == 3 and argv[1] == "lpage":
+            cmd_lpage(argv[2])
+        elif len(argv) in (3, 4) and argv[1] == "lpagewait":
+            cmd_lpagewait(argv[2], int(argv[3]) if len(argv) == 4 else POWERON_WAIT)
         else:
-            out("usage: tcgen_apply.py check | prepare <tag> | poweron <vm> [seconds] | rollback <tag>   (spec on stdin)")
+            out("usage: tcgen_apply.py check | prepare <tag> | poweron <vm> [seconds] | poweroff <vm> [seconds] | lpage <vm> | "
+                "lpagewait <vm> [seconds] | rollback <tag>   (spec on stdin)")
             result("error", "bad arguments")
             return 1
     except Fail as e:

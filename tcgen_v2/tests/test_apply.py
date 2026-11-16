@@ -43,7 +43,7 @@ class ApplyTests(unittest.TestCase):
     def apply(self, args, spec="", wait=True):
         d = self.host
         env = dict(self.e.env, HOME=d, TCGEN_TMP=os.path.join(d, "tmp"), TCGEN_VMFS_ROOT=os.path.join(d, "vmfs"),
-                   TCGEN_POLL_SEC="0.05", FAKE_ESX_HOME=d, FAKE_HOST="esx01", TZ="UTC")
+                   TCGEN_POLL_SEC="0.05", TCGEN_LPAGE_POLL_SEC="0.05", FAKE_ESX_HOME=d, FAKE_HOST="esx01", TZ="UTC")
         p = subprocess.Popen([sys.executable, APPLY] + list(args), env=env, cwd=d, stdin=subprocess.PIPE,
                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         if not wait:
@@ -320,7 +320,7 @@ class ApplyTests(unittest.TestCase):
 
     # ---- poweron
     def test_poweron(self):
-        self.assertEqual(self.apply(["poweron", "esx01ev01"])[0], "poweredon")
+        self.assertEqual(self.apply(["poweron", "esx01ev01"])[0], "alreadyon")
         self.assertEqual(self.calls("power.on"), [], "이미 켜져 있으면 켜지 않음")
         self.set_vm("esx01ev02", state="off")
         self.assertEqual(self.apply(["poweron", "esx01ev02", "60"])[0], "poweredon")
@@ -356,6 +356,88 @@ class ApplyTests(unittest.TestCase):
         self.assertEqual(res, "poweredon")
         self.assertTrue(any("did not return within 2 s, the state is 'Powered on'" in x for x in lines), lines)
         self.assertEqual(self.e.esx_vms("esx01")["esx01ev02"]["state"], "on")
+
+    def test_poweroff(self):
+        res, lines = self.apply(["poweroff", "esx01ev01", "30"])
+        self.assertEqual(res, "poweredoff")
+        self.assertIn("vim-cmd vmsvc/power.shutdown 10", self.calls())
+        self.assertEqual(self.e.esx_vms("esx01")["esx01ev01"]["state"], "off")
+        self.assertEqual(self.apply(["poweroff", "esx01ev01"])[0], "alreadyoff", "이미 꺼져 있으면 아무것도 하지 않음")
+        self.set_vm("esx01ev02", shutdown="fault")
+        self.assertEqual(self.apply(["poweroff", "esx01ev02", "5"])[0], "poweredoff", "게스트 종료를 못 하면 전원을 끈다")
+        self.assertIn("vim-cmd vmsvc/power.off 11", self.calls())
+        self.assertTrue(self.apply(["poweroff", "nobody"])[0].startswith("error VM 'nobody' is not registered"))
+
+    def write_lpage_vmx(self, vm, on=True, mem=16384):
+        text = self.read_vmx(vm).decode("latin-1")
+        text = text.replace('memSize = "16384"', 'memSize = "%d"' % mem)
+        if on:
+            text += 'sched.mem.lpage.enable1GPage = "TRUE"\n'
+        self.write_vmx(vm, text.encode("latin-1"))
+
+    def test_lpage(self):
+        """1GB page backing 읽기: vmx 에 1GB 설정이 없으면 off, 꺼져 있으면 poweredoff, 켜져 있으면 현재 수, 목표(GB), 실패 수."""
+        self.assertEqual(self.apply(["lpage", "esx01ev01"])[0], "lpage off", "1GB 설정이 없는 VM")
+        self.write_lpage_vmx("esx01ev01", mem=65536)
+        self.set_vm("esx01ev01", state="off")
+        self.assertEqual(self.apply(["lpage", "esx01ev01"])[0], "lpage poweredoff")
+        import json
+        p = os.path.join(self.host, "vms.json")
+        with open(p) as f:
+            d = json.load(f)
+        clock = os.path.join(self.e.root, "clock")
+        with open(clock) as f:
+            r0, v0, sp = [float(x) for x in f.read().split()]
+        now = v0 + (time.time() - r0) * sp
+        for v in d["vms"]:
+            if v["name"] == "esx01ev01":
+                v.update(state="on", on_at=now - 5, lpage_rate=2, lpage_failed=3)
+        with open(p, "w") as f:
+            json.dump(d, f)
+        res, lines = self.apply(["lpage", "esx01ev01"])
+        cur, tgt, failed = [int(x) for x in res.split()[1:]]
+        self.assertEqual((tgt, failed), (64, 3), "목표 = memSize MB / 1024")
+        self.assertTrue(cur >= 8, "켠 뒤 늘어난 1GB backing 수: %s" % res)
+        self.assertIn("esxcli vm process list", self.calls())
+        self.assertIn("vsish -e get /memory/lpage/vmLpage/100010", self.calls())
+        self.set_vm("esx01ev01", lpage_node=False)
+        self.assertEqual(self.apply(["lpage", "esx01ev01"])[0], "lpage nonode", "vsish 노드를 읽지 못함")
+
+    def test_lpagewait(self):
+        """lpagewait: 앞선 시험의 VM 켜기 확인과 같은 규칙. 1GB backing 수가 memSize/1024 에 닿으면 complete,
+        6번 연속으로 늘지 않으면 stalled(실패 수 0) 또는 failed(실패 수 > 0), 시간 한도를 넘으면 timeout."""
+        self.assertEqual(self.apply(["lpagewait", "esx01ev01", "60"])[0], "lpage off", "1GB 설정이 없으면 기다리지 않음")
+        self.write_lpage_vmx("esx01ev01", mem=65536)
+        self.set_vm("esx01ev01", state="on", on_at=self.e.now(), lpage_rate=1, lpage_cap=64)
+        res, lines = self.apply(["lpagewait", "esx01ev01", "600"])
+        self.assertEqual(res, "lpage complete 64 64 0", lines)
+        steps = [x for x in lines if x.startswith("TCGEN-LPAGE ")]
+        self.assertTrue(len(steps) >= 2 and steps[-1].startswith("TCGEN-LPAGE 64 64 0"), steps)
+        self.set_vm("esx01ev01", on_at=self.e.now(), lpage_cap=20)
+        self.assertEqual(self.apply(["lpagewait", "esx01ev01", "600"])[0], "lpage stalled 20 64 0", "늘지 않고 실패도 없음")
+        self.set_vm("esx01ev01", lpage_failed=2)
+        self.assertEqual(self.apply(["lpagewait", "esx01ev01", "600"])[0], "lpage failed 20 64 2", "실패한 시도가 있으면 failed")
+        self.set_vm("esx01ev01", on_at=self.e.now(), lpage_cap=None, lpage_failed=0, lpage_rate=0.1)
+        res, _ = self.apply(["lpagewait", "esx01ev01", "30"])
+        self.assertTrue(res.startswith("lpage timeout "), res)
+        self.set_vm("esx01ev01", lpage_node=False)
+        self.assertEqual(self.apply(["lpagewait", "esx01ev01", "600"])[0], "lpage nonode", "vsish 노드가 계속 없음")
+        self.set_vm("esx01ev01", state="off")
+        self.assertEqual(self.apply(["lpagewait", "esx01ev01", "600"])[0], "lpage poweredoff")
+        self.assertEqual(self.changing_calls(), [], "lpagewait 는 읽기만 함")
+
+    def test_check_shows_power(self):
+        """check 는 VM 마다 지금 전원과 케이스가 원하는 전원을 보인다(off 줄이 있는 VM 은 끔)."""
+        self.set_vm("esx01ev02", state="off")
+        res, lines = self.apply(["check"], "vm esx01ev01\nvm esx01ev02\noff esx01ev01\n")
+        self.assertEqual(res, "wouldchange 1 VM(s) to power on, 1 VM(s) to power off")
+        self.assertIn("TCGEN-POWER esx01ev01 now=on want=off  [change]", lines)
+        self.assertIn("TCGEN-POWER esx01ev02 now=off want=on  [change]", lines)
+        res, lines = self.apply(["check"], "vm esx01ev01\nvm esx01ev02\noff esx01ev02\n")
+        self.assertEqual(res, "nochange")
+        bad, _ = self.apply(["check"], "vm esx01ev01\noff esx01ev02\n")
+        self.assertTrue(bad.startswith("error spec: an off line names a VM that has no vm line"), bad)
+        self.assertEqual(self.changing_calls(), [], "check 는 아무것도 바꾸지 않음")
 
     # ---- 동시에 하나만
     def test_lock(self):

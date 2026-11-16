@@ -13,6 +13,7 @@ import csv
 import datetime as dt
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -189,9 +190,9 @@ def main():
     app.mode_changed()
     check(core.load_settings(BASE)["run_mode"] == "time", "진행 방식을 바꾸면 settings.json 에 저장")
     vis = list(app.t_case.tree.cget("displaycolumns"))
-    check("prof" not in vis and "max_wait" not in vis and "seq_start" not in vis
+    check("prof" not in vis and "max_wait" not in vis and "seq_start" not in vis and "power" not in vis
           and all(k in vis for k in ("interval", "start", "mon_start", "mon_stop", "end_time")),
-          "시각 지정: 탭 4 에서 설정, 최대 대기, 시작 시각(순서 실행) 열을 숨기고 시각 열을 보임 %s" % vis)
+          "시각 지정: 탭 4 에서 설정, 최대 대기, 시작 시각(순서 실행), 전원 열을 숨기고 시각 열을 보임 %s" % vis)
     check(app.blk_vm.frame.cget("text").startswith("B. VM 등록 블록") and app.blk_esx.frame.cget("text").startswith("C. ESX 블록"),
           "시각 지정: 탭 5 의 블록은 A, B, C, D")
     check(app.f_time.winfo_manager() == "pack" and app.f_seq.winfo_manager() == "" and app.row_seq.winfo_manager() == ""
@@ -567,7 +568,7 @@ def main():
     root.update()
     check(core.load_settings(BASE)["run_mode"] == "seq" and app.result is None, "순서 실행으로 바꾸면 저장하고 앞 결과를 비움")
     vis = list(app.t_case.tree.cget("displaycolumns"))
-    check(vis == ["name", "desc", "esx", "job", "mon", "prof", "max_wait", "seq_start", "group", "end_ref"],
+    check(vis == ["name", "desc", "esx", "power", "job", "mon", "prof", "max_wait", "seq_start", "group", "end_ref"],
           "순서 실행: 탭 4 에서 간격, 잡 시작, 모니터링 시작, 모니터링 중지, 잡 종료 (리포트) 열을 숨김 %s" % vis)
     check(app.blk_vm.frame.cget("text").startswith("P. 점검 블록") and app.blk_esx.frame.cget("text").startswith("S. 실행 블록"),
           "순서 실행: 탭 5 의 블록은 A, P, S, D")
@@ -790,6 +791,30 @@ def main():
           and core.load_settings(BASE)["seq_poll_sec"] == 3600, "잡 종료 확인 간격은 1분 이상")
     app.v_poll.set("30")
     check(core.load_settings(BASE)["seq_poll_sec"] == 1800, "30분으로 되돌림")
+    check((app.v_spacing.get(), app.v_prep.get()) == ("5", "60"), "잡 시작 최소 간격 기본 5분, 시작 시각 준비 기본 60분")
+    check(app.v_jdir.get() == "" and app.jump_dir_text() == "~/.tcgen", "점프 VM 작업 폴더 기본값(비우면 ~/.tcgen)")
+    app.v_jdir.set("/data/tcgen")
+    check(core.load_settings(BASE)["jump_dir"] == "/data/tcgen" and app.jump_dir_text() == "/data/tcgen", "작업 폴더를 바꾸면 저장")
+    app.v_jdir.set("")
+    app.v_spacing.set("8")
+    app.v_prep.set("45")
+    st = core.load_settings(BASE)
+    check((st["seq_start_spacing_min"], st["seq_prep_lead_min"]) == (8, 45), "두 칸도 바꾸면 저장")
+    n_log = len(LOG)
+    app.v_spacing.set("0")
+    check(app.current_settings() is None and any(x[0] == "error" and "잡 시작 최소 간격" in x[1] for x in LOG[n_log:]),
+          "잡 시작 최소 간격은 1분 이상")
+    app.v_spacing.set("5")
+    app.v_prep.set("60")
+    check(cell_of(t, "c1v1", "power") == "켬" and t.kind("c1v1", col_of(t, "power")) == "combo"
+          and t.kind("c1", col_of(t, "power")) == "readonly" and cell_of(t, "c1", "power") == "",
+          "VM 행의 전원 칸은 켬, 끔을 고르는 칸. 케이스 행은 비어 있음")
+    app.commit_case("c1v1", "power", "끔")
+    t.refresh("c1v1")
+    check(app.cases[1]["vms"][1]["power"] == "off" and cell_of(t, "c1v1", "power") == "끔"
+          and core.load_cases(BASE)[1]["vms"][1]["power"] == "off", "전원 끔을 고르면 저장")
+    app.commit_case("c1v1", "power", "켬")
+    check(core.load_cases(BASE)[1]["vms"][1]["power"] == "on", "켬으로 되돌림")
     t.refresh("c1")
     shot(root, app, 3, "tcgen_seq_tab4.png")
 
@@ -801,7 +826,19 @@ def main():
     check(app.blk_setup.get("1.0", "end-1c") == res["setup"] and "tcgen_apply.py" in res["setup"], "A 블록: tcrun 과 설정 적용 스크립트 포함")
     check(app.blk_vm.get("1.0", "end-1c") == res["check"] and app.blk_esx.get("1.0", "end-1c") == res["run"], "P 블록, S 블록 표시")
     check(app.blk_wipe.get("1.0", "end-1c") == res["vm_wipe"], "D 블록 표시")
-    check(app.plan_text.get("1.0", "end-1c") == res["plan_view"] and "잡 종료 확인" in res["plan_view"], "실행 계획 글 표시")
+    check(app.plan_text.get("1.0", "end-1c") == res["plan_view"] and "- 잡 종료 확인:" in res["plan_view"], "실행 계획 글 표시")
+    heads = [app.plan_text.get(a, b) for a, b in zip(*[iter(app.plan_text.tag_ranges("plan_head"))] * 2)]
+    cases = [app.plan_text.get(a, b) for a, b in zip(*[iter(app.plan_text.tag_ranges("plan_case"))] * 2)]
+    check(heads[:2] == ["[공통 규칙]", "[ESX 호스트 esx01] 접속 주소 10.0.0.11, 케이스 2개"] and cases[0].startswith("1. "),
+          "실행 계획의 제목 줄과 케이스 줄을 굵게 %s %s" % (heads, cases))
+    app.open_plan_window()
+    root.update()
+    top = app.plan_window
+    texts = [w for w in walk(top) if isinstance(w, tk.Text)]
+    check(top.winfo_exists() and texts and texts[0].get("1.0", "end-1c") == res["plan_view"] and texts[0].cget("wrap") == "word",
+          "[크게 보기] 는 실행 계획을 큰 창에 줄을 접어 보인다")
+    shot_window(root, "실행 계획", "tcgen_seq_plan_window.png")
+    top.destroy()
     plan = res["plan"]
     check("CASE 001 esx01 TC-base-b4\n" in plan and "CASE 002 esx01 TC-base-a-r3\n" in plan and "TC-base-a\n" not in plan,
           "plan 에 적용 체크하지 않은 케이스 2개가 표의 순서로")
@@ -817,8 +854,8 @@ def main():
           "잡 종료 확인 간격(30분)과 첫 확인(60초)이 plan 과 실행 계획에 들어감")
     check("SET GAP_MIN 30\n" in plan and _re.search(r"(?m)^START 001 \d+ \d{4}-\d\d-\d\d 09:05$", plan) and "START 002 " not in plan,
           "케이스 사이 간격과 지정한 시작 시각이 plan 에 들어감. 시각을 비운 케이스에는 START 줄이 없음")
-    check("시작 시각(지정): 잡을" in res["plan_view"] and "09:05 에 시작한다" in res["plan_view"]
-          and "앞 케이스의 잡이 끝난 시각에서 30분 이상 지난 뒤" in res["plan_view"], "실행 계획에 시작 시각과 간격 설명")
+    check(re.search(r"   시작: 지정 \d{4}-\d\d-\d\d 09:05\. 준비\(설정, VM 전원\)는 \d{4}-\d\d-\d\d 08:05 부터", res["plan_view"])
+          and "   시작: 자동. 앞 케이스의 잡이 끝나고 30분 뒤" in res["plan_view"], "실행 계획에 시작 시각, 준비 시각, 간격 설명")
     app.commit_case("c1", "seq_start", "")
     text5 = app.res_text.get("1.0", "end")
     check("순서 실행. 실행 ID %s" % res["run_id"] in text5 and "VM 을 자동으로 종료하고 다시 켠다" in text5, "결과 글에 실행 ID 와 VM 자동 종료 안내")
@@ -980,9 +1017,11 @@ def main():
     n_log = len(LOG)
     root4 = tk.Tk()
     app4 = appmod.App(root4)
-    check(app4.cases[0]["vms"] == [{"name": "esx09ev01", "job": "job_a", "monitors": ["guest_perf"], "end_ref": False, "profiles": []},
-                                   {"name": "esx09ev02", "job": "(없음)", "monitors": ["guest_perf"], "end_ref": False, "profiles": []}],
-          "예전 PVM, SVM 케이스를 VM 2대로 변환")
+    check(app4.cases[0]["vms"] == [{"name": "esx09ev01", "job": "job_a", "monitors": ["guest_perf"], "end_ref": False, "profiles": [],
+                                    "power": "on"},
+                                   {"name": "esx09ev02", "job": "(없음)", "monitors": ["guest_perf"], "end_ref": False, "profiles": [],
+                                    "power": "on"}],
+          "예전 PVM, SVM 케이스를 VM 2대로 변환(전원은 켬)")
     check(any(x[0] == "info" and "VM 행 형식으로 바꿨다" in x[1] for x in LOG[n_log:]), "변환했다는 안내 표시")
     check(any(d.endswith("_before_vm_format") for d in os.listdir(os.path.join(old_dir, "backup"))), "변환 전 원본을 backup 에 복사")
     check(app4.t_case.tree.exists("c0v1"), "변환한 케이스가 VM 행으로 보임")

@@ -44,8 +44,11 @@ PROF = [
 ]
 
 
-def vm(name, job="(없음)", monitors=(), profiles=(), end_ref=False):
-    return {"name": name, "job": job, "monitors": list(monitors), "profiles": list(profiles), "end_ref": end_ref}
+def vm(name, job="(없음)", monitors=(), profiles=(), end_ref=False, power=None):
+    v = {"name": name, "job": job, "monitors": list(monitors), "profiles": list(profiles), "end_ref": end_ref}
+    if power:
+        v["power"] = power
+    return v
 
 
 def case(name, esx="esx01", vms=None, esx_monitors=(), esx_profiles=(), max_wait="", applied=False, desc="", group="",
@@ -359,7 +362,7 @@ class SeqValidationTests(unittest.TestCase):
         res = gen([case("c1")], st=settings(seq_poll_sec=3600, seq_first_check_sec=90))
         self.assertIn("SET POLL_SEC 3600\n", res["plan"])
         self.assertIn("SET FIRST_CHECK_SEC 90\n", res["plan"])
-        self.assertIn("잡 시작 90초 뒤에 한 번, 그 뒤 60분마다", res["plan_view"])
+        self.assertIn("잡 시작 90초 뒤 한 번, 그 뒤 60분마다", res["plan_view"])
         self.assertIn("리포트용 CSV 의 잡 종료 시각은 비워 둔다", res["plan_view"])
         self.assertNotIn("비워 둔다", gen([case("c1")], st=settings(seq_poll_sec=60))["plan_view"])
         self.assertIn("SET GAP_MIN 45\n", gen([case("c1")], st=settings(seq_gap_min=45))["plan"])
@@ -412,13 +415,15 @@ class PlanTests(unittest.TestCase):
         res = gen(self.two(), st=settings(vm_user="tester", esx_addr="esx01=10.0.0.11;esx09=10.0.0.19", jump_log_dir="/data/log"))
         self.assertEqual(res["errors"], [])
         want = """TCGEN-PLAN 2
-VER 2.5
+VER 2.6
 RUNID 20261116-143000
 LOGDIR /data/log
 GEN 2026-11-16 14:30:00
 SET MON_LEAD_MIN 5
 SET SETTLE_MIN 10
 SET GAP_MIN 30
+SET SPACING_MIN 5
+SET PREP_LEAD_MIN 60
 SET POLL_SEC 1800
 SET FIRST_CHECK_SEC 60
 SET GONE_COUNT 3
@@ -437,6 +442,7 @@ RPTB 001 esx01ev01;esx01ev02,esx01ev01
 VM 001 esx01ev01 tester@esx01ev01
 VM 001 esx01ev02 tester@esx01ev02
 VM 001 esx01ev03 tester@esx01ev03
+VM 001 esx01ev04 tester@esx01ev04
 AH 001 /Numa/LocalityWeightActionAffinity=0
 AH 001 /Cpu/HTWholeCoreThreshold=0
 AV 001 esx01ev01 SCHED.MEM.PIN=FALSE
@@ -531,14 +537,24 @@ END 002
 
     def test_plan_view_text(self):
         view = gen(self.two())["plan_view"]
-        for word in ("실행 ID 20261116-143000", "[ESX 호스트 esx01] 케이스 1개", "[ESX 호스트를 적지 않은 케이스] 1개",
-                     "esx01ev01, esx01ev02, esx01ev03 순서로 하나씩 켠다", "10분 이상 지난 뒤에 시작", "프로세스 이름: run_b.sh -n 4",
-                     "ESX 호스트 /Numa/LocalityWeightActionAffinity = 0", "esx01ev01 numa.nodeAffinity (이 키의 줄을 삭제)",
-                     'esx01ev01 SCHED.MEM.PIN = "FALSE"', "모니터링 시작 5분 뒤", "최대 대기 12:00", "최대 대기 제한 없음"):
+        for word in ("실행 ID 20261116-143000", "점프 VM 작업 폴더 ~/.tcgen, 로그 폴더 ~/tcgen_log",
+                     "진행 확인 sh ~/.tcgen/tcrun status, 멈추기 sh ~/.tcgen/tcrun stop, 취소 sh ~/.tcgen/tcrun cancel",
+                     "[공통 규칙]", "[ESX 호스트 esx01] 케이스 1개", "[ESX 호스트 없음] 케이스 1개",
+                     "켬인 VM 은 표의 순서대로 하나씩 켠다. VM 마다 켜기 작업, 1GB page backing 완료",
+                     "마지막 VM 의 준비가 끝나고 10분 뒤에 잡을 시작한다", "잡 시작 5분 전에 시작하고",
+                     "   VM 전원: esx01ev01 켬, esx01ev02 켬, esx01ev03 켬, esx01ev04 켬",
+                     "   시작: 자동. 이 ESX 호스트의 첫 잡이라 준비가 끝나는 대로",
+                     "     - esx01ev02 job_b4 (프로세스 이름 run_b.sh -n 4): /home/tester/bench/run_b.sh -n 4 -tag x%y",
+                     "     - ESX 호스트 /Numa/LocalityWeightActionAffinity = 0", "     - esx01ev01 numa.nodeAffinity (이 키의 줄을 삭제)",
+                     '     - esx01ev01 SCHED.MEM.PIN = "FALSE"', "   모니터링 중지:", "   최대 대기: 12:00", "   최대 대기: 제한 없음"):
             self.assertIn(word, view)
-        self.assertNotIn("esx01ev04", view, "아무것도 지정하지 않은 VM 은 그 케이스의 VM 이 아님")
+        self.assertEqual(view.count("[공통 규칙]"), 1, "공통 규칙은 한 번만")
+        self.assertNotIn("    설정: 없음", view.split("[ESX 호스트 없음]")[1], "ESX 호스트가 없는 케이스는 설정 줄을 뺌")
         view0 = gen(self.two(), st=settings(seq_settle_min=0))["plan_view"]
-        self.assertIn("따로 기다리지 않는다", view0)
+        self.assertIn("- 켠 뒤 대기: 없음(설정값 0분).", view0)
+        viewd = gen(self.two(), st=settings(jump_dir="/data/tcgen/"))["plan_view"]
+        self.assertIn("점프 VM 작업 폴더 /data/tcgen,", viewd)
+        self.assertIn("취소 sh /data/tcgen/tcrun cancel", viewd)
 
     def test_settle_setting_goes_into_the_plan(self):
         self.assertIn("SET SETTLE_MIN 10\n", gen(self.two())["plan"])
@@ -626,7 +642,7 @@ class SettingsAndDataTests(unittest.TestCase):
         return snap
 
     def test_names_differ_from_v1(self):
-        self.assertEqual(core.VERSION, "2.5")
+        self.assertEqual(core.VERSION, "2.6")
         for k in self.keys:
             os.environ.pop(k, None)
         self.assertEqual(os.path.basename(core.default_data_dir()), "tcgen2_data")
@@ -740,11 +756,11 @@ class SeqStartTests(unittest.TestCase):
         self.assertIn("SET GAP_MIN 30", lines)
         self.assertLess(lines.index("MAXWAIT 001 0"), lines.index("START 001 %d 2026-11-16 15:00" % int(time.mktime(t1.timetuple()))))
         view = res["plan_view"]
-        self.assertIn("시작 시각(지정): 잡을 2026-11-16 15:00 에 시작한다", view)
-        self.assertIn("시작 시각(자동): 앞 케이스의 잡이 끝난 시각에서 30분 이상 지난 뒤에 잡을 시작한다", view)
+        self.assertIn("   시작: 지정 2026-11-16 15:00. 준비(설정, VM 전원)는 2026-11-16 14:00 부터", view)
+        self.assertIn("   시작: 자동. 앞 케이스의 잡이 끝나고 30분 뒤", view)
         view0 = gen([case("a"), case("b")], st=settings(seq_gap_min=0))["plan_view"]
-        self.assertIn("시작 시각(자동): 앞 케이스가 없으므로 준비가 끝나는 대로 시작한다", view0)
-        self.assertIn("시작 시각(자동): 앞 케이스가 끝나면 이어서 시작한다(케이스 사이 간격 0분)", view0)
+        self.assertIn("   시작: 자동. 이 ESX 호스트의 첫 잡이라 준비가 끝나는 대로", view0)
+        self.assertIn("   시작: 자동. 앞 케이스가 끝나면 바로", view0)
 
     def test_errors_and_warnings(self):
         res = gen([case("bad", seq_start="soon")])
@@ -763,6 +779,54 @@ class SeqStartTests(unittest.TestCase):
         self.assertNotIn("START ", res["plan"])
         applied = gen([case("done", seq_start="2026-11-16 09:00", applied=True), case("next")])
         self.assertEqual(applied["errors"], [], "적용 체크한 케이스의 지난 시각은 보지 않음")
+
+    def test_start_times_nearer_than_the_spacing_are_an_error(self):
+        """모든 잡 시작은 서로 '잡 시작 최소 간격'(기본 5분) 이상 떨어진다: ESX 호스트가 달라도 더 가까운 시작 시각은 오류."""
+        res = gen([case("a1", seq_start="18:00"), case("b1", esx="esx02", seq_start="18:00")])
+        self.assertTrue(any(e.startswith("2번째 케이스 b1") and "1번째 케이스 a1 의 시작 시각 2026-11-16 18:00:00 과 5분 이상 떨어져 있지 않음" in e
+                            for e in res["errors"]), res["errors"])
+        res = gen([case("a2", seq_start="18:00"), case("b2", seq_start="2026-11-16 18:00:00")])
+        self.assertTrue(any("5분 이상 떨어져 있지 않음" in e for e in res["errors"]), "같은 ESX 호스트도 오류. 적는 형식이 달라도 같은 시각")
+        res = gen([case("a3", seq_start="18:00"), case("b3", esx="esx02", seq_start="18:04")])
+        self.assertTrue(any("5분 이상 떨어져 있지 않음" in e for e in res["errors"]), "4분 차이는 오류")
+        res = gen([case("a3", seq_start="18:00"), case("b3", esx="esx02", seq_start="18:05"), case("c3", esx="esx02")])
+        self.assertEqual(res["errors"], [], "5분 차이는 됨. 자동인 케이스는 실행할 때 다른 잡과 5분 이상 떨어진 시각을 고른다")
+        self.assertIn("모든 잡 시작은 서로 5분 이상 떨어진다(다른 ESX 호스트, 이 점프 VM 의 다른 실행 포함)", res["plan_view"])
+        self.assertIn("SET SPACING_MIN 5\n", res["plan"])
+        res = gen([case("a5", seq_start="18:00"), case("b5", esx="esx02", seq_start="18:05")], st=settings(seq_start_spacing_min=10))
+        self.assertTrue(any("10분 이상 떨어져 있지 않음" in e for e in res["errors"]), "간격 설정을 따른다")
+        res = gen([case("a4", seq_start="18:00", applied=True), case("b4", esx="esx02", seq_start="18:00")])
+        self.assertEqual(res["errors"], [], "적용 체크한 케이스는 보지 않음")
+        res = gen([case("a6")], st=settings(seq_start_spacing_min=0))
+        self.assertTrue(any("잡 시작 최소 간격 분" in e for e in res["errors"]), "간격은 1분 이상")
+
+    def test_power_off_vm(self):
+        """VM 행의 전원 칸이 끔이면 그 VM 은 케이스 동안 끈다. plan 에 OFF 줄, 실행 계획에 끄는 설명."""
+        c = case("off1", vms=[vm("esx01ev01", "job_a"), vm("esx01ev02", power="off")])
+        res = gen([c])
+        self.assertEqual(res["errors"], [])
+        self.assertIn("VM 001 esx01ev02 esx01ev02\nOFF 001 esx01ev02\n", res["plan"])
+        self.assertIn("   VM 전원: esx01ev01 켬, esx01ev02 끔", res["plan_view"])
+        self.assertIn("끔인 VM 은 끈다(게스트 종료, 10분 안에 꺼지지 않으면 전원 끄기)", res["plan_view"])
+        bad = gen([case("off2", vms=[vm("esx01ev01", "job_a", power="off")])])
+        self.assertTrue(any("전원 끔인데 잡이나 모니터링이 있음" in e for e in bad["errors"]), bad["errors"])
+        noesx = gen([case("off3", esx="", vms=[vm("vm-a", "job_a"), vm("vm-b", power="off")])])
+        self.assertTrue(any("VM 전원 끔에는 ESX 호스트가 있어야" in e for e in noesx["errors"]), noesx["errors"])
+        only = gen([case("off4", vms=[vm("esx01ev01", power="off")])])
+        self.assertEqual(only["errors"], [], "끌 VM 만 있는 케이스도 된다(VM 을 끄고 다음 케이스로)")
+        self.assertIn("   시작: 잡 없음. 설정과 VM 전원만 맞추고 다음 케이스로 넘어간다.", only["plan_view"])
+
+    def test_prepare_time_before_a_start_time(self):
+        """시작 시각을 적은 케이스는 그 시각 '시작 시각 전 준비 분'(기본 60분) 전에 설정 적용과 VM 전원 맞추기를 시작한다."""
+        res = gen([case("p1", seq_start="20:00"), case("p2")])
+        self.assertIn("SET PREP_LEAD_MIN 60\n", res["plan"])
+        self.assertIn("   시작: 지정 2026-11-16 20:00. 준비(설정, VM 전원)는 2026-11-16 19:00 부터", res["plan_view"])
+        self.assertIn("설정 적용과 VM 전원 맞추기는 그 시각 60분 전에 시작한다", res["plan_view"])
+        res = gen([case("p3", seq_start="20:00")], st=settings(seq_prep_lead_min=0))
+        self.assertIn("SET PREP_LEAD_MIN 0\n", res["plan"])
+        self.assertIn("   시작: 지정 2026-11-16 20:00\n", res["plan_view"], "준비 0분이면 준비 시각을 적지 않음")
+        self.assertIn("설정 적용과 VM 전원 맞추기는 차례가 오는 대로 한다", res["plan_view"])
+        self.assertEqual(core.DEFAULT_SETTINGS["seq_prep_lead_min"], 60)
 
     def test_time_mode_ignores_the_start_time_of_sequence_mode(self):
         c = case("t1", seq_start="soon")
@@ -797,7 +861,7 @@ class CaseFileTests(unittest.TestCase):
 
     def spr_case(self):
         c = case("spr-base", esx="spr01", vms=[vm("spr01ev01", "job_a", ["guest_perf", "guest_nostop"], ["lpage_1g_on", "latency_high"], end_ref=True),
-                                               vm("spr01ev02", "job_b4"), vm("spr01ev03")],
+                                               vm("spr01ev02", "job_b4"), vm("spr01ev03", power="off")],
                  esx_monitors=["host_mon"], esx_profiles=["ht_wholecore_1"], applied=True, max_wait="12:00")
         c.update(desc='SPR 기준, "따옴표" 와 쉼표', group="g-spr", interval="1:30", start="2026-11-20 10:00:00", stop_mode="manual",
                  stop_time="2026-11-20 18:00:00", end_time="2026-11-20 11:50:00", seq_start="10:00")
@@ -832,9 +896,12 @@ class CaseFileTests(unittest.TestCase):
         self.assertEqual((first["적용"], first["케이스 이름"], first["ESX 호스트"], first["모니터링"], first["설정"], first["최대 대기"],
                           first["모니터링 중지"], first["잡 종료 (리포트)"], first["시작 시각 (순서 실행)"]),
                          ("예", "spr-base", "spr01", "host_mon", "ht_wholecore_1", "12:00", "직접 입력", "2026-11-20 11:50:00", "10:00"))
-        self.assertEqual(rows[0][-1], "시작 시각 (순서 실행)", "새 열은 맨 뒤 (이 열이 없는 예전 파일도 읽힌다)")
-        old = "\r\n".join(",".join(r[:-1]) for r in csv.reader(io.StringIO(core.cases_to_csv([case("old-file")])))) + "\r\n"
+        self.assertEqual(rows[0][-2:], ["시작 시각 (순서 실행)", "전원"], "새 열은 맨 뒤 (이 열이 없는 예전 파일도 읽힌다)")
+        old = "\r\n".join(",".join(r[:-2]) for r in csv.reader(io.StringIO(core.cases_to_csv([case("old-file")])))) + "\r\n"
         self.assertEqual(core.cases_from_csv(old)[0]["seq_start"], "", "시작 시각 열이 없는 파일은 자동으로 읽는다")
+        self.assertEqual(core.cases_from_csv(old)[0]["vms"][0]["power"], "on", "전원 열이 없는 파일의 VM 은 켬")
+        self.assertEqual([dict(zip(rows[0], r))["전원"] for r in rows[1:5]], ["", "켬", "켬", "끔"], "케이스 행은 비우고 VM 행은 켬, 끔")
+        self.assertEqual(want[0]["vms"][2]["power"], "off")
         v1 = dict(zip(rows[0], rows[2]))
         self.assertEqual((v1["VM 이름"], v1["잡"], v1["모니터링"], v1["설정"], v1["종료 기준 VM"]),
                          ("spr01ev01", "job_a", "guest_perf; guest_nostop", "lpage_1g_on; latency_high", "기준"))
@@ -857,7 +924,8 @@ class CaseFileTests(unittest.TestCase):
         got = core.cases_from_csv(text)
         self.assertEqual([(c["name"], c["applied"], c["esx_profiles"]) for c in got], [("c1", True, ["p1", "p2"]), ("c2", False, [])],
                          "열 순서가 달라도 머리글 이름으로 읽고, 모르는 열과 빈 줄은 건너뜀")
-        self.assertEqual(got[0]["vms"], [{"name": "vm1", "job": "job_a", "monitors": [], "end_ref": False, "profiles": ["a;b", "c"]}],
+        self.assertEqual(got[0]["vms"], [{"name": "vm1", "job": "job_a", "monitors": [], "end_ref": False, "profiles": ["a;b", "c"],
+                                          "power": "on"}],
                          "이름에 ; 이 있으면 JSON 목록으로 적고 읽는다")
         self.assertEqual(core._join_names(["a;b", "c"]), '["a;b", "c"]')
         self.assertEqual(core.cases_from_csv(""), [])
@@ -1076,3 +1144,57 @@ class JumpFileTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class JumpDirTests(unittest.TestCase):
+    """점프 VM 작업 폴더(사용자 요청 2026-11-16 "tcgen 실행 위치 바꿔야되겠어.. 계정홈폴더로하니까 홈폴더 용량제한있음")."""
+
+    def test_default_folder_keeps_the_v14_files(self):
+        files = dict(core.jump_files())
+        self.assertEqual(files["askpass"], 'cat "$HOME/.tcgen/vmpw"\n')
+        self.assertEqual(files["vmssh"], "".join(x + "\n" for x in core.VMSSH_LINES), "기본 폴더의 vmssh 는 v1.4 와 같음")
+        self.assertEqual(files["setpw"], "".join(x + "\n" for x in core.SETPW_LINES))
+        self.assertIn("-o LogLevel=ERROR -o UserKnownHostsFile=$HOME/.tcgen/known_hosts", files["esxssh"],
+                      "ESX 접속은 로그인 배너를 출력하지 않고 known_hosts 를 작업 폴더에 둔다")
+        self.assertNotIn("copied:", core.seq_setup_block(), "기본 폴더이면 복사 줄이 없음")
+
+    def test_other_folder(self):
+        files = dict(core.jump_files("/data/tcgen"))
+        self.assertEqual(files["askpass"], 'cat "/data/tcgen/vmpw"\n')
+        self.assertTrue(files["vmssh"].startswith('SSH_ASKPASS="/data/tcgen/askpass";'))
+        self.assertTrue(files["setpw"].startswith("D=/data/tcgen\n"))
+        self.assertIn('O="-i /data/tcgen/id_esx ', files["esxssh"])
+        self.assertIn("usage: sh /data/tcgen/esxssh", files["esxssh"])
+        self.assertIn("D=/data/tcgen\n", files["postsetup"])
+        self.assertIn("sh /data/tcgen/setpw", files["postsetup"])
+        self.assertEqual(dict(core.jump_files("~/work/tc"))["askpass"], 'cat "$HOME/work/tc/vmpw"\n')
+        a = core.hd_unescape(core.seq_setup_block("/data/tcgen"))
+        self.assertIn("D=/data/tcgen; mkdir -p $D/runs", a)
+        self.assertIn('if [ ! -s $D/$F ] && [ -s $HOME/.tcgen/$F ]; then cp -p $HOME/.tcgen/$F $D/$F', a,
+                      "~/.tcgen 의 키와 비밀번호를 새 폴더로 복사(ESX 에 키를 다시 등록하지 않게)")
+        self.assertTrue(a.endswith("TCSETUP\nsh /data/tcgen/postsetup\n"))
+
+    def test_blocks_use_the_folder(self):
+        st = settings(jump_dir="/data/tcgen/")
+        res = core.generate([case("d1")], RUN, MON, st, now=NOW, write=False, profiles=PROF)
+        self.assertEqual(res["errors"], [])
+        self.assertEqual(res["jump_dir"], "/data/tcgen")
+        for blk in (res["check"], res["run"]):
+            self.assertIn("D=/data/tcgen; R=\\$D/runs/%s" % res["run_id"], blk)
+        self.assertIn("sh /data/tcgen/vmssh esx01ev01 << TCEOF", res["vm_wipe"])
+        self.assertIn("sh /data/tcgen/postsetup", res["setup"])
+        res0 = core.generate([case("d1")], RUN, MON, settings(), now=NOW, write=False, profiles=PROF)
+        self.assertIn("D=\\$HOME/.tcgen; R=\\$D/runs/", res0["check"])
+        self.assertIn("sh ~/.tcgen/vmssh esx01ev01 << TCEOF", res0["vm_wipe"])
+        self.assertIn("Check the free space and quota of \\$D", res0["run"])
+
+    def test_bad_folder(self):
+        for bad in ("data/tcgen", "/", "~", "~/a b", "~/x/../y", "/data/./t", "/데이터"):
+            res = core.generate([case("d1")], RUN, MON, settings(jump_dir=bad), now=NOW, write=False, profiles=PROF)
+            self.assertTrue(any("점프 VM 작업 폴더" in e for e in res["errors"]), (bad, res["errors"]))
+        self.assertEqual(core.jump_dir({}), "~/.tcgen")
+        self.assertEqual(core.jump_dir({"jump_dir": " /data/t/ "}), "/data/t")
+        self.assertEqual(core.DEFAULT_SETTINGS["jump_dir"], "")
+        self.assertEqual(core.jump_log_dir({"jump_dir": "/data/t/"}), "/data/t/log", "로그 폴더를 비우면 작업 폴더 아래 log")
+        self.assertEqual(core.jump_log_dir({"jump_dir": "/data/t", "jump_log_dir": "/x"}), "/x")
+        self.assertEqual(core.jump_log_dir({}), "~/tcgen_log")

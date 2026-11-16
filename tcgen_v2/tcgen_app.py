@@ -23,7 +23,7 @@ TITLE = "테스트 실행 명령 생성기 v%s" % core.VERSION
 NONE_JOB = core.NONE_JOB
 MODE_LABELS = {"seq": "순서 실행", "time": "시각 지정"}
 SEQ_HIDE = ("interval", "start", "mon_start", "mon_stop", "end_time")      # 순서 실행에서 숨기는 탭 4 열
-TIME_HIDE = ("prof", "max_wait", "seq_start")                               # 시각 지정에서 숨기는 탭 4 열
+TIME_HIDE = ("power", "prof", "max_wait", "seq_start")                      # 시각 지정에서 숨기는 탭 4 열
 
 COLORS = dict(bg="#f3f5f8", card="#ffffff", line="#d5dbe3", head="#e8edf4", ink="#1f2937", mut="#6b7280",
               blue="#2a6fd6", blue_d="#1f5bb5", green="#1f9d6b", green_d="#17845a", purple="#7a4fbf", purple_d="#6540a3",
@@ -434,16 +434,19 @@ class App(object):
         self.v_mode = tk.StringVar(value=MODE_LABELS[self.settings["run_mode"]])
         self.v_jlog = tk.StringVar(value=self.settings.get("jump_log_dir", ""))
         self.v_addr = tk.StringVar(value=self.settings.get("esx_addr", ""))
+        self.v_jdir = tk.StringVar(value=self.settings.get("jump_dir", ""))     # 순서 실행: 점프 VM 작업 폴더
         self.v_settle = tk.StringVar(value=str(self.settings["seq_settle_min"]))
         self.v_gap = tk.StringVar(value=str(self.settings["seq_gap_min"]))      # 순서 실행: 케이스 사이 간격(분)
         self.v_poll = tk.StringVar(value=str(poll_minutes(self.settings["seq_poll_sec"])))   # 순서 실행: 잡 종료 확인 간격(분)
+        self.v_spacing = tk.StringVar(value=str(self.settings["seq_start_spacing_min"]))   # 순서 실행: 잡 시작 최소 간격(분)
+        self.v_prep = tk.StringVar(value=str(self.settings["seq_prep_lead_min"]))          # 순서 실행: 시작 시각 전 준비(분)
         self.v_cfile = tk.StringVar()           # 지금 쓰는 테스트 케이스 파일 (보여 주기만 한다)
         self.v_status = tk.StringVar()
         self.v_esx_host = tk.StringVar()
         self.build()
         self.apply_mode()
         for v in (self.v_record, self.v_log, self.v_user, self.v_mon, self.v_stop, self.v_jlog, self.v_addr, self.v_settle, self.v_gap,
-                  self.v_poll):
+                  self.v_poll, self.v_spacing, self.v_prep, self.v_jdir):
             v.trace_add("write", self._settings_changed) if hasattr(v, "trace_add") else v.trace("w", self._settings_changed)
         self.update_status()
         for m in self.start_msgs:
@@ -564,9 +567,12 @@ class App(object):
             self.v_mode.set(MODE_LABELS[self.settings["run_mode"]])
             self.v_jlog.set(self.settings.get("jump_log_dir", ""))
             self.v_addr.set(self.settings.get("esx_addr", ""))
+            self.v_jdir.set(self.settings.get("jump_dir", ""))
             self.v_settle.set(str(self.settings["seq_settle_min"]))
             self.v_gap.set(str(self.settings["seq_gap_min"]))
             self.v_poll.set(str(poll_minutes(self.settings["seq_poll_sec"])))
+            self.v_spacing.set(str(self.settings["seq_start_spacing_min"]))
+            self.v_prep.set(str(self.settings["seq_prep_lead_min"]))
             self.refresh_case_file_box()
         finally:
             self.loading = False
@@ -769,26 +775,31 @@ class App(object):
         ttk.Label(self.f_time, text="분 전 (다음 케이스 잡 시작 기준)").pack(side="left")
         self.f_seq = ttk.Frame(row2)             # 순서 실행에서만 보이는 칸
         ttk.Label(self.f_seq, text="분 뒤 잡 시작").pack(side="left", padx=(0, px(18)))
-        ttk.Label(self.f_seq, text="VM 다시 켠 뒤 잡 시작까지 최소").pack(side="left")
+        ttk.Label(self.f_seq, text="VM 켠 뒤 잡 시작까지 최소").pack(side="left")
         ttk.Spinbox(self.f_seq, from_=0, to=240, width=4, textvariable=self.v_settle).pack(side="left", padx=px(6))
         ttk.Label(self.f_seq, text="분").pack(side="left")
-        self.row_seq2 = ttk.Frame(sf)            # 순서 실행에서만 보이는 줄: 케이스 사이 간격, 잡 종료 확인 간격
-        ttk.Label(self.row_seq2, text="케이스 사이 간격").pack(side="left")
-        ttk.Spinbox(self.row_seq2, from_=0, to=1440, width=5, textvariable=self.v_gap).pack(side="left", padx=px(6))
-        ttk.Label(self.row_seq2, text="분").pack(side="left", padx=(0, px(18)))
-        ttk.Label(self.row_seq2, text="잡 종료 확인 간격").pack(side="left")
-        ttk.Spinbox(self.row_seq2, from_=1, to=1440, width=5, textvariable=self.v_poll).pack(side="left", padx=px(6))
-        ttk.Label(self.row_seq2, text="분").pack(side="left")
-        ttk.Label(self.row_seq2, text="잡이 실행되는 동안 VM 에 접속해 프로세스를 찾는 주기. 잡 시작 1분 뒤 한 번 확인하고 그 뒤로는 이 간격으로 확인한다",
-                  style="Hint.TLabel").pack(side="left", padx=px(12))
+        self.row_seq2 = ttk.Frame(sf)            # 순서 실행에서만 보이는 줄: 케이스 사이 간격, 잡 시작 최소 간격, 준비, 잡 종료 확인 간격
+        for label, var, low, unit in (("케이스 사이 간격", self.v_gap, 0, "분"), ("잡 시작 최소 간격", self.v_spacing, 1, "분"),
+                                      ("시작 시각 준비", self.v_prep, 0, "분 전"), ("잡 종료 확인 간격", self.v_poll, 1, "분")):
+            ttk.Label(self.row_seq2, text=label).pack(side="left")
+            ttk.Spinbox(self.row_seq2, from_=low, to=1440, width=5, textvariable=var).pack(side="left", padx=px(6))
+            ttk.Label(self.row_seq2, text=unit).pack(side="left", padx=(0, px(18)))
+        ttk.Label(self.row_seq2, text="뜻은 탭 4 의 [도움말]", style="Hint.TLabel").pack(side="left")
         self.row_seq = ttk.Frame(sf)             # 순서 실행에서만 보이는 줄
         ttk.Label(self.row_seq, text="점프 VM 로그 폴더").grid(row=0, column=0, sticky="w")
         ttk.Entry(self.row_seq, textvariable=self.v_jlog, width=22).grid(row=0, column=1, sticky="ew", padx=(px(6), px(4)))
-        ttk.Label(self.row_seq, text="비우면 ~/tcgen_log", style="Hint.TLabel").grid(row=0, column=2, sticky="w", padx=(0, px(18)))
+        ttk.Label(self.row_seq, text="비우면 ~/tcgen_log (작업 폴더를 적었으면 <작업 폴더>/log)",
+                  style="Hint.TLabel").grid(row=0, column=2, sticky="w", padx=(0, px(18)))
         ttk.Label(self.row_seq, text="ESX 접속 주소").grid(row=0, column=3, sticky="w")
         ttk.Entry(self.row_seq, textvariable=self.v_addr, width=28).grid(row=0, column=4, sticky="ew", padx=(px(6), px(4)))
         ttk.Label(self.row_seq, text="호스트이름=주소 를 ; 로 구분. 비우면 ESX 호스트 이름으로 접속",
                   style="Hint.TLabel").grid(row=0, column=5, sticky="w")
+        ttk.Label(self.row_seq, text="점프 VM 작업 폴더").grid(row=1, column=0, sticky="w", pady=(px(6), 0))
+        ttk.Entry(self.row_seq, textvariable=self.v_jdir, width=22).grid(row=1, column=1, sticky="ew", padx=(px(6), px(4)),
+                                                                        pady=(px(6), 0))
+        ttk.Label(self.row_seq, text="비우면 ~/.tcgen. 진행 스크립트, ssh 키, VM 비밀번호, 실행 기록을 둔다. 홈 폴더 용량이 작으면 "
+                                     "큰 디스크의 폴더를 적고 A 블록을 다시 붙여넣는다(키와 비밀번호는 ~/.tcgen 에서 복사)",
+                  style="Hint.TLabel").grid(row=1, column=2, columnspan=4, sticky="w", pady=(px(6), 0))
         self.row_seq.columnconfigure(1, weight=2)
         self.row_seq.columnconfigure(4, weight=3)
         row3 = ttk.Frame(sf)
@@ -900,23 +911,27 @@ class App(object):
         "진행 스크립트가 설정을 이전 값으로 복원한 뒤 멈춘다.",
     ]
     RESULT_HELP_SEQ = [
-        "A. 점프 VM 최초 1회 설정: 점프 VM 터미널에 처음 한 번 붙여넣는다(생성기를 새 판으로 바꾼 뒤에도 한 번). ~/.tcgen 에 접속 "
-        "스크립트, 진행 스크립트(tcrun), 설정 적용 스크립트를 설치하고 sha256 으로 확인해 OK 또는 FAILED 를 출력한다. "
-        "ESX 접속용 ssh 키가 없으면 만든다.",
+        "A. 점프 VM 최초 1회 설정: 점프 VM 터미널에 처음 한 번 붙여넣는다(생성기를 새 판으로 바꾼 뒤, 작업 폴더를 바꾼 뒤에도 한 번). "
+        "작업 폴더 {D} 에 접속 스크립트, 진행 스크립트(tcrun), 설정 적용 스크립트를 설치하고 sha256 으로 확인해 OK 또는 FAILED 를 "
+        "출력한다. ESX 접속용 ssh 키가 없으면 만든다. 작업 폴더가 ~/.tcgen 이 아니면 ~/.tcgen 의 키와 VM 비밀번호를 복사한다.",
         "A 블록 끝에 나오는 echo '...' >> /etc/ssh/keys-root/authorized_keys 한 줄을 각 ESX 호스트의 root SSH 창에 한 번 붙여넣는다. "
-        "그 뒤 점프 VM 에서 sh ~/.tcgen/esxssh <ESX 호스트> hostname 이 비밀번호를 묻지 않고 호스트 이름을 출력하면 된 것이다. "
-        "이 줄은 sh ~/.tcgen/tcrun key 로 다시 볼 수 있다. ESX 비밀번호는 저장하지 않는다.",
+        "그 뒤 점프 VM 에서 sh {D}/esxssh <ESX 호스트> hostname 이 비밀번호를 묻지 않고 호스트 이름을 출력하면 된 것이다. "
+        "이 줄은 sh {D}/tcrun key 로 다시 볼 수 있다. ESX 비밀번호는 저장하지 않는다.",
         "VM password: 가 나오면 VM 비밀번호를 입력한다(화면에 보이지 않음). 이미 저장돼 있으면 묻지 않는다. "
-        "바꿀 때는 sh ~/.tcgen/setpw 를 실행한다.",
+        "바꿀 때는 sh {D}/setpw 를 실행한다.",
         "P. 점검 블록: 실행 전에 점프 VM 터미널에 붙여넣는다. 아무것도 바꾸지 않고 ESX 키 접속, python3 와 vim-cmd 와 esxcli, "
-        "VM 찾기, 설정의 현재 값과 목표 값, VM 접속과 pgrep, 시계 차이를 출력한다. 마지막 줄이 CHECK RESULT: OK 이면 실행 블록을 붙여넣는다.",
+        "VM 찾기, 설정의 현재 값과 목표 값, VM 마다 지금 전원과 케이스가 원하는 전원(TCGEN-POWER), VM 접속과 pgrep, 시계 차이를 "
+        "출력한다. 마지막 줄이 CHECK RESULT: OK 이면 실행 블록을 붙여넣는다.",
         "S. 실행 블록: 점프 VM 터미널에 붙여넣으면 ESX 호스트별 진행이 백그라운드로 시작된다. 터미널을 닫아도 계속된다. "
-        "설정 값이 현재 값과 다른 케이스에서는 그 케이스의 VM 을 자동으로 종료하고 다시 켠다.",
-        "진행 확인: sh ~/.tcgen/tcrun status. 멈추기: sh ~/.tcgen/tcrun stop (실행 중인 잡은 건드리지 않는다).",
+        "설정 값이 현재 값과 다른 케이스에서는 그 케이스의 VM 을 자동으로 종료하고 다시 켠다. VM 행의 전원 칸이 끔인 VM 은 끄고, "
+        "켬인 VM 은 꺼져 있으면 켠다.",
+        "진행 확인: sh {D}/tcrun status (실행의 모든 ESX 호스트와 각 상태). 멈추기: sh {D}/tcrun stop (실행 중인 잡은 건드리지 "
+        "않는다). 취소: sh {D}/tcrun cancel [ESX 호스트] (진행을 바로 끝내고 등록한 crontab 줄을 지운다. 시작된 모니터링은 중지 "
+        "명령을 실행한다. 실행 중인 잡은 끝내지 않고 목록만 보인다. 적용한 설정은 그대로 둔다).",
         "점프 VM 로그 폴더에 남는 파일: tcrun-<실행 ID>-<ESX 호스트>.log (단계와 시각), -result.csv (케이스별 결과), "
         "-perfreport_cases.csv (성능 리포트 생성기의 케이스 정보 파일. 잡 시작과 종료는 실제 시각).",
         "진행이 중간에 멈추면 로그의 PAUSED 줄에서 이유를 확인하고 고친 뒤, 끝난 케이스를 탭 4 에서 적용 체크하고 다시 생성해 "
-        "실행 블록을 붙여넣는다.",
+        "실행 블록을 붙여넣는다. 남은 줄을 모두 지우고 끝내려면 sh {D}/tcrun cancel 을 실행한다.",
         "D. VM crontab 전체 삭제: 필요할 때만 쓴다. VM 의 crontab 을 모두 지운다(tcgen 이 등록하지 않은 줄 포함. 지우기 전 내용은 "
         "각 VM 홈 폴더의 tcgen_crontab_backup-<시각>.txt 에 저장). 진행 중에 붙여넣으면 등록된 줄이 지워져 잡이 시작되지 않는다.",
         "[복사] 를 누르면 그 블록 전체가 클립보드에 들어간다. 점프 VM 터미널에서는 마우스 오른쪽 또는 Shift+Insert 로 붙여넣는다.",
@@ -954,15 +969,24 @@ class App(object):
                 "뒤에 잡을 시작한다. 시각을 적으면 그 시각에 잡을 시작한다. '10:00' 처럼 시:분만 적으면 [명령어 생성] 을 누른 뒤 처음 오는 "
                 "그 시각이고, '2026-11-20 10:00:00' 처럼 날짜까지 적을 수도 있다. 예: 첫 케이스에 10:00 을 적고 나머지를 비우면 첫 케이스는 "
                 "10시에, 나머지는 앞 케이스가 끝난 뒤 차례로 시작한다." % int(st.get("seq_gap_min", 30)),
-                "시각을 적은 케이스에는 케이스 사이 간격을 적용하지 않는다. 설정 적용과 VM 켜기는 그 시각 전에 미리 한다. 앞 케이스가 그때까지 "
-                "끝나지 않았거나 VM 을 다시 켠 뒤의 대기가 남았으면 가능한 가장 이른 시각에 시작하고 로그에 WARN 을 남긴다.",
-                "VM 행(└): VM 이름, 잡, 그 VM 의 모니터링, 설정(대상이 VM 인 프로파일), 종료 기준 VM",
-                "한 케이스의 진행 순서: 설정 적용, 모니터링 시작, %d분 뒤 잡 시작(잡이 있는 모든 VM 이 같은 분에 시작), 잡 종료 확인, "
-                "모니터링 중지, crontab 줄 삭제. 그 뒤 다음 케이스로 넘어간다." % ld[0],
-                "설정 적용: 목표 값이 현재 값과 모두 같으면 VM 을 끄지 않는다. 하나라도 다르면 그 케이스의 VM 을 종료하고 값을 바꾼 뒤 "
-                "표의 순서대로 하나씩 켠다. 앞 VM 에 ssh 로그인이 되는 것을 확인한 뒤 다음 VM 을 켠다.",
-                "VM 을 다시 켠 경우 잡은 마지막 VM 의 ssh 로그인을 확인한 시각에서 %d분 이상 지난 뒤에 시작한다. "
-                "이 값은 설정 영역의 'VM 다시 켠 뒤 잡 시작까지 최소' 칸에서 바꾼다." % int(st.get("seq_settle_min", 10)),
+                "시각을 적은 케이스: 그 시각 %d분 전(설정 영역의 '시작 시각 준비')에 설정 적용과 VM 전원 맞추기를 시작한다. 케이스 사이 간격은 "
+                "적용하지 않는다. 앞 케이스가 그때까지 끝나지 않았거나 VM 을 켠 뒤의 대기가 남았으면 가능한 가장 이른 시각에 시작하고 로그에 "
+                "WARN 을 남긴다." % int(st.get("seq_prep_lead_min", 60)),
+                "잡 시작 최소 간격: 모든 잡 시작은 서로 %d분 이상 떨어진다. ESX 호스트가 달라도, 이 점프 VM 에서 도는 다른 실행과도 같다. "
+                "자동인 케이스의 잡 시작이 다른 잡 시작과 가까우면 그 잡 시작 %d분 뒤로 옮기고 로그에 spacing 줄을 남긴다. 시각을 적은 "
+                "케이스끼리 이보다 가까우면 [명령어 생성] 이 오류를 낸다." % (int(st.get("seq_start_spacing_min", 5)),
+                                                          int(st.get("seq_start_spacing_min", 5))),
+                "VM 행(└): VM 이름, 전원(켬, 끔), 잡, 그 VM 의 모니터링, 설정(대상이 VM 인 프로파일), 종료 기준 VM",
+                "한 케이스의 진행 순서: 설정 적용, VM 전원 맞추기, 모니터링 시작, %d분 뒤 잡 시작(잡이 있는 모든 VM 이 같은 분에 시작), "
+                "잡 종료 확인, 모니터링 중지, crontab 줄 삭제. 그 뒤 다음 케이스로 넘어간다." % ld[0],
+                "설정 적용: 목표 값이 현재 값과 모두 같으면 VM 을 끄지 않는다. 하나라도 다르면 그 케이스의 VM 을 종료하고 값을 바꾼다.",
+                "VM 전원: ESX 호스트가 있는 케이스에서는 이름이 있는 VM 행이 모두 그 케이스의 VM 이다. 전원 칸이 끔인 VM 은 켜져 있으면 "
+                "끈다(게스트 종료, %d분 안에 꺼지지 않으면 전원 끄기). 켬인 VM 은 표의 순서대로 하나씩 확인해 꺼져 있으면 켠다. VM 마다 켜기 "
+                "작업이 끝나고, 1GB page 를 쓰는 VM(sched.mem.lpage.enable1GPage)은 1GB page backing 수가 메모리 GB 수와 같아지고, "
+                "ssh 로그인이 되면 다음 VM 으로 넘어간다. backing 수가 늘지 않으면 진행을 멈춘다." % int(st.get("seq_shutdown_wait_min", 10)),
+                "VM 을 켠 케이스의 잡은 마지막으로 켠 VM 의 준비(1GB page backing 확인, ssh 로그인)가 끝난 시각에서 %d분 이상 지난 뒤에 "
+                "시작한다. 모니터링은 잡 시작 %d분 전에 시작한다. 켜져 있던 VM 만 쓰면 이 대기는 없다. 이 값은 설정 영역의 'VM 켠 뒤 "
+                "잡 시작까지 최소' 칸에서 바꾼다." % (int(st.get("seq_settle_min", 10)), ld[0]),
                 "잡 종료 확인: 탭 1 의 프로세스 이름으로 각 VM 에서 프로세스를 찾는다. 잡이 있는 모든 VM 에서 한 번 이상 보인 뒤 "
                 "%d회 연속으로 없으면 종료로 판정한다. 잡 시작 뒤 %d분 안에 한 번도 보이지 않으면 진행을 멈춘다."
                 % (int(st.get("seq_gone_count", 3)), int(st.get("seq_start_wait_min", 10))),
@@ -973,7 +997,7 @@ class App(object):
                 "설정 칸: 두 번 누르면 탭 3 의 프로파일을 고르는 창이 열린다. 여러 개를 고르면 탭 3 의 순서대로 합치고, 같은 키가 겹치면 "
                 "아래쪽 프로파일의 값을 쓴다.",
                 "최대 대기: 잡 시작부터 이 시간(시간:분, 예 12:00)이 지나도 잡이 끝나지 않으면 진행을 멈춘다. 비우면 제한이 없다.",
-                "잡, 모니터링, 설정을 하나도 지정하지 않은 VM 행은 그 케이스에서 쓰지 않는다. 끄지도 켜지도 않는다.",
+                "ESX 호스트가 없는 케이스는 VM 전원을 다루지 않고, 잡, 모니터링, 설정이 있는 VM 행만 쓴다. 그 VM 은 켜져 있어야 한다.",
                 "잡 없이 설정만 지정한 케이스는 설정만 적용하고 다음 케이스로 넘어간다. 모니터링만 있고 잡이 없는 케이스는 오류다.",
                 "[명령어 생성] 을 누르면 넣을 케이스를 고르는 창이 열린다. 처음에는 적용 체크하지 않은 케이스가 골라져 있다. "
                 "진행이 중간에 멈추면 끝난 케이스를 적용 체크하고 다시 생성해 나머지를 이어서 실행한다.",
@@ -1083,6 +1107,7 @@ class App(object):
         job_values = lambda: [NONE_JOB] + [r["name"] for r in self.run_cmds if r.get("name")]
         cols = [dict(key="name", title="케이스 / VM", width=205), dict(key="desc", title="설명", width=160, edit_width=420),
                 dict(key="esx", title="ESX 호스트", width=85),
+                dict(key="power", title="전원", width=50, values=lambda: [core.POWER_LABELS["on"], core.POWER_LABELS["off"]]),
                 dict(key="job", title="잡", width=95, values=job_values),
                 dict(key="mon", title="모니터링", width=180, popup=self.edit_monitors, stretch=True),
                 dict(key="prof", title="설정", width=200, popup=self.edit_profiles),
@@ -1196,7 +1221,8 @@ class App(object):
         f = self.tab_page("5. 생성 결과")
         px = self.px
         tb = self.toolbar(f)
-        self.help_button(tb, "5. 생성 결과", lambda: self.RESULT_HELP_SEQ if self.mode() == "seq" else self.RESULT_HELP)
+        self.help_button(tb, "5. 생성 결과", lambda: [x.replace("{D}", self.jump_dir_text()) for x in self.RESULT_HELP_SEQ]
+                         if self.mode() == "seq" else self.RESULT_HELP)
         self.result_hint = self.hint(tb, "")
         self.result_hint.pack(side="left", fill="x", expand=True)
         self.res_text = self.text_box(f, height=5, wrap="word", font=self.small)
@@ -1220,7 +1246,10 @@ class App(object):
                                          esx=True)
         self.blk_wipe = self._block_panel(pw, "D. VM crontab 전체 삭제", lambda: self.copy_block("wipe"))
         # 순서 실행에서만 보이는 실행 계획: 케이스마다 점프 VM 이 하는 일과 등록할 명령
-        self.lf_plan = ttk.LabelFrame(area, text="실행 계획 (케이스별 단계와 등록될 명령)", padding=(px(8), px(4)))
+        self.lf_plan = ttk.LabelFrame(area, text="실행 계획 (공통 규칙과 케이스별 값)", padding=(px(8), px(4)))
+        hb = ttk.Frame(self.lf_plan)
+        hb.pack(fill="x")
+        ttk.Button(hb, text="크게 보기", command=self.open_plan_window).pack(side="right")
         body = ttk.Frame(self.lf_plan)
         body.pack(fill="both", expand=True)
         self.plan_text = self.text_box(body, wrap="none", font=self.small, height=8)
@@ -1233,6 +1262,44 @@ class App(object):
         body.rowconfigure(0, weight=1)
         body.columnconfigure(0, weight=1)
         make_readonly(self.plan_text)
+        self.tag_plan(self.plan_text)
+
+    def tag_plan(self, t):
+        t.tag_configure("plan_head", font=self.bold, foreground=COLORS["blue_d"])
+        t.tag_configure("plan_case", font=self.bold)
+
+    def show_plan(self, t, text):
+        """실행 계획 글을 넣고 제목 줄([...])과 케이스 줄(1. 이름)을 굵게 한다."""
+        set_text(t, text)
+        for n, line in enumerate(text.split("\n"), 1):
+            if line.startswith("["):
+                t.tag_add("plan_head", "%d.0" % n, "%d.end" % n)
+            elif re.match(r"^\d+\. ", line):
+                t.tag_add("plan_case", "%d.0" % n, "%d.end" % n)
+
+    def open_plan_window(self):
+        """실행 계획을 큰 창으로 본다(줄을 창 너비에 맞춰 접는다)."""
+        text = self.plan_text.get("1.0", "end-1c")
+        if not text.strip():
+            messagebox.showinfo(TITLE, "실행 계획이 없다. 탭 4 에서 [명령어 생성] 을 누르면 만들어진다.", parent=self.root)
+            return
+        top = tk.Toplevel(self.root)
+        top.title("실행 계획")
+        top.geometry("%dx%d" % (self.px(1100), self.px(760)))
+        body = ttk.Frame(top, padding=self.px(8))
+        body.pack(fill="both", expand=True)
+        t = self.text_box(body, wrap="word", font=tkfont.nametofont("TkDefaultFont"), height=30)
+        ys = ttk.Scrollbar(body, orient="vertical", command=t.yview)
+        t.configure(yscrollcommand=ys.set)
+        t.grid(row=0, column=0, sticky="nsew")
+        ys.grid(row=0, column=1, sticky="ns")
+        body.rowconfigure(0, weight=1)
+        body.columnconfigure(0, weight=1)
+        self.tag_plan(t)
+        self.show_plan(t, text)
+        make_readonly(t)
+        ttk.Button(top, text="닫기", command=top.destroy).pack(side="right", padx=self.px(8), pady=(0, self.px(8)))
+        self.plan_window = top
 
     def _block_panel(self, pw, title, copy_cmd, esx=False):
         px = self.px
@@ -1333,6 +1400,10 @@ class App(object):
             if t is not None:
                 t.finish_edit()
 
+    def jump_dir_text(self):
+        """점프 VM 작업 폴더(화면의 칸, 비우면 ~/.tcgen)."""
+        return core.jump_dir({"jump_dir": self.v_jdir.get()})
+
     def current_settings(self, show_error=True):
         ld = self.leads()
         if ld is None or ld[0] < 0 or ld[1] < 0:
@@ -1345,7 +1416,7 @@ class App(object):
             settle = -1
         if settle < 0:
             if show_error:
-                messagebox.showerror(TITLE, "'VM 다시 켠 뒤 잡 시작까지 최소' 분은 0 이상의 정수로 입력", parent=self.root)
+                messagebox.showerror(TITLE, "'VM 켠 뒤 잡 시작까지 최소' 분은 0 이상의 정수로 입력", parent=self.root)
             return None
         try:
             gap = int(self.v_gap.get())
@@ -1363,12 +1434,29 @@ class App(object):
             if show_error:
                 messagebox.showerror(TITLE, "'잡 종료 확인 간격' 분은 1 이상의 정수로 입력", parent=self.root)
             return None
+        try:
+            spacing = int(self.v_spacing.get())
+        except ValueError:
+            spacing = 0
+        if spacing < 1:
+            if show_error:
+                messagebox.showerror(TITLE, "'잡 시작 최소 간격' 분은 1 이상의 정수로 입력", parent=self.root)
+            return None
+        try:
+            prep = int(self.v_prep.get())
+        except ValueError:
+            prep = -1
+        if prep < 0:
+            if show_error:
+                messagebox.showerror(TITLE, "'시작 시각 준비' 분은 0 이상의 정수로 입력", parent=self.root)
+            return None
         s = dict(self.settings)
         if poll != poll_minutes(s.get("seq_poll_sec", core.DEFAULT_SETTINGS["seq_poll_sec"])):
             s["seq_poll_sec"] = poll * 60
         s.update(record_csv=self.v_record.get().strip(), log_dir=self.v_log.get().strip(), vm_user=self.v_user.get().strip(),
                  mon_lead_min=ld[0], stop_lead_min=ld[1], run_mode=self.mode(), jump_log_dir=self.v_jlog.get().strip(),
-                 esx_addr=self.v_addr.get().strip(), seq_settle_min=settle, seq_gap_min=gap)
+                 esx_addr=self.v_addr.get().strip(), seq_settle_min=settle, seq_gap_min=gap, seq_start_spacing_min=spacing,
+                 seq_prep_lead_min=prep, jump_dir=self.v_jdir.get().strip())
         return s
 
     # ------------------------------------------------------------ 테스트 케이스 파일 (불러오기, 다른 이름으로 저장, 자동 백업)
@@ -1947,6 +2035,8 @@ class App(object):
         if k is None:
             return c.get(key, "") if key in ("name", "desc", "esx", "interval", "start", "group", "end_time", "max_wait",
                                              "seq_start") else ""
+        if key == "power":
+            return core.POWER_LABELS[v.get("power") or "on"]
         return v.get(key, "") if key in ("name", "job") else ""
 
     def case_kind(self, iid, col):
@@ -1958,7 +2048,8 @@ class App(object):
             return {"name": "entry", "desc": "entry", "esx": "entry", "mon": "popup", "interval": "entry", "start": "entry",
                     "mon_stop": "popup", "group": "entry", "end_time": "entry", "prof": "popup",
                     "max_wait": "entry", "seq_start": "entry"}.get(key, "readonly")
-        return {"name": "entry", "job": "combo", "mon": "popup", "end_ref": "popup", "prof": "popup"}.get(key, "readonly")
+        return {"name": "entry", "job": "combo", "power": "combo", "mon": "popup", "end_ref": "popup",
+                "prof": "popup"}.get(key, "readonly")
 
     def case_check(self, iid):
         i, k, c, v = self._get(iid)
@@ -1990,6 +2081,10 @@ class App(object):
                 return "기준" if v.get("end_ref") else ""
             if key == "prof":
                 return ", ".join(v.get("profiles") or []) or NONE_JOB
+            if key == "power":
+                return core.POWER_LABELS[v.get("power") or "on"]
+            return ""
+        if key == "power":
             return ""
         if key == "prof":
             ep = c.get("esx_profiles") or []
@@ -2115,6 +2210,8 @@ class App(object):
                 v["name"] = t
             elif key == "job":
                 v["job"] = t or NONE_JOB
+            elif key == "power":
+                v["power"] = "off" if t == core.POWER_LABELS["off"] else "on"
         self.mark_cases()
         self.t_case.refresh(iid)
 
@@ -2681,6 +2778,10 @@ class App(object):
                         "점프 VM 로그 폴더: %s\n" % res["jump_log_dir"])
         if any(pc["host_opts"] or any(vm["set"] for vm in pc["vms"]) for pc in res["cases"]):
             t.insert("end", "설정을 적용하는 케이스가 있다. 값이 현재 값과 다르면 그 케이스의 VM 을 자동으로 종료하고 다시 켠다.\n", "warn")
+        offs = ["%s(%s)" % (pc["name"], ", ".join(vm["name"] for vm in pc["vms"] if vm["power"] == "off"))
+                for pc in res["cases"] if any(vm["power"] == "off" for vm in pc["vms"])]
+        if offs:
+            t.insert("end", "전원 끔인 VM 이 있는 케이스: %s. 그 VM 이 켜져 있으면 자동으로 끈다.\n" % ", ".join(offs), "warn")
         if res.get("record_added"):
             t.insert("end", "기존 테스트 기록 CSV 의 머리글 끝에 새 열을 덧붙였음: %s. 덧붙이기 전 원본: %s\n"
                      % (", ".join(res["record_added"]), res.get("record_backup")), "warn")
@@ -2690,7 +2791,7 @@ class App(object):
         set_text(self.blk_vm, res["check"])
         set_text(self.blk_esx, res["run"])
         set_text(self.blk_wipe, res.get("vm_wipe") or "(VM 없음)\n")
-        set_text(self.plan_text, res["plan_view"])
+        self.show_plan(self.plan_text, res["plan_view"])
         self.cb_esx.configure(values=[])
         self.v_esx_host.set("")
 
@@ -2756,6 +2857,9 @@ class App(object):
             if sets:
                 msg += ("\n\n설정을 적용하는 케이스: %s\n값이 현재 값과 다르면 그 케이스의 VM 을 자동으로 종료하고 다시 켠다."
                         % ", ".join(sets[:8]))
+            offs = [pc["name"] for pc in res["cases"] if any(vm["power"] == "off" for vm in pc["vms"])]
+            if offs:
+                msg += "\n\n전원 끔인 VM 이 있는 케이스: %s\n그 VM 이 켜져 있으면 자동으로 끈다." % ", ".join(offs[:8])
             if not messagebox.askyesno(TITLE, msg + "\n\n복사할까요?", parent=self.root):
                 return
         elif which == "vm":
@@ -2771,7 +2875,7 @@ class App(object):
                     msg += "\n\n적용 체크한 케이스 %s 의 줄도 지워진다." % ", ".join(res["wipe_conflicts"])
                 if seq:
                     msg += ("\n\n순서 실행이 진행 중일 때 붙여넣으면 등록된 줄이 지워져 잡이 시작되지 않는다. "
-                            "진행 상태는 sh ~/.tcgen/tcrun status 로 확인한다.")
+                            "진행 상태는 sh %s/tcrun status 로 확인한다." % self.jump_dir_text())
                 if not messagebox.askyesno(TITLE, msg + "\n\n복사할까요?", parent=self.root):
                     return
         else:

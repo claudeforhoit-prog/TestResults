@@ -286,7 +286,7 @@ class AppliedTests(TmpDir):
         self.assertEqual([c["name"] for c in got], ["A", "B"])
         self.assertEqual([c["applied"] for c in got], [True, False])
         self.assertEqual(got[1]["stop_mode"], "none")
-        self.assertEqual(got[0]["vms"], cs[0]["vms"])
+        self.assertEqual(got[0]["vms"], [dict(v, power="on") for v in cs[0]["vms"]], "전원 칸이 없던 VM 은 켬으로 읽는다")
         self.assertEqual(got[0]["esx_monitors"], ["host_mon"])
         with open(os.path.join(self.base, core.CASES_FILE), "w", encoding="utf-8") as f:
             json.dump({"version": 1, "cases": [{"name": "X", "applied": 1, "pvm": "h1ev01",
@@ -483,8 +483,9 @@ class VmTests(TmpDir):
         self.assertTrue(os.path.exists(os.path.join(dest, core.CASES_FILE)), "바꾸기 전 원본을 복사해 둠")
         self.assertEqual(core.cases_file_version(self.base), core.CASES_VERSION)
         c = core.load_cases(self.base)[0]
-        self.assertEqual(c["vms"], [{"name": "esx01ev01", "job": "job_a", "monitors": [], "end_ref": False, "profiles": []},
-                                    {"name": "esx01ev02", "job": "job_b4", "monitors": ["guest_perf"], "end_ref": False, "profiles": []}])
+        self.assertEqual(c["vms"], [{"name": "esx01ev01", "job": "job_a", "monitors": [], "end_ref": False, "profiles": [], "power": "on"},
+                                    {"name": "esx01ev02", "job": "job_b4", "monitors": ["guest_perf"], "end_ref": False, "profiles": [],
+                                     "power": "on"}])
         self.assertEqual(c["esx_monitors"], ["host_mon"])
         self.assertIsNone(core.upgrade_cases_file(self.base), "이미 새 형식이면 다시 바꾸지 않음")
 

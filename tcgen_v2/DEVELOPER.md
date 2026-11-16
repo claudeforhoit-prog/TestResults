@@ -20,7 +20,7 @@ jump/ 의 파일을 고쳤으면 python tools/make_payload.py 를 실행해라.
 | :-- | :-- |
 | `tcgen_core.py` | 화면과 무관한 계산 전부. 앞부분은 v1.4 에서 이어지는 코드(시각 계산, crontab 줄, 블록 A, B, C, D, 기록 CSV, 리포트용 CSV, 데이터 폴더)이고, 뒷부분의 '설정 프로파일' 과 '순서 실행' 절이 v2 에서 더한 코드다. 버전은 `VERSION` |
 | `tcgen_app.py` | 화면(tkinter). 탭 1 실행 명령, 탭 2 모니터링 명령, 탭 3 설정 프로파일, 탭 4 테스트 케이스, 탭 5 생성 결과. 진행 방식에 따라 `apply_mode` 가 열과 칸을 보이거나 숨긴다 |
-| `jump/tcrun.sh` | 점프 VM 의 진행 스크립트(POSIX sh). 설치되면 `~/.tcgen/tcrun` |
+| `jump/tcrun.sh` | 점프 VM 의 진행 스크립트(POSIX sh). 설치되면 `<작업 폴더>/tcrun`(기본 `~/.tcgen/tcrun`). 자기 위치를 작업 폴더(`D`)로 쓴다 |
 | `jump/tcgen_apply.py` | ESX 호스트에서 실행하는 설정 적용 스크립트(Python 3.5 문법, 표준 라이브러리만) |
 | `tcgen_payload.py` | 위 두 파일의 내용을 담은 모듈. `tools/make_payload.py` 가 만든다. 직접 고치지 않는다. exe 로 빌드해도 두 파일의 내용이 함께 들어가게 하려고 모듈로 둔다 |
 | `tools/make_payload.py` | `jump/` 의 두 파일을 `tcgen_payload.py` 로 옮긴다. `--check` 는 같은지만 확인한다 |
@@ -34,7 +34,7 @@ Python 표준 라이브러리만 쓴다. 추가 패키지를 넣지 않는다. P
 | 실행되는 곳 | 코드 | 하는 일 |
 | :-- | :-- | :-- |
 | PC | `tcgen_core.py`, `tcgen_app.py` | 입력을 검증하고 블록과 plan 을 만든다. ssh 를 호출하지 않는다 |
-| 점프 VM | `~/.tcgen/tcrun` | plan 을 읽어 ESX 호스트별로 케이스를 순서대로 진행한다. VM 에는 `vmssh` 와 같은 방법(비밀번호는 `vmpw`, `SSH_ASKPASS`, `setsid`)으로, ESX 에는 `esxssh`(키)로 접속한다 |
+| 점프 VM | `<작업 폴더>/tcrun` | plan 을 읽어 ESX 호스트별로 케이스를 순서대로 진행한다. VM 에는 `vmssh` 와 같은 방법(비밀번호는 `vmpw`, `SSH_ASKPASS`, `setsid`)으로, ESX 에는 `esxssh`(키)로 접속한다 |
 | ESX 호스트 | `/tmp/tcgen/tcgen_apply.py` | 설정 비교와 적용, VM 종료와 켜기, 이전 값으로 복원. `tcrun` 이 호출할 때마다 전송해 저장한다 |
 
 VM 에는 파일을 만들지 않는다. `tcrun` 이 ssh 표준 입력으로 셸 글을 보내 crontab 을 고치고 프로세스를 찾는다.
@@ -43,9 +43,9 @@ VM 에는 파일을 만들지 않는다. `tcrun` 이 ssh 표준 입력으로 셸
 
 1. `build_seq` 가 입력을 검증하고 케이스별 내용(등록할 명령 글, 설정 항목, 프로세스 이름 패턴)을 만든다.
 2. `plan_text` 가 그것을 plan(5절)으로 쓴다. `plan_view` 는 같은 내용을 사람이 읽는 글로 쓴다.
-3. `seq_check_block`, `seq_run_block` 이 plan 을 gzip 뒤 base64 로 블록에 넣는다. 블록은 plan 을 `~/.tcgen/runs/<실행 ID>/plan` 에 풀고 sha256 을 확인한 뒤 `tcrun check` 또는 `tcrun start` 를 부른다.
+3. `seq_check_block`, `seq_run_block` 이 plan 을 gzip 뒤 base64 로 블록에 넣는다. 블록은 plan 을 `<작업 폴더>/runs/<실행 ID>/plan` 에 풀고 sha256 을 확인한 뒤 `tcrun check` 또는 `tcrun start` 를 부른다.
 4. `tcrun start` 가 ESX 호스트마다 `setsid sh tcrun run <plan> <호스트>` 를 백그라운드로 시작한다.
-5. `tcrun run` 은 케이스마다 `apply_settings`, `register`, `wait_job`, `stop_mon` 을 차례로 부르고 로그 폴더에 기록한다.
+5. `tcrun run` 은 케이스마다 준비 시각 대기, `apply_settings`, `power_vms`, `register`, `wait_job`, `stop_mon` 을 차례로 부르고 로그 폴더에 기록한다.
 
 `tcrun` 과 `tcgen_apply.py` 가 주고받는 줄은 `TCGEN-` 로 시작한다. `TCGEN-RESULT <낱말>` 이 결과다(`nochange`, `changed`, `wouldchange`, `poweredon`, `rolledback`, `nothing`, `error <이유>`). VM 과 ESX 에서 보낸 셸 글의 답도 같은 방식이다(`TCGEN-CLOCK`, `TCGEN-CRON`, `TCGEN-PROC`, `TCGEN-LINE`).
 
@@ -71,19 +71,23 @@ VM 에는 파일을 만들지 않는다. `tcrun` 이 ssh 표준 입력으로 셸
 ### 3.3 순서 실행 (사용자 2026-11-15, 2026-11-16 지시)
 
 - 케이스는 ESX 호스트별로 표의 순서대로 진행한다. 호스트끼리는 서로 기다리지 않는다.
-- VM 은 표의 순서대로 하나씩 켠다. 앞 VM 에 ssh 로그인이 되는 것을 확인한 뒤 다음 VM 을 켠다.
+- VM 전원(사용자 요구 2026-11-16 "VM 이 다 꺼져있으면 VM 둘다 완전히 킨다음에 잡 수행해야되는데 하나만 키고 수행함 VM off 설정없을때는 둘다 완전히 순차적으로 (lpage backing 완료되어야해서 다 올라온거 확인한다음) 킨다음 수행", "VM off 해놓고 테스트할때도있어서 테스트 케이스 등록할 때 off 설정도 필요함"): VM 행마다 `power`(`on` 기본, `off`)를 둔다. ESX 호스트가 있는 케이스는 이름이 있는 VM 행을 모두 그 케이스의 VM 으로 본다(v2.5 까지는 잡, 모니터링, 설정이 없는 VM 을 케이스에서 뺐다. 그런 VM 은 꺼져 있어도 켜지 않았다). `off` 인 VM 은 켜져 있으면 끈다. `on` 인 VM 은 표의 순서대로 하나씩 확인해 꺼져 있으면 켜고, 켜기 작업 완료, 1GB page backing 완료, ssh 로그인을 확인한 뒤 다음 VM 으로 넘어간다. 1GB page backing 규칙은 앞선 시험에서 VM 을 켤 때 쓰던 확인 스크립트와 같다: 목표 = `memSize` MB / 1024, 15초마다 읽고 목표에 닿으면 바로 완료, 6번 연속 늘지 않으면 멈춤(실패 수 > 0 이면 failed, 0 이면 stalled). backing 실패로 멈출 때는 설정을 되돌리지 않는다. vsish 노드를 읽지 못하면 WARN 을 남기고 넘어간다. ESX 호스트가 없는 케이스는 전원을 다루지 않는다. `off` 인 VM 에 잡이나 모니터링이 있으면 오류다.
 - 한 케이스에서 잡이 있는 모든 VM 은 같은 분에 잡을 시작한다.
 - 모니터링이 있으면 잡은 모니터링 시작 5분 뒤에 시작한다(설정값 `mon_lead_min`).
 - 기본 프로파일은 `tcgen_core.py` 의 `DEFAULT_PROFILES` 에 있다. 데이터 폴더에 `profiles.json` 이 없을 때만 자동으로 넣고(`load_profiles(base, seed=True)`), [기본 프로파일 추가] 는 표에 없는 이름만 추가한다. 사용자가 고친 행을 덮어쓰지 않는다. 이름이나 내용을 바꾸면 `README.md` 7.4절의 표와 `tests/test_seq.py` 를 같이 고친다.
-- VM 을 다시 켠 뒤에는 최소 N분(설정값 `seq_settle_min`, 기본 10)이 지난 뒤에 잡을 시작한다. 기준 시각은 마지막 VM 의 ssh 로그인 확인 시각이다. VM 을 다시 켜지 않은 경우에는 이 대기를 넣지 않는다.
-- 시작 시각과 케이스 사이 간격(사용자 결정 2026-11-16): 케이스의 `seq_start` 를 비우면 자동이고, 자동인 케이스의 잡은 앞 케이스의 잡이 끝난 시각에서 N분(설정값 `seq_gap_min`, 기본 30) 이상 지난 뒤에 시작한다. `seq_start` 에 시각을 적으면 그 시각에 잡을 시작하고 간격은 적용하지 않는다. 지킬 수 없으면 가능한 가장 이른 시각에 시작하고 WARN 을 남긴다. 앞 케이스가 끝나기를 기다리는 것과 VM 을 다시 켠 뒤의 대기는 시각을 적은 케이스에도 적용한다. 시각 계산은 모두 `tcrun` 의 `register` 에 있다. 시각 지정 방식의 `start`, `interval` 과는 다른 칸이다(두 방식의 값이 섞이지 않게 따로 둔다).
+- 그 케이스에서 VM 을 켰으면 최소 N분(설정값 `seq_settle_min`, 기본 10)이 지난 뒤에 잡을 시작한다. 기준 시각은 마지막으로 켠 VM 의 준비(1GB page backing 확인, ssh 로그인)가 끝난 시각이다(`on.<VM>` 파일). 켜져 있던 VM 만 쓰면 이 대기를 넣지 않는다. 실행 계획과 도움말에 이 대기를 분 단위로 적는다(사용자 요청 2026-11-16 "VM 킨 다음 몇분후에 잡실행하는지 설명도 넣어줘").
+- 시작 시각 준비(사용자 요청 2026-11-16 "만약 시작 시간 지정해두면 VM 설정 변경은 몇분 전에 하는 지 ..설명 써줘"): 시작 시각을 적은 케이스는 그 시각 N분 전(설정값 `seq_prep_lead_min`, 기본 60, plan 의 `PREP_LEAD_MIN`)까지 기다린 뒤 설정 적용과 VM 전원 맞추기를 한다. 기본값 60 은 이 판을 만들 때 정했다(메모리가 큰 VM 의 켜기 작업과 1GB page backing, 부팅, 켠 뒤 대기 10분, 모니터링 5분이 들어가도록). 0 이면 차례가 오는 대로 한다.
+- 시작 시각과 케이스 사이 간격(사용자 결정 2026-11-16): 케이스의 `seq_start` 를 비우면 자동이고, 자동인 케이스의 잡은 앞 케이스의 잡이 끝난 시각에서 N분(설정값 `seq_gap_min`, 기본 30) 이상 지난 뒤에 시작한다. `seq_start` 에 시각을 적으면 그 시각에 잡을 시작하고 간격은 적용하지 않는다. 지킬 수 없으면 가능한 가장 이른 시각에 시작하고 WARN 을 남긴다. 앞 케이스가 끝나기를 기다리는 것, VM 을 켠 뒤의 대기, 잡 시작 최소 간격은 시각을 적은 케이스에도 적용한다. 시각 계산은 모두 `tcrun` 의 `register` 에 있다. 시각 지정 방식의 `start`, `interval` 과는 다른 칸이다(두 방식의 값이 섞이지 않게 따로 둔다).
+- 잡 시작 최소 간격(사용자 요구 2026-11-16 "모든 잡들은 분단위로 다른시각에 시작되어야하거든? 겹치면 안됨", "호스트1과 호스트2의 첫번째케이스는 5분 차이 두고 실행되도록하고싶어"): 모든 잡 시작은 서로 N분(설정값 `seq_start_spacing_min`, 기본 5, plan 의 `SPACING_MIN`) 이상 떨어진다. ESX 호스트가 달라도, 같은 점프 VM 의 다른 실행과도 같다. `tcrun` 의 `register` 가 `claim_start` 로 잡 시작 시각을 `$MD`(= `~/.tcgen/minutes`)에 기록한다. 기록은 `$MD/.lock`(mkdir 잠금, pid 를 적고 그 프로세스가 없으면 지움)을 잡은 진행 하나만 한다. N분 안에 다른 기록이 있으면 그 가운데 가장 늦은 시각 + N분으로 옮기고 다시 확인한다. 기록 폴더의 `who` 는 '실행, ESX 호스트, 케이스', 줄 등록을 마치면 `reg` 를 만든다. 등록 실패, 너무 늦은 등록, 잡 시작 전 stop 에서는 `release_start` 로 지운다. 실행이 끝나면 `release_mine` 이 `reg` 없는 자기 기록(시작하지 않은 케이스의 시각)을 지운다. 진행이 죽어 남은 `reg` 없는 미래 기록은 `claim_dead` 로 알아보고 무시한다. `start` 와 `run` 은 plan 의 `START` 줄(적은 시작 시각)을 먼저 기록한다(`claim_plan_starts`). 하루가 지난 기록은 `old_claims` 가 지운다. 기록은 파일을 하나씩 지운다(`rm_claim`, `unlock_md`). 폴더를 통째로 지우는 명령을 쓰지 않는다. PC 쪽 `build_seq` 는 N분보다 가까운 두 시작 시각을 오류로 한다(ESX 호스트가 달라도). 한 케이스 안의 VM 은 같은 분이다.
 - 잡 종료는 프로세스 이름으로 판정한다: 잡이 있는 모든 VM 에서 한 번 이상 보인 뒤 연속 N회 없음. 확인하지 못한 것(ssh 실패, pgrep 없음)을 없음으로 세지 않는다. 판정할 수 없으면 다음 케이스로 넘어가지 않고 멈춘다.
 - 잡이 실행되는 동안 시험 대상 VM 에 되도록 접속하지 않는다(사용자 결정 2026-11-16: 60초 간격은 부하가 되므로 30분에서 1시간 간격). 확인은 잡 시작 `FIRST_CHECK_SEC`(기본 60초) 뒤 한 번, 그 뒤 `POLL_SEC`(기본 1800초)마다 한다. 첫 확인에서 보이지 않은 VM 이 있으면 시작 대기 끝에 한 번 더 확인한다. 모든 VM 에서 프로세스가 없어진 뒤에만 1분 간격으로 다시 확인한다. 짧은 간격의 확인을 새로 넣지 않는다. 확인할 때마다 VM 마다 로그 한 줄(`check N (case <이름>) vm <이름>: <결과>`, 줄 앞 시각이 그 VM 을 확인한 때)과 `check N (case <이름>) done. next check <시각>` 한 줄을 남긴다(사용자 요청 2026-11-16: 확인 기록에 VM 이름과 시각이 보여야 함). `POLL_SEC` 이 120 을 넘으면 리포트용 CSV 의 잡 종료 시각을 비운다(실제 종료 시각을 그 간격 안에서 알 수 없기 때문).
 - 설정은 값이 이미 다른 값으로 들어 있어도 오류 없이 적용한다: vmx 에서 같은 키(대소문자 무시)의 줄을 모두 지우고 한 줄을 추가한다. 값이 모두 같으면 VM 을 끄지 않는다.
 - CPU affinity 같은 값을 계산하지 않는다. 사용자가 키와 값을 직접 넣는다.
 - 재부팅해야 적용되는 호스트 설정은 다루지 않는다.
 - 점프 VM 에서 ESX 로는 ssh 키로 접속한다. 로그는 사용자가 화면에 적은 점프 VM 폴더에 남긴다.
-- 멈추거나 stop 을 받았을 때 실행 중인 잡을 건드리지 않는다.
+- 멈추거나 stop, cancel 을 받았을 때 실행 중인 잡을 건드리지 않는다.
+- 설정 값이 하나라도 다르면 케이스의 VM 을 모두 끄고 바꾼 뒤 표의 순서대로 하나씩 켠다(사용자 2026-11-16 "설정변경 한다고 VM 을 끄면 VM1만 끄는게 아니라 전부끄고 설정 적용 한다음 순차적으로 켜야돼"). `prepare` 가 spec 의 모든 VM 을 끄고, `power_vms` 가 켠다.
+- 실행 계획(`plan_view`)은 공통 규칙을 맨 위에 한 번 적고, 케이스마다 그 케이스의 값(시작, VM 전원, 설정, 모니터링, 잡, 모니터링 중지, 최대 대기)을 항목별 짧은 줄로 적는다(사용자 2026-11-16 "실행계획 너무 읽기어려워 가독성떨어짐"). 같은 설명을 케이스마다 되풀이하지 않는다. 화면은 제목 줄을 굵게 하고 [크게 보기] 로 줄을 접어 보인다.
 
 ### 3.4 순서 실행의 구현 규칙 (이 판을 만들 때 정한 것. 고치려면 시험을 함께 고친다)
 
@@ -129,11 +133,21 @@ VM 에는 파일을 만들지 않는다. `tcrun` 이 ssh 표준 입력으로 셸
 
 | 파일 | 만드는 곳 | 비고 |
 | :-- | :-- | :-- |
-| `askpass`, `vmssh`, `setpw` | `VMSSH_LINES`, `SETPW_LINES` | v1.4 와 같다. 고치지 않는다 |
-| `esxssh`, `postsetup` | `ESXSSH_LINES`, `POSTSETUP_LINES` | 짧은 파일. 블록에 `printf` 줄로 넣는다 |
+| `askpass`, `vmssh`, `setpw` | `vmssh_lines`, `setpw_lines`(v1.4 의 `VMSSH_LINES`, `SETPW_LINES` 에서 폴더 경로만 바꾼 것) | 기본 작업 폴더이면 v1.4 와 글자까지 같다. 시각 지정의 A 블록은 v1.4 의 것을 그대로 쓴다 |
+| `esxssh`, `postsetup` | `esxssh_lines`, `postsetup_lines` | 짧은 파일. 블록에 `printf` 줄로 넣는다. `esxssh` 는 `-o LogLevel=ERROR` 와 작업 폴더의 `known_hosts` 를 쓴다 |
 | `tcrun`, `tcgen_apply.py` | `tcgen_payload.py` | 긴 파일. gzip 뒤 base64 로 넣고 설치 뒤 sha256 을 확인한다 |
 
-`tcrun` 의 하위 명령은 `check <plan>`, `start <plan>`, `run <plan> <esx>`, `status [-a]`, `stop [esx]`, `key`, `version` 이다. `start` 는 S 블록이 쓴다.
+`tcrun` 의 하위 명령은 `check <plan>`, `start <plan>`, `run <plan> <esx>`, `status [-a]`, `stop [esx]`, `cancel [esx]`, `key`, `version` 이다. `start` 는 S 블록이 쓴다.
+
+작업 폴더(사용자 요청 2026-11-16 "tcgen 실행 위치 바꿔야되겠어.. 계정홈폴더로하니까 홈폴더 용량제한있음"): 설정 `jump_dir`(비우면 `~/.tcgen`). `jump_dir`, `sh_path` 가 화면의 글과 셸 글(`~/` → `$HOME/`)을 만든다. A 블록은 그 폴더에 설치하고, 폴더가 `~/.tcgen` 이 아니면 `~/.tcgen` 의 `id_esx`, `id_esx.pub`, `vmpw` 를 복사한다(ESX 키 재등록과 비밀번호 재입력을 피함). P, S 블록과 순서 실행의 D 블록도 그 폴더를 쓴다. `tcrun` 은 `$0` 의 폴더를 작업 폴더로 쓰므로 plan 에 폴더를 적지 않는다. 시각 지정(v1.4 방식)은 `~/.tcgen` 그대로다.
+
+쓰기 확인: `tcrun start`, `run`, `check` 는 작업 폴더(실행 폴더)와 로그 폴더에 1 MB 를 `dd` 로 써 보고(`can_write`), 쓸 수 없으면 시작하지 않거나 `[PROBLEM]` 으로 알린다. 홈 폴더 quota 가 차면 접속 스크립트와 상태 파일이 비어 ssh 출력에 배너만 남는 일이 있었다(사용자 보고 2026-11-16, 원인은 정황).
+
+ssh: `tcrun` 의 VM 접속과 `esxssh` 는 `-o LogLevel=ERROR`(로그인 배너와 `Permanently added` 안내를 출력하지 않음)와 `-o UserKnownHostsFile=<작업 폴더>/known_hosts` 를 쓴다. 실패 이유는 `first` 가 출력에서 ssh 의 오류 줄(denied, refused, timed out 등)을 먼저 고른다. VM 을 켠 뒤 ssh 로그인을 기다리는 동안 `Permission denied` 가 나오면 다시 시도하지 않는다(10초마다 30분 동안 다시 시도하면 계정 잠금 정책에 걸릴 수 있음).
+
+`status`: 마지막 실행(상태 파일이 있는 가장 늦은 실행 ID)의 plan 에 있는 ESX 호스트를 모두 보인다. 상태 파일이 없는 호스트는 `not started` 와 `<호스트>.out` 의 끝 다섯 줄을 보인다. `stop`: 실행 중인 진행에만 깃발을 두고, 실행 중이 아닌 호스트는 상태와 `cancel` 안내를 출력한다(사용자 보고 2026-11-16 "tcrun status tcrun stop 이 호스트 1에만 적용되는거같아").
+
+`cancel`(사용자 요청 2026-11-16 "잘못수행했을때 취소도 용이하지않은거같아 pause 상태로 멈춰있음"): 마지막 실행의 호스트마다 `cancel_chain` 이 한다. 진행이 살아 있으면 프로세스 그룹에 TERM(10초 뒤 KILL). `<호스트>.work/times`(줄 등록을 마치면 `register` 가 '번호 모니터링시작 잡시작' 을 쓰고, 줄을 지우면 비움)에 적힌 케이스의 줄을 `unregister` 로 지운다. 모니터링 시작 시각이 지났으면 MX 줄(`\%` → `%`)과 EMX 줄을 ssh 로 바로 실행한다. 잡 프로세스는 끝내지 않고 `pgrep` 결과만 보인다(3.3절 '실행 중인 잡을 건드리지 않는다'). 이 실행과 호스트의 앞으로의 잡 시작 기록을 지우고, 결과 CSV 에 `cancelled` 행, 상태 `cancelled`. 설정은 되돌리지 않는다.
 
 실행 자료는 `~/.tcgen/runs/<실행 ID>/` 에 둔다.
 
@@ -144,11 +158,15 @@ VM 에는 파일을 만들지 않는다. `tcrun` 이 ssh 표준 입력으로 셸
 | `<호스트>.state` | `state=`, `time=`, `case=`, `pos=`, `step=`, `text=` 줄. `tcrun status` 가 읽는다 |
 | `<호스트>.stop` | `tcrun stop` 이 만드는 깃발 파일 |
 | `<호스트>.out` | 진행 프로세스의 표준 출력(정상일 때는 비어 있다) |
-| `<호스트>.work/` | 원격에 보낸 셸 글과 받은 출력, VM 별 확인 상태(`seen.<VM>`, `zero.<VM>`, `gone.<VM>`), VM 켜기 완료 시각(`on.<VM>`) |
+| `<호스트>.work/` | 원격에 보낸 셸 글과 받은 출력, VM 별 확인 상태(`seen.<VM>`, `zero.<VM>`, `gone.<VM>`), 이 진행이 켠 VM 의 준비 완료 시각(`on.<VM>`) |
+
+잡 시작 시각의 기록은 `~/.tcgen/minutes/<분의 epoch>/` 폴더이고 `who`(실행, ESX 호스트, 케이스)와 `reg`(줄 등록을 마침) 파일이 들어간다. `~/.tcgen/minutes/.lock/pid` 는 기록하는 동안의 잠금이다(3.3절).
 
 호스트 자리의 이름은 ESX 호스트 이름이고, ESX 호스트를 적지 않은 케이스는 `noesx` 다.
 
-시각 계산은 `register` 에 있다. 가장 늦은 시계 = 점프 VM 시계 + `OFF`(VM 과 ESX 시계가 점프 VM 보다 앞선 초의 최댓값). 첫 시작 시각 = (가장 늦은 시계 + 여유)를 분으로 올림. 여유는 75초이고, 줄을 등록할 호스트가 넷을 넘으면 한 대마다 4초를 더한다(`ahead`). VM 을 다시 켠 경우 = max(그 값, (VM 켜기 완료 시각 + `OFF` + N분 - 모니터링 간격)을 분으로 올림). VM 의 crontab 시각 칸은 VM 에서 `date -d @<초>` 로, ESX 의 시각 칸은 점프 VM 에서 UTC 로 만든다.
+시각 계산은 `register` 에 있다. 가장 늦은 시계 = 점프 VM 시계 + `OFF`(VM 과 ESX 시계가 점프 VM 보다 앞선 초의 최댓값). 첫 시작 시각 = (가장 늦은 시계 + 여유)를 분으로 올림. 여유는 75초이고, 줄을 등록할 호스트가 넷을 넘으면 한 대마다 4초를 더한다(`ahead`). VM 을 켠 경우 = max(그 값, (VM 준비 완료 시각 + `OFF` + N분 - 모니터링 간격)을 분으로 올림). 그 뒤 케이스 사이 간격, 시작 시각, 잡 시작 최소 간격(`claim_start`)을 차례로 적용한다.
+
+ESX 호스트의 `tcgen_apply.py` 명령은 `check`, `prepare <tag>`, `poweron <vm> [초]`, `poweroff <vm> [초]`, `lpage <vm>`, `lpagewait <vm> [초]`, `rollback <tag>` 이다. `prepare` 는 값이 다를 때 VM 을 끄고 값을 바꾸기만 한다(켜지 않는다). 켜기는 `tcrun` 의 `power_vms` 가 `poweron`, `lpagewait`, ssh 로그인 확인 순서로 VM 마다 한다. spec 의 `off <vm>` 줄은 `check` 가 전원 비교(`TCGEN-POWER`)에 쓴다. VM 의 crontab 시각 칸은 VM 에서 `date -d @<초>` 로, ESX 의 시각 칸은 점프 VM 에서 UTC 로 만든다.
 
 ## 5. plan 형식
 
@@ -163,7 +181,7 @@ plan 은 UTF-8 글 파일이고 줄 단위다. 첫 낱말이 종류, 둘째 낱�
 | `RUNID <실행 ID>` | `년월일-시분초`. 로그 파일 이름과 실행 폴더 이름에 쓴다 |
 | `LOGDIR <경로>` | 점프 VM 로그 폴더. `~/` 로 시작하면 홈 폴더 |
 | `GEN <시각>` | 생성 시각(참고용) |
-| `SET <이름> <정수>` | `MON_LEAD_MIN`, `SETTLE_MIN`, `GAP_MIN`, `POLL_SEC`, `FIRST_CHECK_SEC`, `GONE_COUNT`, `START_WAIT_MIN`, `POWERON_WAIT_MIN`, `BOOT_WAIT_MIN`, `SHUTDOWN_WAIT_MIN`. plan 에 없는 이름은 `tcrun` 의 기본값을 쓴다 |
+| `SET <이름> <정수>` | `MON_LEAD_MIN`, `SETTLE_MIN`, `GAP_MIN`, `SPACING_MIN`, `PREP_LEAD_MIN`, `POLL_SEC`, `FIRST_CHECK_SEC`, `GONE_COUNT`, `START_WAIT_MIN`, `POWERON_WAIT_MIN`, `BOOT_WAIT_MIN`, `SHUTDOWN_WAIT_MIN`. plan 에 없는 이름은 `tcrun` 의 기본값을 쓴다 |
 | `ADDR <ESX 호스트> <주소>` | ESX 접속 주소. 없으면 호스트 이름으로 접속 |
 | `CHAIN <ESX 호스트>` | 진행 하나. ESX 호스트를 적지 않은 케이스는 `-` |
 | `RPTH <CSV 한 줄>` | 리포트용 CSV 의 머리글 |
@@ -178,6 +196,7 @@ plan 은 UTF-8 글 파일이고 줄 단위다. 첫 낱말이 종류, 둘째 낱�
 | `RPTA <번호> <CSV 조각>` | 리포트용 CSV 한 행의 앞부분: 테스트 그룹, 케이스명, 설명, 호스트 이름 |
 | `RPTB <번호> <CSV 조각>` | 뒷부분: VM, 종료 기준 VM. `tcrun` 은 `RPTA,잡 시작,잡 종료,RPTB` 로 한 행을 쓴다 |
 | `VM <번호> <VM 이름> <ssh 대상>` | 그 케이스의 VM. 순서가 켜는 순서. ssh 대상은 `계정@VM` 또는 `VM` |
+| `OFF <번호> <VM 이름>` | 그 케이스 동안 끌 VM. 같은 이름의 `VM` 줄이 있어야 한다. 없는 VM 은 켠다 |
 | `AH <번호> </구역/옵션>=<값>` | ESX 호스트 옵션 |
 | `AV <번호> <VM 이름> <키>=<값>` | vmx 키. 값이 비면 삭제 |
 | `PAT <번호> <VM 이름> <정규식>` | 그 VM 에서 이 케이스의 줄을 찾는 `grep` 패턴(표식 + `$`) |

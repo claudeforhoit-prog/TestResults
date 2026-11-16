@@ -37,7 +37,10 @@ SHELLS = {
 @unittest.skipUnless(HAVE, "tcsh, perl, sh 가 있는 Linux/macOS 에서만 실행")
 class SeqBlockTests(unittest.TestCase):
     def setUp(self):
-        self.e = fakeenv.FakeEnv(install=False)
+        self.build()
+
+    def build(self, jdir=False):
+        self.e = fakeenv.FakeEnv(install=False, jdir=jdir)
         e = self.e
         e.add_vm("esx01ev01", crontab="30 9 * * 1 /home/tester/existing.sh\n")
         e.add_vm("esx01ev02")
@@ -75,7 +78,7 @@ class SeqBlockTests(unittest.TestCase):
     def install(self, shell, crlf):
         out = self.paste(shell, [(None, 0, self.res["setup"]), (r"VM password: \Z", 0.3, fakeenv.TEST_PW + "\r"),
                                  (r"saved: /", 0.3, "")], crlf)
-        for name, text in core.jump_files():
+        for name, text in core.jump_files(self.e.jdir or core.DEFAULT_JUMP_DIR):
             self.assertEqual(self.read(name), text, "%s 의 내용이 다름\n%s" % (name, out[-3000:]))
         for name in ("askpass", "vmssh", "setpw", "esxssh", "postsetup", "tcrun"):
             self.assertEqual(stat.S_IMODE(os.stat(self.tfile(name)).st_mode), 0o700, name)
@@ -115,7 +118,7 @@ class SeqBlockTests(unittest.TestCase):
         plan = os.path.join(e.tcgen, "runs", RID, "plan")
         with open(plan, encoding="utf-8") as f:
             self.assertEqual(f.read(), self.res["plan"], "plan 이 그대로 올라감(한글 설명 포함)")
-        for word in ("[ok] esx esx01 (esx01): ssh key login works", "[ok] settings: every value is already as wanted.",
+        for word in ("[ok] esx esx01 (esx01): ssh key login works", "[ok] settings and VM power: already as wanted.",
                      "[ok] vm esx01ev01 (esx01ev01): ssh login works", "[ok] vm esx01ev02 (esx01ev02): ssh login works",
                      "CHECK RESULT: OK"):
             self.assertIn(word, out)
@@ -126,7 +129,7 @@ class SeqBlockTests(unittest.TestCase):
         cron = e.start_cron()
         out = self.paste(shell, [(None, 0, self.res["run"]), (r"files in /\S+ : tcrun-", 0.5, "")], crlf)
         self.assertRegex(out, r"started: run %s esx esx01   log: %s/tcrun-%s-esx01\.log" % (RID, re.escape(e.log), RID))
-        self.assertIn("status: sh ~/.tcgen/tcrun status", out)
+        self.assertIn("status: sh %s/tcrun status" % e.tcgen, out)
         self.assertNotIn("====", out.replace("==== tcrun on this jump VM", "").replace("==== plan FAILED", ""))
         e.wait_for(lambda: e.state(RID, "esx01").get("state") in ("done", "paused", "stopped"), seconds=180, what="진행 완료")
         log = e.log_text(RID, "esx01")
@@ -156,6 +159,38 @@ class SeqBlockTests(unittest.TestCase):
     @unittest.skipUnless(os.path.exists("/bin/bash"), "bash 없음")
     def test_flow_bash_crlf(self):
         self.flow("bash", True)
+
+    def test_work_folder_outside_the_home(self):
+        """작업 폴더를 홈 밖에 두면 A 블록이 그 폴더에 설치하고, ~/.tcgen 에 있던 ESX 키와 VM 비밀번호를 복사한다(다시 묻지 않음).
+        P, S 블록도 그 폴더를 쓴다."""
+        self.e.close()
+        self.build(jdir=True)
+        e = self.e
+        old = os.path.join(e.jump, ".tcgen")
+        os.makedirs(old)
+        for name, text in (("id_esx", "-----BEGIN OLD KEY-----\n"), ("id_esx.pub", "ssh-rsa OLDKEY tester@jump\n"),
+                           ("vmpw", fakeenv.TEST_PW + "\n")):
+            with open(os.path.join(old, name), "w") as f:
+                f.write(text)
+            os.chmod(os.path.join(old, name), 0o600)
+        out = self.paste("tcsh", [(None, 0, self.res["setup"]), (r"To change it: sh %s/setpw\r?\n" % re.escape(e.tcgen), 0.5, "")])
+        for name in ("id_esx", "id_esx.pub", "vmpw"):
+            self.assertRegex(out, r"copied:  %s/%s -> %s/%s" % (re.escape(old), name, re.escape(e.tcgen), name))
+        self.assertEqual(self.read("id_esx.pub"), "ssh-rsa OLDKEY tester@jump\n", "ESX 에 등록한 키를 그대로 씀")
+        self.assertNotRegex(out, r"VM password: \r?\n")
+        self.assertRegex(out, r"kept:    %s" % re.escape(self.tfile("id_esx")))
+        for name, text in core.jump_files(e.jdir):
+            self.assertEqual(self.read(name), text, name)
+        self.assertIn("sh %s/esxssh <esx host> hostname" % e.tcgen, out)
+        out = self.paste("tcsh", [(None, 0, self.res["check"]), (r"saved: /\S+check\.log\r?\n", 0.5, "")])
+        self.assertIn("CHECK RESULT: OK", out)
+        self.assertTrue(os.path.exists(os.path.join(e.tcgen, "runs", RID, "plan")))
+        cron = e.start_cron()
+        out = self.paste("tcsh", [(None, 0, self.res["run"]), (r"files in /\S+ : tcrun-", 0.5, "")])
+        self.assertIn("status: sh %s/tcrun status" % e.tcgen, out)
+        e.wait_for(lambda: e.state(RID, "esx01").get("state") in ("done", "paused", "stopped"), seconds=180, what="진행 완료")
+        self.assertEqual(e.state(RID, "esx01")["state"], "done", e.log_text(RID, "esx01"))
+        self.assertEqual(sorted(os.listdir(old)), ["id_esx", "id_esx.pub", "vmpw"], "홈의 ~/.tcgen 에는 새로 쓰지 않음")
 
     def test_version_mismatch_and_not_installed(self):
         """(j) 설치된 tcrun 의 판이 생성기와 다르거나 tcrun 이 없으면 시작하지 않고 A 블록을 다시 붙여넣으라고 알린다."""
@@ -187,15 +222,17 @@ class SeqBlockTests(unittest.TestCase):
         first = next(i for i, x in enumerate(lines) if "<< TCB64" in x)
         del lines[first + 3]                                   # tcrun 의 base64 줄 하나가 빠진 경우
         out = self.paste("tcsh", [(None, 0, "\n".join(lines)), (r"To change it: sh ~/.tcgen/setpw\r?\n", 0.5, "")])
-        self.assertRegex(out, r"(?m)^FAILED  %s \(sha256 differs\. Paste block A again\)\r?$" % re.escape(self.tfile("tcrun")))
+        self.assertRegex(out, r"(?m)^FAILED  %s \(sha256 differs\. Paste block A again\. Check the free space and quota of %s\)\r?$"
+                         % (re.escape(self.tfile("tcrun")), re.escape(e.tcgen)))
         self.assertRegex(out, r"OK      %s\r?\n" % re.escape(self.tfile("tcgen_apply.py")))
         self.assertEqual(self.read("tcrun"), old, "깨진 파일로 바꾸지 않음")
         self.assertFalse(os.path.exists(self.tfile("tcrun.new")))
         lines = self.res["run"].split("\n")
         first = next(i for i, x in enumerate(lines) if "<< TCB64" in x)
         lines[first + 2] = lines[first + 2][:-8] + "AAAAAAAA"
-        out = self.paste("bash", [(None, 0, "\n".join(lines)), (r"Paste this block again\.\r?\n", 0.5, "")], crlf=True)
-        self.assertRegex(out, r"(?m)^==== plan FAILED \(sha256 differs\)\. Nothing was started\. Paste this block again\.\r?$")
+        out = self.paste("bash", [(None, 0, "\n".join(lines)), (r"paste this block again\.\r?\n", 0.5, "")], crlf=True)
+        self.assertRegex(out, r"(?m)^==== plan FAILED \(sha256 differs\)\. Nothing was started\. Check the free space and quota of %s, "
+                              r"then paste this block again\.\r?$" % re.escape(e.tcgen))
         self.assertFalse(os.path.exists(os.path.join(e.tcgen, "runs", RID, "plan")))
         self.assertEqual(e.state(RID, "esx01"), {})
 
