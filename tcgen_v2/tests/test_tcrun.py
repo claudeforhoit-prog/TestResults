@@ -426,6 +426,54 @@ class StartTimeAndGapTests(TcrunBase):
         self.assertRegex(out, r"CHECK RESULT: 1 problem")
 
 
+class CheckIntervalTests(TcrunBase):
+    def test_few_logins_while_the_job_runs(self):
+        """잡이 실행되는 동안 VM 접속을 줄인다: 잡 시작 뒤 한 번 확인하고 그 뒤로는 확인 간격마다 확인한다. 모든 VM 에서 프로세스가
+        없어진 뒤에만 1분 간격으로 다시 확인한다. 확인 간격이 2분을 넘으면 리포트용 CSV 의 잡 종료 시각을 비운다."""
+        e = self.e
+        self.two_vms()
+        c1 = case("q1", [vm("esx01ev01", "job_long", ["gmon"])])            # 900초 걸리는 잡
+        res, plan = self.gen([c1], seq_poll_sec=600, seq_first_check_sec=60, seq_gone_count=3)
+        self.assertIn("SET POLL_SEC 600\nSET FIRST_CHECK_SEC 60\n", res["plan"])
+        e.start_cron()
+        rc, out = e.tcrun("run", plan, "esx01", timeout=600)
+        log = self.log()
+        self.assertEqual(rc, 0, self.ctx(out))
+        r = self.results()[0]
+        job = epoch(r["job_start"])
+        checks = [(epoch(m.group(1)), int(m.group(2))) for m in
+                  re.finditer(r"(?m)^(\S+ \S+) check \d+: processes: esx01ev01=(\d+)$", log)]
+        self.assertEqual([n for _, n in checks], [1, 1, 0, 0, 0], "잡이 실행되는 15분 동안 확인은 두 번, 끝난 뒤 세 번\n" + log)
+        t = [x - job for x, _ in checks]
+        self.assertTrue(60 <= t[0] < 60 + 40, "첫 확인은 잡 시작 60초 뒤: %s" % t)
+        self.assertTrue(600 - 5 <= t[1] - t[0] < 600 + 40, "두 번째 확인은 확인 간격(600초) 뒤: %s" % t)
+        self.assertTrue(600 - 5 <= t[2] - t[1] < 600 + 40, t)
+        self.assertTrue(55 <= t[3] - t[2] < 60 + 40 and 55 <= t[4] - t[3] < 60 + 40, "프로세스가 없어진 뒤에는 1분 간격으로 다시 확인: %s" % t)
+        self.assertEqual(len(self.e.vm_file("esx01ev01", "job.log")), 2, "잡은 한 번 시작하고 끝남")
+        # 종료 시각: 결과 CSV 에는 프로세스가 없는 것을 처음 확인한 시각, 리포트용 CSV 에는 빈칸(리포트 생성기가 정한다)
+        self.assertTrue(0 <= checks[2][0] - epoch(r["job_end"]) <= 30, "job_end 는 프로세스가 없는 것을 처음 확인한 때(세 번째 확인)")
+        self.assertIn("The report case file leaves the job end empty", log)
+        raw, rows = self.report()
+        self.assertEqual(len(rows), 2)
+        head, row = rows
+        self.assertEqual((row[head.index("잡 시작 시각")], row[head.index("잡 종료 시각")]), (r["job_start"], ""))
+        self.assertIn("first check 60 s after the job start and then every 600 s", log)
+
+    def test_short_interval_keeps_the_end_time_in_the_report_file(self):
+        """확인 간격이 2분 이하이면 리포트용 CSV 에 종료로 판정한 시각을 적는다(시각이 정확하므로)."""
+        e = self.e
+        self.two_vms()
+        res, plan = self.gen([case("s1", [vm("esx01ev01", "job_a")])])      # 가짜 환경의 기본 확인 간격은 20초
+        e.start_cron()
+        rc, out = e.tcrun("run", plan, "esx01")
+        self.assertEqual(rc, 0, self.ctx(out))
+        r = self.results()[0]
+        raw, rows = self.report()
+        head, row = rows
+        self.assertEqual(row[head.index("잡 종료 시각")], r["job_end"])
+        self.assertNotIn("leaves the job end empty", self.log())
+
+
 class FailureTests(TcrunBase):
     def test_e_power_on_failure_rolls_back_and_pauses(self):
         """(e) 전원 켜기 실패: 설정을 되돌리고, 켜져 있던 VM 을 순서대로 다시 켜 보고, 멈춘다."""

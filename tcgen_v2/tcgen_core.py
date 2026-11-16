@@ -40,7 +40,7 @@ import shutil
 import sys
 import time
 
-VERSION = "2.4"
+VERSION = "2.5"
 KST_TO_UTC = dt.timedelta(hours=9)
 CHUNK = 100            # 붙여넣는 글 한 줄에 담는 명령 조각 길이(문자 수)
 NONE_JOB = "(없음)"
@@ -82,7 +82,8 @@ DEFAULT_SETTINGS = {
     "esx_addr": "",            # 순서 실행: ESX 접속 주소 '호스트이름=주소;호스트이름=주소'. 비우면 ESX 호스트 이름으로 접속
     "seq_settle_min": 10,      # 순서 실행: VM 을 다시 켠 케이스는 VM 켜기 완료 N분 뒤부터 잡 시작 (0 = 기다리지 않음)
     "seq_gap_min": 30,         # 순서 실행: 앞 케이스의 잡이 끝난 뒤 다음 케이스의 잡을 시작하기까지 최소 N분 (0 = 기다리지 않음)
-    "seq_poll_sec": 60,        # 순서 실행: 잡 종료 확인 간격(초)
+    "seq_poll_sec": 1800,      # 순서 실행: 잡 종료 확인 간격(초). 화면에서는 분으로 고친다. 잡이 실행되는 동안 VM 에 접속하는 주기라서 길게 둔다
+    "seq_first_check_sec": 60, # 순서 실행: 잡 시작 뒤 프로세스가 떴는지 처음 확인하는 때(초). 한 번만 확인하고 그 뒤로는 위 간격을 따른다
     "seq_gone_count": 3,       # 순서 실행: 프로세스가 연속으로 이 횟수만큼 없으면 잡 종료로 판정
     "seq_start_wait_min": 10,  # 순서 실행: 잡 시작 뒤 이 시간 안에 프로세스가 한 번도 보이지 않으면 멈춤
     "seq_poweron_wait_min": 90,    # 순서 실행: ESX 의 VM 켜기 작업(vim-cmd vmsvc/power.on)이 끝나기를 기다리는 최대 시간
@@ -91,7 +92,7 @@ DEFAULT_SETTINGS = {
 }
 RUN_MODES = ("seq", "time")
 SEQ_INT_SETTINGS = (("seq_settle_min", "VM 다시 켠 뒤 잡 시작까지 최소 분", 0), ("seq_gap_min", "케이스 사이 간격 분", 0),
-                    ("seq_poll_sec", "잡 종료 확인 간격(초)", 5),
+                    ("seq_poll_sec", "잡 종료 확인 간격(초)", 5), ("seq_first_check_sec", "잡 시작 뒤 첫 확인(초)", 1),
                     ("seq_gone_count", "연속 없음 횟수", 1), ("seq_start_wait_min", "시작 대기 분", 1),
                     ("seq_poweron_wait_min", "VM 켜기 대기 분", 1), ("seq_boot_wait_min", "VM 부팅 대기 분", 1),
                     ("seq_shutdown_wait_min", "종료 대기 분", 1))
@@ -1685,7 +1686,8 @@ ADDR_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
 USER_RE = re.compile(r"^[A-Za-z0-9._][A-Za-z0-9._-]*$")
 HOST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 PROC_MAX = 80
-SEQ_PLAN_NAMES = {"seq_settle_min": "SETTLE_MIN", "seq_gap_min": "GAP_MIN", "seq_poll_sec": "POLL_SEC", "seq_gone_count": "GONE_COUNT",
+SEQ_PLAN_NAMES = {"seq_settle_min": "SETTLE_MIN", "seq_gap_min": "GAP_MIN", "seq_poll_sec": "POLL_SEC",
+                  "seq_first_check_sec": "FIRST_CHECK_SEC", "seq_gone_count": "GONE_COUNT",
                   "seq_start_wait_min": "START_WAIT_MIN", "seq_poweron_wait_min": "POWERON_WAIT_MIN",
                   "seq_boot_wait_min": "BOOT_WAIT_MIN", "seq_shutdown_wait_min": "SHUTDOWN_WAIT_MIN"}
 
@@ -2111,9 +2113,14 @@ def plan_view(plan, common, run_id):
                 out.append("     %s %s: %s" % (vm["name"], vm["job_name"], next(
                     e["cmd"] for e in by_kind.get("잡", []) if e["host"] == vm["name"])))
                 out.append("       프로세스 이름: %s" % vm["proc_name"])
-            out.append("   잡 종료 확인: %d초마다 각 VM 에서 프로세스를 찾는다. 모든 VM 에서 한 번 이상 보인 뒤 %d회 연속으로 없으면 "
-                       "종료로 판정한다. 최대 대기 %s." % (sets["POLL_SEC"], sets["GONE_COUNT"],
-                                                   fmt_interval(dt.timedelta(minutes=pc["max_wait"])) if pc["max_wait"] else "제한 없음"))
+            poll = sets["POLL_SEC"]
+            every = ("%d분" % (poll // 60)) if poll % 60 == 0 else ("%d초" % poll)
+            out.append("   잡 종료 확인: 잡 시작 %d초 뒤에 한 번, 그 뒤 %s마다 각 VM 에서 프로세스를 찾는다(잡이 실행되는 동안 VM 접속을 줄이기 위한 "
+                       "간격). 모든 VM 에서 한 번 이상 보인 뒤 %d회 연속으로 없으면 종료로 판정한다. 최대 대기 %s."
+                       % (sets.get("FIRST_CHECK_SEC", 60), every, sets["GONE_COUNT"],
+                          fmt_interval(dt.timedelta(minutes=pc["max_wait"])) if pc["max_wait"] else "제한 없음"))
+            if poll > 120:
+                out.append("   종료를 아는 시점은 실제 종료보다 최대 %s 늦다. 리포트용 CSV 의 잡 종료 시각은 비워 둔다(성능 리포트 생성기가 정한다)." % every)
             if by_kind.get("모니터링 중지"):
                 out.append("   모니터링 중지: 종료 판정 1~2분 뒤의 분에 중지 명령을 실행하고, 이 케이스의 crontab 줄을 지운다.")
                 for e in by_kind["모니터링 중지"]:

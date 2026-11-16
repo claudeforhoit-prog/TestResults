@@ -716,10 +716,19 @@ def main():
     app.commit_case("c2", "seq_start", "자동")
     check(app.cases[2]["seq_start"] == "", "'자동' 을 적으면 비움")
     check(core.load_cases(BASE)[1]["seq_start"] == "09:05", "시작 시각도 자동 저장")
-    check(app.v_gap.get() == "30" and app.f_seq.winfo_manager() == "pack", "설정 영역의 케이스 사이 간격 기본값은 30분")
+    check(app.v_gap.get() == "30" and app.row_seq2.winfo_manager() == "pack", "설정 영역의 케이스 사이 간격 기본값은 30분")
     app.v_gap.set("45")
     check(core.load_settings(BASE)["seq_gap_min"] == 45, "케이스 사이 간격을 바꾸면 저장")
     app.v_gap.set("30")
+    check(app.v_poll.get() == "30" and core.load_settings(BASE)["seq_poll_sec"] == 1800, "잡 종료 확인 간격의 기본값은 30분(1800초)")
+    app.v_poll.set("60")
+    check(core.load_settings(BASE)["seq_poll_sec"] == 3600, "잡 종료 확인 간격을 분으로 바꾸면 초로 저장")
+    n_log = len(LOG)
+    app.v_poll.set("0")
+    check(app.current_settings() is None and any(x[0] == "error" and "잡 종료 확인 간격" in x[1] for x in LOG[n_log:])
+          and core.load_settings(BASE)["seq_poll_sec"] == 3600, "잡 종료 확인 간격은 1분 이상")
+    app.v_poll.set("30")
+    check(core.load_settings(BASE)["seq_poll_sec"] == 1800, "30분으로 되돌림")
     t.refresh("c1")
     shot(root, app, 3, "tcgen_seq_tab4.png")
 
@@ -743,6 +752,8 @@ def main():
           "로그 폴더, ESX 접속 주소, VM 다시 켠 뒤 대기, 접속 계정, 프로세스 이름이 plan 에 들어감")
     check("MAXWAIT 001 720\n" in plan and "MAXWAIT 002 0\n" in plan, "최대 대기가 plan 에 들어감")
     import re as _re
+    check("SET POLL_SEC 1800\n" in plan and "SET FIRST_CHECK_SEC 60\n" in plan and "그 뒤 30분마다" in res["plan_view"],
+          "잡 종료 확인 간격(30분)과 첫 확인(60초)이 plan 과 실행 계획에 들어감")
     check("SET GAP_MIN 30\n" in plan and _re.search(r"(?m)^START 001 \d+ \d{4}-\d\d-\d\d 09:05$", plan) and "START 002 " not in plan,
           "케이스 사이 간격과 지정한 시작 시각이 plan 에 들어감. 시각을 비운 케이스에는 START 줄이 없음")
     check("시작 시각(지정): 잡을" in res["plan_view"] and "09:05 에 시작한다" in res["plan_view"]

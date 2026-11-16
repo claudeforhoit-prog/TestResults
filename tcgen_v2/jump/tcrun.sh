@@ -1,5 +1,5 @@
 #!/bin/sh
-# tcrun 2.4 - tcgen sequence runner. Runs on the jump VM (POSIX sh). tcgen block A installs it as ~/.tcgen/tcrun.
+# tcrun 2.5 - tcgen sequence runner. Runs on the jump VM (POSIX sh). tcgen block A installs it as ~/.tcgen/tcrun.
 #
 #   sh ~/.tcgen/tcrun check <plan>        read-only checks: ESX key login, tools, VMs, settings, VM login, clocks
 #   sh ~/.tcgen/tcrun start <plan>        start "run" in the background for every ESX host of the plan (block S uses this)
@@ -14,7 +14,7 @@
 # VM login: same way as ~/.tcgen/vmssh (password from ~/.tcgen/vmpw through SSH_ASKPASS, setsid).
 # ESX login: ~/.tcgen/esxssh (key ~/.tcgen/id_esx, no password).
 
-TCRUN_VERSION=2.4
+TCRUN_VERSION=2.5
 D=$HOME/.tcgen
 LC_ALL=C
 export LC_ALL
@@ -84,6 +84,8 @@ load_plan() {
   SHUT_WAIT=$(sget SHUTDOWN_WAIT_MIN 10)
   SETTLE=$(sget SETTLE_MIN 10)
   GAP=$(sget GAP_MIN 0)
+  FIRST=$(sget FIRST_CHECK_SEC 60)
+  [ "$FIRST" -ge 1 ] || FIRST=60
   [ "$POLL" -ge 1 ] || POLL=60
   [ "$GONE" -ge 1 ] || GONE=3
   [ "$PON_WAIT" -ge 1 ] || PON_WAIT=90
@@ -318,7 +320,9 @@ write_report() {    # case file of the performance report generator: UTF-8 with 
     printf '\357\273\277' > "$RPT"
     printf '%s\r\n' "$(hget RPTH)" >> "$RPT"
   fi
-  printf '%s,%s,%s,%s\r\n' "$(clines RPTA)" "$R_JOB" "$R_END" "$(clines RPTB)" >> "$RPT"
+  WR_END=$R_END
+  [ "$POLL" -gt 120 ] && WR_END=          # the end is known to within POLL s only: the report generator detects it
+  printf '%s,%s,%s,%s\r\n' "$(clines RPTA)" "$R_JOB" "$WR_END" "$(clines RPTB)" >> "$RPT"
 }
 # pause and stopped end the run. cmd_run writes the state file as its last step, after the last log lines,
 # so that whoever sees the state "paused", "stopped" or "done" finds the complete log.
@@ -598,7 +602,7 @@ register() {
 
 # ---------------------------------------------------------------- step 4: end of the job
 poll_all() {
-  ALLSEEN=1; ALLGONE=1; PSUM=; NOTSEEN=
+  ALLSEEN=1; ALLGONE=1; ALLZERO=1; PSUM=; NOTSEEN=
   for PA_VM in $JOBVMS; do
     mk_poll "$PA_VM" "$W/poll.sh"
     vmrun "$(target "$PA_VM")" "$W/poll.sh" "$W/poll.out" 60
@@ -630,12 +634,18 @@ poll_all() {
     say "$PA_N" > "$W/last.$PA_VM"
     if [ -z "$PA_S" ]; then ALLSEEN=0; NOTSEEN="$NOTSEEN $PA_VM"; fi
     [ "$PA_Z" -ge "$GONE" ] || ALLGONE=0
+    [ "$PA_N" = 0 ] && [ -n "$PA_S" ] || ALLZERO=0
     PSUM="$PSUM $PA_VM=$PA_N"
   done
 }
 wait_job() {
   STEP=wait-start; setstate running "lines registered. job start $R_JOB"
-  WJ_FIRST=$((TJOB - MINOFF + 20))
+  # While a job runs, the VMs are logged in to as rarely as possible (a login is load on the VM under test):
+  #   once FIRST s after the job start (is the process there?), then every POLL s.
+  #   Not seen on every VM at the first check: once more at the end of the start wait.
+  #   No process on any VM any more: checked again after a short time, until GONE checks in a row agree.
+  #   No job is running then, so these checks put no load on a measurement.
+  WJ_FIRST=$((TJOB - MINOFF + FIRST))
   if ! wait_until "$WJ_FIRST"; then
     WJ_N=$(($(now) + OFF))
     if [ "$WJ_N" -lt $((TJOB - 5)) ]; then
@@ -653,7 +663,9 @@ wait_job() {
     return 1
   fi
   STEP=wait-job
-  WJ_FAST=$((WJ_FIRST + 180))
+  WJ_CONF=60
+  [ "$POLL" -lt "$WJ_CONF" ] && WJ_CONF=$POLL
+  WJ_NS=; WJ_K=0
   WJ_SW=$((TJOB - MINOFF + START_WAIT * 60))
   WJ_MAX=$(clines MAXWAIT | head -n 1)
   case "$WJ_MAX" in ""|*[!0-9]*) WJ_MAX=0 ;; esac
@@ -661,6 +673,8 @@ wait_job() {
   while :; do
     poll_all
     WJ_N=$(now)
+    WJ_K=$((WJ_K + 1))
+    log "check $WJ_K: processes:$PSUM"          # one line for every login to the VMs, so that the log shows when they were touched
     if [ "$ALLSEEN" = 1 ] && [ -z "$R_SEEN" ]; then
       R_SEEN=$(stamp)
       log "the process is seen on every VM with a job"
@@ -676,9 +690,22 @@ wait_job() {
       pause "the job of case $CNAME did not end within the maximum wait ($(clines MAXWAIT | head -n 1) min). The job and the monitoring keep running."
       return 1
     fi
-    setstate running "waiting for the job to end. processes:$PSUM"
-    if [ "$WJ_N" -lt "$WJ_FAST" ]; then WJ_I=15; else WJ_I=$POLL; fi
-    if ! nap "$WJ_I"; then
+    if [ "$ALLSEEN" = 0 ]; then
+      WJ_I=$((WJ_SW - WJ_N))
+      [ "$WJ_I" -gt "$POLL" ] && WJ_I=$POLL
+      if [ -z "$WJ_NS" ]; then
+        WJ_NS=1
+        log "the process is not seen yet on:$NOTSEEN. It must be seen within $START_WAIT min after the job start."
+      fi
+    elif [ "$ALLZERO" = 1 ]; then
+      WJ_I=$WJ_CONF
+    else
+      WJ_I=$POLL
+    fi
+    if [ "$WJ_MAX" -gt 0 ] && [ $((WJ_N + WJ_I)) -gt "$WJ_MAX" ]; then WJ_I=$((WJ_MAX - WJ_N)); fi
+    [ "$WJ_I" -lt 1 ] && WJ_I=1
+    setstate running "waiting for the job to end. processes:$PSUM. next check $(tstr $((WJ_N + WJ_I)))"
+    if ! wait_until $((WJ_N + WJ_I)); then          # waits for that time on the clock, so that the checks do not drift
       hint_stop
       stopped "while the job of case $CNAME was running. The job and the monitoring keep running."
       return 1
@@ -692,6 +719,9 @@ wait_job() {
   done
   R_END=$(tstr "$WJ_E")
   log "job ended: $R_END (no process $GONE times in a row on every VM with a job)"
+  if [ "$POLL" -gt 120 ]; then
+    log "the end time is the first check without the process. The job ended within the $POLL s before it (check interval). The report case file leaves the job end empty."
+  fi
   return 0
 }
 
@@ -830,7 +860,7 @@ cmd_run() {
   ssh_setup
   [ -s "$RES" ] || say "case,esx,apply,begin,vms_on,monitor_start,job_start,first_seen,job_end,monitor_stop,end,status" > "$RES"
   log "tcrun $TCRUN_VERSION run $RUNID, esx $CHF ($EADDR), $TOTAL case(s), pid $$"
-  log "settings: job starts $LEAD min after the monitoring start, poll every $POLL s, ended after $GONE polls without the process, start wait $START_WAIT min, power on wait $PON_WAIT min, boot wait $BOOT_WAIT min, shutdown wait $SHUT_WAIT min, job $SETTLE min or more after VMs were powered on again, $GAP min or more between the end of a job and the start of the next job (cases without a start time)"
+  log "settings: job starts $LEAD min after the monitoring start, first check $FIRST s after the job start and then every $POLL s, ended after $GONE checks without the process, start wait $START_WAIT min, power on wait $PON_WAIT min, boot wait $BOOT_WAIT min, shutdown wait $SHUT_WAIT min, job $SETTLE min or more after VMs were powered on again, $GAP min or more between the end of a job and the start of the next job (cases without a start time)"
   setstate running "started"
   for SEQ in $SEQS; do
     IDX=$((IDX + 1))

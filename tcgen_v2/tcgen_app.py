@@ -54,6 +54,14 @@ def open_folder(path):
         subprocess.Popen(["xdg-open", path])
 
 
+def poll_minutes(sec):
+    """잡 종료 확인 간격(초)을 화면에 보일 분으로 바꾼다. 1분보다 짧은 값은 1 로 보인다."""
+    try:
+        return max(1, int(round(int(sec) / 60.0)))
+    except (TypeError, ValueError):
+        return 30
+
+
 def unique_name(base, used):
     if not base or base not in used:
         return base
@@ -428,12 +436,14 @@ class App(object):
         self.v_addr = tk.StringVar(value=self.settings.get("esx_addr", ""))
         self.v_settle = tk.StringVar(value=str(self.settings["seq_settle_min"]))
         self.v_gap = tk.StringVar(value=str(self.settings["seq_gap_min"]))      # 순서 실행: 케이스 사이 간격(분)
+        self.v_poll = tk.StringVar(value=str(poll_minutes(self.settings["seq_poll_sec"])))   # 순서 실행: 잡 종료 확인 간격(분)
         self.v_cfile = tk.StringVar()           # 지금 쓰는 테스트 케이스 파일 (보여 주기만 한다)
         self.v_status = tk.StringVar()
         self.v_esx_host = tk.StringVar()
         self.build()
         self.apply_mode()
-        for v in (self.v_record, self.v_log, self.v_user, self.v_mon, self.v_stop, self.v_jlog, self.v_addr, self.v_settle, self.v_gap):
+        for v in (self.v_record, self.v_log, self.v_user, self.v_mon, self.v_stop, self.v_jlog, self.v_addr, self.v_settle, self.v_gap,
+                  self.v_poll):
             v.trace_add("write", self._settings_changed) if hasattr(v, "trace_add") else v.trace("w", self._settings_changed)
         self.update_status()
         for m in self.start_msgs:
@@ -556,6 +566,7 @@ class App(object):
             self.v_addr.set(self.settings.get("esx_addr", ""))
             self.v_settle.set(str(self.settings["seq_settle_min"]))
             self.v_gap.set(str(self.settings["seq_gap_min"]))
+            self.v_poll.set(str(poll_minutes(self.settings["seq_poll_sec"])))
             self.refresh_case_file_box()
         finally:
             self.loading = False
@@ -760,10 +771,16 @@ class App(object):
         ttk.Label(self.f_seq, text="분 뒤 잡 시작").pack(side="left", padx=(0, px(18)))
         ttk.Label(self.f_seq, text="VM 다시 켠 뒤 잡 시작까지 최소").pack(side="left")
         ttk.Spinbox(self.f_seq, from_=0, to=240, width=4, textvariable=self.v_settle).pack(side="left", padx=px(6))
-        ttk.Label(self.f_seq, text="분").pack(side="left", padx=(0, px(18)))
-        ttk.Label(self.f_seq, text="케이스 사이 간격").pack(side="left")
-        ttk.Spinbox(self.f_seq, from_=0, to=1440, width=5, textvariable=self.v_gap).pack(side="left", padx=px(6))
         ttk.Label(self.f_seq, text="분").pack(side="left")
+        self.row_seq2 = ttk.Frame(sf)            # 순서 실행에서만 보이는 줄: 케이스 사이 간격, 잡 종료 확인 간격
+        ttk.Label(self.row_seq2, text="케이스 사이 간격").pack(side="left")
+        ttk.Spinbox(self.row_seq2, from_=0, to=1440, width=5, textvariable=self.v_gap).pack(side="left", padx=px(6))
+        ttk.Label(self.row_seq2, text="분").pack(side="left", padx=(0, px(18)))
+        ttk.Label(self.row_seq2, text="잡 종료 확인 간격").pack(side="left")
+        ttk.Spinbox(self.row_seq2, from_=1, to=1440, width=5, textvariable=self.v_poll).pack(side="left", padx=px(6))
+        ttk.Label(self.row_seq2, text="분").pack(side="left")
+        ttk.Label(self.row_seq2, text="잡이 실행되는 동안 VM 에 접속해 프로세스를 찾는 주기. 잡 시작 1분 뒤 한 번 확인하고 그 뒤로는 이 간격으로 확인한다",
+                  style="Hint.TLabel").pack(side="left", padx=px(12))
         self.row_seq = ttk.Frame(sf)             # 순서 실행에서만 보이는 줄
         ttk.Label(self.row_seq, text="점프 VM 로그 폴더").grid(row=0, column=0, sticky="w")
         ttk.Entry(self.row_seq, textvariable=self.v_jlog, width=22).grid(row=0, column=1, sticky="ew", padx=(px(6), px(4)))
@@ -949,6 +966,10 @@ class App(object):
                 "잡 종료 확인: 탭 1 의 프로세스 이름으로 각 VM 에서 프로세스를 찾는다. 잡이 있는 모든 VM 에서 한 번 이상 보인 뒤 "
                 "%d회 연속으로 없으면 종료로 판정한다. 잡 시작 뒤 %d분 안에 한 번도 보이지 않으면 진행을 멈춘다."
                 % (int(st.get("seq_gone_count", 3)), int(st.get("seq_start_wait_min", 10))),
+                "확인하는 때: 잡이 실행되는 동안 VM 접속을 줄이려고, 잡 시작 %d초 뒤에 한 번 확인한 다음 %d분(설정 영역의 '잡 종료 확인 간격')마다 "
+                "확인한다. 모든 VM 에서 프로세스가 없어진 뒤에는 1분 간격으로 다시 확인해 종료를 확정한다. 그래서 종료를 아는 시점은 실제 "
+                "종료보다 최대 그 간격만큼 늦고, 간격이 2분을 넘으면 리포트용 CSV 의 잡 종료 시각은 비워 둔다(성능 리포트 생성기가 정한다)."
+                % (int(st.get("seq_first_check_sec", 60)), poll_minutes(st.get("seq_poll_sec", 1800))),
                 "설정 칸: 두 번 누르면 탭 3 의 프로파일을 고르는 창이 열린다. 여러 개를 고르면 탭 3 의 순서대로 합치고, 같은 키가 겹치면 "
                 "아래쪽 프로파일의 값을 쓴다.",
                 "최대 대기: 잡 시작부터 이 시간(시간:분, 예 12:00)이 지나도 잡이 끝나지 않으면 진행을 멈춘다. 비우면 제한이 없다.",
@@ -1135,9 +1156,11 @@ class App(object):
         self.f_seq.pack_forget()
         (self.f_seq if seq else self.f_time).pack(side="left")
         if seq:
+            self.row_seq2.pack(fill="x", pady=(px(6), 0), before=self.row3)
             self.row_seq.pack(fill="x", pady=(px(6), 0), before=self.row3)
         else:
             self.row_seq.pack_forget()
+            self.row_seq2.pack_forget()
         hide = SEQ_HIDE if seq else TIME_HIDE
         self.t_case.set_visible([c["key"] for c in self.t_case.columns if c["key"] not in hide])
         self.case_hint.configure(text=self.CASE_HINT[m])
@@ -1328,7 +1351,17 @@ class App(object):
             if show_error:
                 messagebox.showerror(TITLE, "'케이스 사이 간격' 분은 0 이상의 정수로 입력", parent=self.root)
             return None
+        try:
+            poll = int(self.v_poll.get())
+        except ValueError:
+            poll = 0
+        if poll < 1:
+            if show_error:
+                messagebox.showerror(TITLE, "'잡 종료 확인 간격' 분은 1 이상의 정수로 입력", parent=self.root)
+            return None
         s = dict(self.settings)
+        if poll != poll_minutes(s.get("seq_poll_sec", core.DEFAULT_SETTINGS["seq_poll_sec"])):
+            s["seq_poll_sec"] = poll * 60
         s.update(record_csv=self.v_record.get().strip(), log_dir=self.v_log.get().strip(), vm_user=self.v_user.get().strip(),
                  mon_lead_min=ld[0], stop_lead_min=ld[1], run_mode=self.mode(), jump_log_dir=self.v_jlog.get().strip(),
                  esx_addr=self.v_addr.get().strip(), seq_settle_min=settle, seq_gap_min=gap)

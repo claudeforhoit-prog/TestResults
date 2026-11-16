@@ -347,13 +347,21 @@ class SeqValidationTests(unittest.TestCase):
                            ({"vm_user": "-oProxyCommand=x"}, "접속 계정"), ({"mon_lead_min": -1}, "모니터링 시작 분"),
                            ({"seq_settle_min": -1}, "최소 분"), ({"seq_poll_sec": 0}, "확인 간격"),
                            ({"seq_gone_count": 0}, "연속 없음"), ({"seq_poweron_wait_min": 0}, "VM 켜기 대기"),
-                           ({"seq_gap_min": -1}, "케이스 사이 간격")):
+                           ({"seq_gap_min": -1}, "케이스 사이 간격"), ({"seq_first_check_sec": 0}, "첫 확인")):
             self.assert_one(self.errors([case("c1")], st=settings(**over)), word)
         for ok in ({"jump_log_dir": "/data/tcgen/log-1"}, {"jump_log_dir": "~/a.b/c_d"}, {"jump_log_dir": ""},
                    {"esx_addr": "esx01=10.0.0.11; esx02=esx02.lab.local"}, {"seq_settle_min": 0}, {"vm_user": "tester"},
                    {"seq_poweron_wait_min": 120}, {"seq_gap_min": 0}):
             self.assertEqual(gen([case("c1")], st=settings(**ok))["errors"], [], ok)
         self.assertEqual(core.DEFAULT_SETTINGS["seq_gap_min"], 30, "케이스 사이 간격의 기본값은 30분")
+        self.assertEqual((core.DEFAULT_SETTINGS["seq_poll_sec"], core.DEFAULT_SETTINGS["seq_first_check_sec"]), (1800, 60),
+                         "잡 종료 확인은 잡 시작 1분 뒤 한 번, 그 뒤 30분 간격(잡이 실행되는 동안 VM 접속을 줄임)")
+        res = gen([case("c1")], st=settings(seq_poll_sec=3600, seq_first_check_sec=90))
+        self.assertIn("SET POLL_SEC 3600\n", res["plan"])
+        self.assertIn("SET FIRST_CHECK_SEC 90\n", res["plan"])
+        self.assertIn("잡 시작 90초 뒤에 한 번, 그 뒤 60분마다", res["plan_view"])
+        self.assertIn("리포트용 CSV 의 잡 종료 시각은 비워 둔다", res["plan_view"])
+        self.assertNotIn("비워 둔다", gen([case("c1")], st=settings(seq_poll_sec=60))["plan_view"])
         self.assertIn("SET GAP_MIN 45\n", gen([case("c1")], st=settings(seq_gap_min=45))["plan"])
         self.assertEqual(core.DEFAULT_SETTINGS["seq_poweron_wait_min"], 90, "VM 켜기 대기의 기본값은 90분")
         self.assertIn("SET POWERON_WAIT_MIN 120\n", gen([case("c1")], st=settings(seq_poweron_wait_min=120))["plan"])
@@ -404,14 +412,15 @@ class PlanTests(unittest.TestCase):
         res = gen(self.two(), st=settings(vm_user="tester", esx_addr="esx01=10.0.0.11;esx09=10.0.0.19", jump_log_dir="/data/log"))
         self.assertEqual(res["errors"], [])
         want = """TCGEN-PLAN 2
-VER 2.4
+VER 2.5
 RUNID 20261116-143000
 LOGDIR /data/log
 GEN 2026-11-16 14:30:00
 SET MON_LEAD_MIN 5
 SET SETTLE_MIN 10
 SET GAP_MIN 30
-SET POLL_SEC 60
+SET POLL_SEC 1800
+SET FIRST_CHECK_SEC 60
 SET GONE_COUNT 3
 SET START_WAIT_MIN 10
 SET POWERON_WAIT_MIN 90
@@ -617,7 +626,7 @@ class SettingsAndDataTests(unittest.TestCase):
         return snap
 
     def test_names_differ_from_v1(self):
-        self.assertEqual(core.VERSION, "2.4")
+        self.assertEqual(core.VERSION, "2.5")
         for k in self.keys:
             os.environ.pop(k, None)
         self.assertEqual(os.path.basename(core.default_data_dir()), "tcgen2_data")
@@ -674,7 +683,7 @@ class SettingsAndDataTests(unittest.TestCase):
         os.makedirs(d)
         s = core.load_settings(d)
         self.assertEqual((s["run_mode"], s["jump_log_dir"], s["esx_addr"], s["seq_settle_min"], s["seq_poll_sec"]),
-                         ("seq", "", "", 10, 60))
+                         ("seq", "", "", 10, 1800))
         with open(os.path.join(d, core.SETTINGS_FILE), "w", encoding="utf-8") as f:
             json.dump({"run_mode": "fast", "seq_settle_min": "x", "seq_poll_sec": "30", "jump_log_dir": None}, f)
         s = core.load_settings(d)
