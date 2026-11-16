@@ -400,7 +400,7 @@ class PlanTests(unittest.TestCase):
         res = gen(self.two(), st=settings(vm_user="tester", esx_addr="esx01=10.0.0.11;esx09=10.0.0.19", jump_log_dir="/data/log"))
         self.assertEqual(res["errors"], [])
         want = """TCGEN-PLAN 2
-VER 2.1
+VER 2.2
 RUNID 20261116-143000
 LOGDIR /data/log
 GEN 2026-11-16 14:30:00
@@ -482,7 +482,7 @@ END 002
             self.assertEqual(core.gz_b64_decode(lines[a + 1:b]), data)
             self.assertIn(hashlib.sha256(data).hexdigest(), res[key])
             self.assertIn("sh \\$D/tcrun %s \\$R/plan < /dev/null" % action, res[key])
-            self.assertIn('if [ "\\$V" = "2.1" ]; then', res[key])
+            self.assertIn('if [ "\\$V" = "%s" ]; then' % core.VERSION, res[key])
         self.assertEqual(gen(self.two())["run"], res["run"], "같은 입력이면 블록이 매번 같음")
         self.assertEqual(gen(self.two())["setup"], res["setup"])
 
@@ -612,7 +612,7 @@ class SettingsAndDataTests(unittest.TestCase):
         return snap
 
     def test_names_differ_from_v1(self):
-        self.assertEqual(core.VERSION, "2.1")
+        self.assertEqual(core.VERSION, "2.2")
         for k in self.keys:
             os.environ.pop(k, None)
         self.assertEqual(os.path.basename(core.default_data_dir()), "tcgen2_data")

@@ -935,8 +935,9 @@ class App(object):
             "테스트 그룹, 잡 종료 (리포트), 종료 기준 VM: 성능 리포트 생성기에 넘기는 값이다. crontab 에는 쓰지 않는다. "
             "테스트 그룹이 같은 케이스는 리포트 생성기가 HTML 하나에 모은다. 잡 종료를 비우면 '자동' 으로 보이고 리포트 생성기가 "
             "종료 시각을 정한다. 종료 기준 VM 은 VM 행의 칸을 두 번 누르면 '기준' 이 되고 다시 누르면 해제된다. 여러 대를 지정할 수 있다.",
-            "[리포트용 CSV 저장]: 저장할 케이스와 비교 기준(첫 줄) 케이스를 고르고 저장 위치를 정한다. 성능 리포트 생성기의 "
-            "'케이스 정보 파일' 에서 이 파일을 고른다. VM 열에는 잡이나 모니터링을 지정한 VM 이 들어간다.",
+            "[리포트용 CSV 저장]: 저장할 케이스를 고르고 저장 위치를 정한다. 고른 케이스는 이 표의 순서대로 저장한다. 성능 리포트 "
+            "생성기의 '케이스 정보 파일' 에서 이 파일을 고른다. VM 열에는 잡이나 모니터링을 지정한 VM 이 들어간다. "
+            "비교 기준 케이스는 여기서 정하지 않고 성능 리포트 생성기의 '기준 케이스' 칸에서 정한다.",
             "모니터링 시작 = 잡 시작 %d분 전. 모니터링 중지 = 자동(다음 케이스 잡 시작 %d분 전, 마지막 케이스는 잡 시작 + 간격 - %d분), "
             "직접 입력, 중지 없음 중 하나. 이 시각은 그 케이스의 모든 VM 과 ESX 에 같이 적용된다." % (ld[0], ld[1], ld[1]),
         ]
@@ -2150,7 +2151,8 @@ class App(object):
         top.grab_set()
 
     def export_report(self):
-        """[리포트용 CSV 저장]: 저장할 케이스와 비교 기준(첫 줄) 케이스를 고르게 한 뒤 성능 리포트 생성기용 케이스 CSV 를 쓴다."""
+        """[리포트용 CSV 저장]: 저장할 케이스를 고르게 한 뒤 성능 리포트 생성기용 케이스 CSV 를 표 순서대로 쓴다.
+        비교 기준 케이스는 여기서 정하지 않는다(성능 리포트 생성기의 '기준 케이스' 칸에서 정한다)."""
         self.finish_all_edits()
         if self.mode() == "seq":
             st = self.current_settings(show_error=False) or self.settings
@@ -2171,8 +2173,9 @@ class App(object):
         fr = ttk.Frame(top, padding=(px(14), px(10), px(14), px(12)))
         fr.pack(fill="both", expand=True)
         ttk.Label(fr, text="성능 리포트 생성기의 케이스 정보 파일로 저장할 케이스를 고른다.", style="Bold.TLabel").pack(anchor="w")
-        ttk.Label(fr, text="저장 칸을 누르면(또는 Space) 체크된다. 표 순서대로 저장하고, 비교 기준 케이스는 첫 줄에 둔다. "
-                           "리포트 생성기는 첫 줄 케이스를 비교 기준으로 쓴다.", style="Hint.TLabel").pack(anchor="w", pady=(px(2), px(8)))
+        ttk.Label(fr, text="저장 칸을 누르면(또는 Space) 체크된다. 고른 케이스를 탭 4 의 표 순서대로 저장한다. "
+                           "비교 기준 케이스는 성능 리포트 생성기의 '기준 케이스' 칸에서 정한다.",
+                  style="Hint.TLabel").pack(anchor="w", pady=(px(2), px(8)))
         rows = []
         for i, c in enumerate(self.cases):
             s = self.sched[i] if i < len(self.sched) else {}
@@ -2185,20 +2188,13 @@ class App(object):
                 dict(key="start", title="잡 시작 (KST)", width=140, kind="readonly"),
                 dict(key="vms", title="리포트 VM", width=300, kind="readonly", stretch=True),
                 dict(key="applied", title="적용", width=50, kind="readonly")]
-        v_base = tk.StringVar()
         v_count = tk.StringVar()
-        chosen = {"base": False}            # 비교 기준을 직접 고르기 전에는 고른 케이스 가운데 표 순서 첫 케이스
 
         def picked():
             return [r for r in rows if r["sel"]]
 
         def update():
-            names = [r["name"] for r in picked()]
-            cb.configure(values=names)
-            if not chosen["base"] or v_base.get() not in names:
-                chosen["base"] = False
-                v_base.set(names[0] if names else "")
-            v_count.set("고른 케이스 %d개" % len(names))
+            v_count.set("고른 케이스 %d개" % len(picked()))
 
         def toggle(iid):
             r = rows[int(iid)]
@@ -2225,10 +2221,6 @@ class App(object):
         ttk.Button(opt, text="모두 선택", command=lambda: set_all(True)).pack(side="left")
         ttk.Button(opt, text="모두 해제", command=lambda: set_all(False)).pack(side="left", padx=(px(6), px(16)))
         ttk.Label(opt, textvariable=v_count).pack(side="left")
-        cb = ttk.Combobox(opt, textvariable=v_base, state="readonly", width=32)
-        cb.pack(side="right")
-        cb.bind("<<ComboboxSelected>>", lambda e: chosen.update(base=True))
-        ttk.Label(opt, text="비교 기준 (첫 줄)").pack(side="right", padx=(0, px(6)))
         bf = ttk.Frame(fr)
         bf.pack(fill="x", pady=(px(12), 0))
 
@@ -2237,8 +2229,7 @@ class App(object):
             if not sel:
                 messagebox.showinfo(TITLE, "저장할 케이스를 하나 이상 고를 것", parent=top)
                 return
-            base_i = next((r["i"] for r in sel if r["name"] == v_base.get()), sel[0]["i"])
-            out, errors, warnings = core.report_rows(self.cases, self.sched, [r["i"] for r in sel], base_i)
+            out, errors, warnings = core.report_rows(self.cases, self.sched, [r["i"] for r in sel])
             if errors:
                 messagebox.showerror(TITLE, "오류 %d건. 저장하지 않았음. 탭 4 에서 고친 뒤 다시 저장할 것.\n\n%s"
                                      % (len(errors), "\n".join(errors[:12])), parent=top)
@@ -2273,10 +2264,10 @@ class App(object):
             except OSError:
                 pass
             top.destroy()
-            self.v_status.set("리포트용 CSV 저장: %s (케이스 %d개, 첫 줄 %s)" % (path, len(out), out[0][1]))
+            self.v_status.set("리포트용 CSV 저장: %s (케이스 %d개, 표 순서)" % (path, len(out)))
             messagebox.showinfo(TITLE, "리포트용 CSV 를 저장했다. 성능 리포트 생성기의 '케이스 정보 파일' 에서 이 파일을 고른다.\n\n"
-                                       "%s\n케이스 %d개, 첫 줄(비교 기준): %s%s"
-                                % (path, len(out), out[0][1], ("\n\n같은 이름의 이전 파일을 복사해 둠: %s" % keep) if keep else ""),
+                                       "%s\n케이스 %d개, 표 순서대로 저장%s"
+                                % (path, len(out), ("\n\n같은 이름의 이전 파일을 복사해 둠: %s" % keep) if keep else ""),
                                 parent=self.root)
 
         ttk.Button(bf, text="취소", command=top.destroy).pack(side="right")

@@ -535,7 +535,7 @@ class FailureTests(TcrunBase):
         with open(plan) as f:
             text = f.read()
         with open(plan, "w") as f:
-            f.write(text.replace("VER 2.1\n", "VER 2.2\n"))
+            f.write(text.replace("VER %s\n" % core.VERSION, "VER 9.9\n"))
         cron = e.start_cron()
         for cmd in (("run", plan, "esx01"), ("start", plan)):
             rc, out = e.tcrun(*cmd)
@@ -546,7 +546,7 @@ class FailureTests(TcrunBase):
         self.assertFalse(os.path.exists(os.path.join(e.root, "ssh_calls.txt")), "어디에도 접속하지 않음")
         self.assertEqual(cron.fired, [])
         rc, out = e.tcrun("check", plan)
-        self.assertIn("[PROBLEM] the plan was made by tcgen 2.2, tcrun is 2.1: paste block A again", out)
+        self.assertIn("[PROBLEM] the plan was made by tcgen 9.9, tcrun is %s: paste block A again" % core.VERSION, out)
         with open(plan, "w") as f:
             f.write("something else\n")
         rc, out = e.tcrun("run", plan, "esx01")
@@ -770,7 +770,7 @@ class MultiHostAndCheckTests(TcrunBase):
             pub = f.read().strip()
         self.assertIn("echo '%s' >> /etc/ssh/keys-root/authorized_keys" % pub, out)
         self.assertIn("sh ~/.tcgen/esxssh <esx host> hostname", out)
-        self.assertEqual(e.tcrun("version"), (0, "2.1\n"))
+        self.assertEqual(e.tcrun("version"), (0, core.VERSION + "\n"))
         rc, out = e.tcrun()
         self.assertEqual(rc, 2)
         self.assertIn("usage: sh ~/.tcgen/tcrun check <plan> | start <plan> | run <plan> <esx> | status [-a] | stop [esx] | key | version", out)

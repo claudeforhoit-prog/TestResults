@@ -39,7 +39,7 @@ import re
 import shutil
 import sys
 
-VERSION = "2.1"
+VERSION = "2.2"
 KST_TO_UTC = dt.timedelta(hours=9)
 CHUNK = 100            # 붙여넣는 글 한 줄에 담는 명령 조각 길이(문자 수)
 NONE_JOB = "(없음)"
@@ -1159,13 +1159,11 @@ def report_end_refs(c):
     return [v["name"] for v in (c.get("vms") or []) if v.get("end_ref") and v.get("name") in names]
 
 
-def report_rows(cases, sched, picks, baseline=None):
-    """리포트용 케이스 CSV 의 행. picks: 저장할 케이스 순번(표 순서). baseline: 첫 줄(리포트 생성기의 비교 기준)에 둘 순번.
+def report_rows(cases, sched, picks):
+    """리포트용 케이스 CSV 의 행. picks: 저장할 케이스 순번. 준 순서(탭 4 의 표 순서)대로 넣는다.
+    비교 기준 케이스는 이 생성기에서 정하지 않는다(성능 리포트 생성기의 '기준 케이스' 칸에서 정한다).
     (행 목록, 오류 목록, 경고 목록) 반환. 오류가 있으면 저장하지 않는다."""
     order = list(picks)
-    if baseline in order:
-        order.remove(baseline)
-        order.insert(0, baseline)
     rows, errors, warnings = [], [], []
     names = [(cases[i].get("name") or "").strip() for i in order]
     for n in sorted(set(x for x in names if x and names.count(x) > 1)):

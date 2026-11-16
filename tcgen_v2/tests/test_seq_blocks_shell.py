@@ -162,16 +162,18 @@ class SeqBlockTests(unittest.TestCase):
         e = self.e
         for block in ("run", "check"):
             out = self.paste("tcsh", [(None, 0, self.res[block]), (r"Paste block A again\.\r?\n", 0.5, "")])
-            self.assertRegex(out, r"(?m)^==== tcrun on this jump VM is not installed, tcgen is 2\.1\. Nothing was started\. Paste block A again\.\r?$")
+            self.assertRegex(out, r"(?m)^==== tcrun on this jump VM is not installed, tcgen is %s\. Nothing was started\. "
+                                  r"Paste block A again\.\r?$" % re.escape(core.VERSION))
         self.assertFalse(os.path.exists(os.path.join(e.tcgen, "runs", RID)))
         e.install_jump()
-        text = self.read("tcrun").replace("\nTCRUN_VERSION=2.1\n", "\nTCRUN_VERSION=1.9\n")
+        text = self.read("tcrun").replace("\nTCRUN_VERSION=%s\n" % core.VERSION, "\nTCRUN_VERSION=1.9\n")
         with open(self.tfile("tcrun"), "w") as f:
             f.write(text)
         cron = e.start_cron()
         for shell in ("tcsh", "bash"):
             out = self.paste(shell, [(None, 0, self.res["run"]), (r"Paste block A again\.\r?\n", 0.5, "")], crlf=(shell == "bash"))
-            self.assertRegex(out, r"(?m)^==== tcrun on this jump VM is 1\.9, tcgen is 2\.1\. Nothing was started\. Paste block A again\.\r?$")
+            self.assertRegex(out, r"(?m)^==== tcrun on this jump VM is 1\.9, tcgen is %s\. Nothing was started\. "
+                                  r"Paste block A again\.\r?$" % re.escape(core.VERSION))
         self.assertFalse(os.path.exists(os.path.join(e.tcgen, "runs", RID)))
         self.assertFalse(os.path.exists(os.path.join(e.root, "ssh_calls.txt")))
         self.assertEqual(cron.fired, [])

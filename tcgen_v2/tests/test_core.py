@@ -581,20 +581,22 @@ class ReportTests(TmpDir):
 
     def test_rows_order_columns(self):
         cs, sched = self.make()
-        rows, errors, warnings = core.report_rows(cs, sched, [0, 1], baseline=1)
+        rows, errors, warnings = core.report_rows(cs, sched, [0, 1])
         self.assertEqual(errors, [])
-        self.assertEqual([r[1] for r in rows], ["TC-b", "TC-a"], "비교 기준 케이스를 첫 줄에, 나머지는 표 순서")
-        a = dict(zip(core.REPORT_HEADER, rows[1]))
+        self.assertEqual([r[1] for r in rows], ["TC-a", "TC-b"], "고른 케이스를 표 순서대로 넣음")
+        with self.assertRaises(TypeError):
+            core.report_rows(cs, sched, [0, 1], baseline=1)          # 비교 기준은 이 생성기에서 정하지 않는다(v2.2 에서 뺌)
+        a = dict(zip(core.REPORT_HEADER, rows[0]))
         self.assertEqual(a, {"테스트 그룹": "tuning", "케이스명": "TC-a", "설명": "기준, \"기본\" 설정", "호스트 이름": "esx01",
                              "잡 시작 시각": "2026-11-20 00:00:00", "잡 종료 시각": "",
                              "VM": "esx01ev01;esx01ev02;esx01ev03", "종료 기준 VM": "esx01ev01"})
-        b = dict(zip(core.REPORT_HEADER, rows[0]))
+        b = dict(zip(core.REPORT_HEADER, rows[1]))
         self.assertEqual((b["잡 시작 시각"], b["잡 종료 시각"]), ("2026-11-20 12:00:00", "2026-11-20 21:30:15"),
                          "잡 시작은 계산한 시각, 잡 종료는 입력한 시각")
         self.assertEqual(len(warnings), 1)
         self.assertIn("esx01ev04", warnings[0], "잡과 모니터링이 없는 VM 은 종료 기준에서 빼고 경고")
         rows, errors, warnings = core.report_rows(cs, sched, [0, 1, 2])
-        self.assertEqual([r[1] for r in rows], ["TC-a", "TC-b", "TC-c"], "비교 기준을 고르지 않으면 표 순서")
+        self.assertEqual([r[1] for r in rows], ["TC-a", "TC-b", "TC-c"], "표 순서")
         self.assertEqual(rows[2][6], "")
         self.assertTrue(any("TC-c" in w and "VM 열을 비움" in w for w in warnings))
 

@@ -8,7 +8,7 @@ tests/test_seq.py 가 이 파일과 원본이 같은지 확인한다.
 
 TCRUN_SH = "".join([
     '#!/bin/sh\n',
-    '# tcrun 2.1 - tcgen sequence runner. Runs on the jump VM (POSIX sh). tcgen block A installs it as ~/.tcgen/tcrun.\n',
+    '# tcrun 2.2 - tcgen sequence runner. Runs on the jump VM (POSIX sh). tcgen block A installs it as ~/.tcgen/tcrun.\n',
     '#\n',
     '#   sh ~/.tcgen/tcrun check <plan>        read-only checks: ESX key login, tools, VMs, settings, VM login, clocks\n',
     '#   sh ~/.tcgen/tcrun start <plan>        start "run" in the background for every ESX host of the plan (block S uses this)\n',
@@ -23,7 +23,7 @@ TCRUN_SH = "".join([
     '# VM login: same way as ~/.tcgen/vmssh (password from ~/.tcgen/vmpw through SSH_ASKPASS, setsid).\n',
     '# ESX login: ~/.tcgen/esxssh (key ~/.tcgen/id_esx, no password).\n',
     '\n',
-    'TCRUN_VERSION=2.1\n',
+    'TCRUN_VERSION=2.2\n',
     'D=$HOME/.tcgen\n',
     'LC_ALL=C\n',
     'export LC_ALL\n',
@@ -1114,7 +1114,7 @@ TCRUN_SH = "".join([
 APPLY_PY = "".join([
     '# -*- coding: utf-8 -*-\n',
     '"""\n',
-    'tcgen_apply.py 2.1 - apply ESXi host advanced options and VM configuration (.vmx) keys for one test case.\n',
+    'tcgen_apply.py 2.2 - apply ESXi host advanced options and VM configuration (.vmx) keys for one test case.\n',
     '\n',
     'Runs ON THE ESXi HOST with the python3 that ships with ESXi. Standard library only, Python 3.5 syntax.\n',
     'The tcgen sequence runner (tcrun, on the jump VM) uploads this file to /tmp/tcgen on the host and runs it over ssh.\n',
@@ -1151,7 +1151,7 @@ APPLY_PY = "".join([
     'import sys\n',
     'import time\n',
     '\n',
-    'VERSION = "2.1"\n',
+    'VERSION = "2.2"\n',
     'VMFS_ROOT = os.environ.get("TCGEN_VMFS_ROOT", "/vmfs/volumes")\n',
     'TMP = os.environ.get("TCGEN_TMP", "/tmp/tcgen")\n',
     'POLL = float(os.environ.get("TCGEN_POLL_SEC", "5"))\n',

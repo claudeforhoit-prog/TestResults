@@ -160,7 +160,7 @@ def main():
     app = appmod.App(root)
     root.geometry("%sx%s+20+40" % (os.environ.get("TCGEN_W", "1500"), os.environ.get("TCGEN_H", "900")))
     root.update()
-    check(appmod.TITLE == "테스트 실행 명령 생성기 v2.1" and root.title() == appmod.TITLE, "창 제목에 v2.1")
+    check(appmod.TITLE == "테스트 실행 명령 생성기 v%s" % core.VERSION and root.title() == appmod.TITLE, "창 제목에 판 번호")
     check([app.nb.tab(i, "text") for i in range(5)] == ["1. 실행 명령", "2. 모니터링 명령", "3. 설정 프로파일", "4. 테스트 케이스",
                                                         "5. 생성 결과"], "탭 5개와 순서")
     check(app.mode() == "seq" and app.v_mode.get() == "순서 실행", "진행 방식의 기본값은 순서 실행")
@@ -437,7 +437,7 @@ def main():
     check(any(x[0] == "ask" and "TC-base-a 의 줄도 지워진다" in x[1] for x in LOG[n_log:]), "D 블록 확인 창에 그 케이스 이름")
     check([c["applied"] for c in core.load_cases(BASE)] == [True, False, False], "체크 상태가 test_cases.json 에 저장됨")
 
-    # 리포트용 CSV 저장: 케이스 고르기, 비교 기준(첫 줄), 저장 위치
+    # 리포트용 CSV 저장: 케이스 고르기, 저장 위치 (비교 기준 칸은 없다. 표 순서대로 저장한다)
     app.nb.select(3)
     root.update()
     app.export_report()
@@ -456,14 +456,13 @@ def main():
     rt.check["toggle"]("0")
     check([r["sel"] for r in rt.rows] == [True, False, True], "저장 칸을 눌러 케이스 고르기")
     check("pick" in rt.tree.item("0", "tags") and "pick" not in rt.tree.item("1", "tags"), "고른 행 바탕색")
-    cb = [w for w in walk(top) if isinstance(w, ttk.Combobox)][0]
-    check(list(cb.cget("values")) == ["TC-base-a", "TC-base-a-r3"] and cb.get() == "TC-base-a",
-          "비교 기준 후보는 고른 케이스, 기본은 표 순서 첫 케이스")
-    cb.set("TC-base-a-r3")
-    cb.event_generate("<<ComboboxSelected>>")
-    rt.check["toggle"]("1")
-    check(cb.get() == "TC-base-a-r3", "직접 고른 비교 기준은 다른 케이스를 골라도 유지")
-    rt.check["toggle"]("1")
+    check(not [w for w in walk(top) if isinstance(w, ttk.Combobox)]
+          and not [w for w in walk(top) if isinstance(w, ttk.Label) and "비교 기준 (첫 줄)" in str(w.cget("text"))],
+          "저장 창에 비교 기준을 고르는 칸이 없음")
+    shot_window(root, "리포트용 CSV 저장", "tcgen_time_report_dialog.png")
+    check(any(isinstance(w, ttk.Label) and "고른 케이스 2개" in str(w.cget("text")) or
+              (isinstance(w, ttk.Label) and str(w.cget("textvariable")) and "고른 케이스 2개" in top.getvar(str(w.cget("textvariable"))))
+              for w in walk(top)), "고른 케이스 수 표시")
     REP = os.path.join(TMP, "reports", "cases_for_report.csv")
     ASK_SAVE.append(REP)
     press(top, "저장")
@@ -471,12 +470,12 @@ def main():
     with open(REP, encoding="utf-8-sig", newline="") as f:
         rrows = list(csv.reader(f))
     check(rrows[0] == core.REPORT_HEADER, "리포트 생성기 케이스 정보 파일의 열 %s" % rrows[0])
-    check([r[1] for r in rrows[1:]] == ["TC-base-a-r3", "TC-base-a"], "비교 기준 케이스를 첫 줄에")
-    ra = dict(zip(core.REPORT_HEADER, rrows[2]))
+    check([r[1] for r in rrows[1:]] == ["TC-base-a", "TC-base-a-r3"], "고른 케이스를 탭 4 의 표 순서대로 저장")
+    ra = dict(zip(core.REPORT_HEADER, rrows[1]))
     check(ra["설명"] == "기준, 기본 설정 (THP never)" and ra["테스트 그룹"] == "tuning" and ra["호스트 이름"] == "esx01"
           and ra["잡 시작 시각"] == "2030-01-15 00:00:00" and ra["잡 종료 시각"] == "2030-01-15 11:40:00", "케이스 칸 %s" % ra)
     check(ra["VM"] == "esx01ev01;esx01ev02;esx01ev03" and ra["종료 기준 VM"] == "esx01ev03", "VM, 종료 기준 VM 칸")
-    check(rrows[1][5] == "", "잡 종료를 비운 케이스는 빈칸 (리포트 생성기가 자동으로 정함)")
+    check(rrows[2][5] == "", "잡 종료를 비운 케이스는 빈칸 (리포트 생성기가 자동으로 정함)")
     check(core.load_config().get("report_dir") == os.path.dirname(REP), "저장 위치를 기억함")
     check("리포트용 CSV 저장" in app.v_status.get(), "상태 줄에 저장 결과")
     ASK_SAVE.append(REP)

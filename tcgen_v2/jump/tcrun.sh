@@ -1,5 +1,5 @@
 #!/bin/sh
-# tcrun 2.1 - tcgen sequence runner. Runs on the jump VM (POSIX sh). tcgen block A installs it as ~/.tcgen/tcrun.
+# tcrun 2.2 - tcgen sequence runner. Runs on the jump VM (POSIX sh). tcgen block A installs it as ~/.tcgen/tcrun.
 #
 #   sh ~/.tcgen/tcrun check <plan>        read-only checks: ESX key login, tools, VMs, settings, VM login, clocks
 #   sh ~/.tcgen/tcrun start <plan>        start "run" in the background for every ESX host of the plan (block S uses this)
@@ -14,7 +14,7 @@
 # VM login: same way as ~/.tcgen/vmssh (password from ~/.tcgen/vmpw through SSH_ASKPASS, setsid).
 # ESX login: ~/.tcgen/esxssh (key ~/.tcgen/id_esx, no password).
 
-TCRUN_VERSION=2.1
+TCRUN_VERSION=2.2
 D=$HOME/.tcgen
 LC_ALL=C
 export LC_ALL
