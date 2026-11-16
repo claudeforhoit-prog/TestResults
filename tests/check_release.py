@@ -58,8 +58,11 @@ def check_docx(path, terms):
         if k == 'p' and x.style.name == 'Heading 1':
             cur = re.sub(r'^\d+\. ', '', x.text)
         elif k == 't' and cur in want[2:]:
-            bad += 1
-    check(f'{name}: TAT · phase · 동시 실행 잡 본문에 표 없음', bad == 0)
+            deg = cur == 'TAT' and x.rows[0].cells[-1].text == 'Degradation (%)'      # 기준선 대비 표만 본문에 둔다
+            bad += not deg
+    check(f'{name}: TAT · phase · 동시 실행 잡 본문에 잡 결과 표 없음 (기준선 대비 표 제외)', bad == 0)
+    if 'TAT' in seen:
+        check(f'{name}: 기준선을 주면 TAT 절에 Degradation 표', any(t.rows[0].cells[-1].text == 'Degradation (%)' for t in d.tables))
     # 표 제목: 모든 표 바로 위, 왼쪽 정렬, '표. ' 로 시작
     bad = []
     for i, (k, x) in enumerate(items):
@@ -196,6 +199,15 @@ def main():
         names = sorted(os.listdir(os.path.join(split, 'CASE-B'))) if os.path.isdir(os.path.join(split, 'CASE-B')) else []
         pat = re.compile(r'^CASE-B-(ops|tat|phase)(-\d+)?-\d{8}\.csv$|^CASE-B-etc-\d+-\d{8}\.\w+$|^(case\.txt|manifest\.csv)$')
         check('TC 정리 파일 이름', bool(names) and all(pat.match(n) for n in names) and any('-tat-' in n for n in names) and any('-phase-' in n for n in names), str(names))
+        r2 = subprocess.run([sys.executable, '-m', 'perfreport', 'run', 'samples/sample_cases.csv', 'samples/sample_data',
+                             '--out', os.path.join(tmp, 'out_only'), '--workers', '1', '--only', 'CASE-B'],
+                            cwd=ROOT, env=env, capture_output=True, text=True, encoding='utf-8', errors='replace')
+        only_docs = sorted(os.path.basename(p) for p in glob.glob(os.path.join(tmp, 'out_only', '*.docx')))
+        check('--only: 고른 케이스만 생성', r2.returncode == 0 and only_docs == ['CASE-B_performance_report.docx'], str(only_docs))
+        if only_docs:
+            import docx
+            d2 = docx.Document(os.path.join(tmp, 'out_only', only_docs[0]))
+            check('기준선이 없으면 Degradation 표 없음', not any(t.rows[0].cells[-1].text == 'Degradation (%)' for t in d2.tables))
         unit_checks(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

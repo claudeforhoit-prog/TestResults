@@ -3,7 +3,7 @@
 구성 (기본 양식: 지표 역할 지정이 없을 때)
   §1 케이스 식별
   §2 요약 표 (VM 별 주요 지표: 지표마다 평균 칸과 최대 칸, 데이터에 있는 지표만)
-  §3 TAT (잡 TAT 원장이 연결되고 TAT 측정 잡이 있는 케이스만, jobs.py): 잡별 elapsed 표 · 평균 · 최대 − 최소 · 저하율(비교 기준값을 줬을 때)
+  §3 TAT (잡 TAT 원장이 연결되고 TAT 측정 잡이 있는 케이스만, jobs.py): 잡별 elapsed 표 · 평균 · 최대 − 최소 · Degradation(비교 기준값을 줬을 때)
   §4 phase 소요 시간 (phase 소요 시간 CSV 가 연결된 케이스만, phase.py): 표 + 단계 누적 막대그래프. TAT 가 있으면 둘의 차이를 적는다.
      이 케이스의 시계열 그래프 배경에 phase 구간을 그린다 (번갈아 음영 · 경계선 · 3% 이상 단계만 이름 · Load | Compute 주황 점선)
   §5 동시 실행 잡 (잡 TAT 원장에 동시 실행 잡이 있을 때): 잡 종류 · 호스트마다 잡 요약 · 기준 구간 대비 가동 구간 · 잡별 elapsed 그림 · 세트별 표
@@ -317,7 +317,7 @@ def build_case(path, case, df, chart_dir, date, log=print, roles=None, include_u
     chart_width_cm: 문서 안 그래프 폭. 세로 페이지 본문 폭보다 넓으면 가로 방향 페이지로 만든다.
     pool: 그래프를 나눠 그릴 프로세스 풀 (없으면 순서대로 그린다).
     phase: 이 케이스에 연결된 phase 요약(phase.summarize). 있으면 phase 소요 시간 절을 넣고 시계열 그래프 배경에 phase 구간을 그린다.
-    jobs: 이 케이스에 연결된 잡 정리(jobs.classify). tat_base: {'value': TAT 비교 기준값(초), 'note': 설명} 또는 None.
+    jobs: 이 케이스에 연결된 잡 정리(jobs.classify). tat_base: 이 케이스의 TAT 기준선 {'name', 'kind', 'value'(초), 'cond', 'note'} 또는 None.
     반환: (저장한 경로, 그래프 수, 문서 글자)."""
     from . import roles as R
     os.makedirs(chart_dir, exist_ok=True)
@@ -479,15 +479,20 @@ def build_case(path, case, df, chart_dir, date, log=print, roles=None, include_u
             D._sub(doc, m['label'], 2)
             lines = [f'TAT: {m["tat"]:,.2f} s (잡 {len(m["jobs"])}개 평균, {form}, 호스트 {", ".join(m["hosts"]) or "기록 없음"})',
                      f'잡 간 편차(최대 − 최소): {sp:,.2f} s (평균 대비 {sp / m["tat"] * 100:.2f}%)']
-            deg = jobs_mod.degradation(m['tat'], (tat_base or {}).get('value'))
-            if deg is not None:
-                b = tat_base['value']
-                lines.append(f'저하율: {deg:+.2f}% = ({m["tat"]:,.2f} − {b:,.2f}) ÷ {b:,.2f} × 100 '
-                             f'(비교 기준: {tat_base.get("note") or "설명 없음"} {b:,.2f} s, 양수는 비교 기준 대비 증가)')
             if m['other_sets']:
                 lines.append(f'제외한 실행: 같은 VM 의 동일 잡 {m["other_sets"]}건 (시작 {", ".join(m.get("other_starts") or [])}). '
                              '케이스 잡 시작 시각과 불일치로 TAT 산출에서 제외')
             D._notes(doc, lines)
+        if tat_base and tat_base.get('value'):     # 기준선 대비 Degradation 표 (본문). 잡별 elapsed 표는 Appendix
+            bv = float(tat_base['value'])
+            bn = tat_base.get('name') or tat_base.get('note') or '기준선'
+            D._sub(doc, 'TAT 와 기준선 대비 Degradation', 2)
+            table('TAT 와 기준선 대비 Degradation', ['VM', 'TAT (s)', '기준선', '구분', '기준선 TAT (s)', 'Degradation (%)'],
+                  [[', '.join(m['hosts']) or m['label'], f'{m["tat"]:,.2f}', bn, tat_base.get('kind') or '', f'{bv:,.2f}',
+                    f'{jobs_mod.degradation(m["tat"], bv):+.2f}'] for m in mains])
+            D._notes(doc, ['Degradation = (TAT − 기준선 TAT) ÷ 기준선 TAT × 100, 양수는 기준선 대비 TAT 증가',
+                           (f'기준선 조건: {tat_base["cond"]}' if tat_base.get('cond') else ''),
+                           (f'기준선 비고: {tat_base["note"]}' if tat_base.get('note') and tat_base.get('note') != bn else '')])
 
         def tat_tables():
             D._sub(doc, 'TAT 측정 잡', 2)

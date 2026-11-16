@@ -294,18 +294,31 @@ def default_workers():
 def run_csv(cases_csv, data_dir, out_dir=None, title=None, baseline=None, analysis=None, log=print,
             split_dir=None, report=True, margin_s=None, roles=None, include_unassigned=True,
             palette=None, chart_width_cm=None, workers=None, selection=None, to_gb=False, to_gbps=False,
-            tat_baseline=None, tat_baseline_note='', end_ref_vms=''):
+            tat_baseline=None, tat_baseline_note='', end_ref_vms='', only=None, case_desc=None, case_baselines=None):
     """케이스 정보 CSV + 데이터 폴더 방식. 데이터 폴더의 모든 파일을 읽어 케이스마다 호스트·잡 실행 구간으로 잘라 쓴다.
     roles: 지표 역할 {지표: (역할, 순서)} 또는 역할 파일 경로. 없으면 기본 리포트 양식.
     palette: 케이스 문서 그래프의 색상 팔레트(1부터 센 번호 또는 이름, 기본 1 파랑 계열).
     chart_width_cm: 케이스 문서 안 그래프 폭(cm, 기본 16.5). workers: 그래프를 나눠 그릴 프로세스 수(기본 자동).
     selection: HTML '선택 내보내기' 파일. 주면 그 파일의 케이스 · VM · 지표만으로 만든다.
     to_gb · to_gbps: 크기 단위를 GB 로, 네트워크 속도를 Gbps 로 바꾼다(기본은 원래 단위 그대로, units.py).
-    tat_baseline · tat_baseline_note: TAT 비교 기준값(초)과 그 설명. 주면 문서 · HTML 에 저하율을 적는다.
-    end_ref_vms: 종료 시각을 비운 케이스에서 종료를 판단할 VM 이름 · 패턴(; 로 구분). 케이스 정보의 '종료 기준 VM' 열이 있으면 그 값이 먼저다."""
+    tat_baseline · tat_baseline_note: TAT 비교 기준값(초)과 그 설명. 주면 문서 · HTML 에 Degradation을 적는다.
+    end_ref_vms: 종료 시각을 비운 케이스에서 종료를 판단할 VM 이름 · 패턴(; 로 구분). 케이스 정보의 '종료 기준 VM' 열이 있으면 그 값이 먼저다.
+    only: 리포트를 만들 케이스 이름 목록(없으면 전부). case_desc: {케이스명: 설명} 으로 설명을 바꾼다.
+    case_baselines: {케이스명: 기준선} 케이스마다의 TAT 기준선. 기준선 = {'name', 'kind'(BM · VM), 'value'(초), 'cond', 'note'}.
+                    없는 케이스는 tat_baseline 을 쓴다."""
     phase_files, tat_files, unknown_files = [], [], []
     cases, profiles, srcs, index = scan_sources(cases_csv, data_dir, log, phase_out=phase_files, tat_out=tat_files,
                                                 unknown_out=unknown_files)
+    for c in cases:
+        if case_desc and c['id'] in case_desc:
+            c['label'] = str(case_desc[c['id']] or '')
+    all_cases = cases            # 종료 시각 감지는 만들지 않는 케이스의 시작 시각도 경계로 쓴다
+    if only is not None:
+        want = set(only)
+        cases = [c for c in cases if c['id'] in want]
+        if not cases:
+            raise SystemExit('만들 케이스가 없음: 생성할 케이스를 하나 이상 고른다.')
+        log(f'[케이스 선택] {len(cases)}/{len(all_cases)}건: ' + ', '.join(c['id'] for c in cases))
     sel = load_selection(selection) if selection else None
     if sel:
         known = {c['id'] for c in cases}
@@ -324,7 +337,7 @@ def run_csv(cases_csv, data_dir, out_dir=None, title=None, baseline=None, analys
     for c in cases:
         c['margin_s'] = margin_s
         if c.get('end_auto'):    # 종료 시각 자동 감지: 잡 시작 후 72시간 또는 같은 호스트 다음 케이스 시작 전까지에서 찾는다
-            nxt = [o['start'] for o in cases if o is not c and o.get('host') == c.get('host') and o['start'] > c['start']]
+            nxt = [o['start'] for o in all_cases if o is not c and o.get('host') == c.get('host') and o['start'] > c['start']]
             c['end'] = min([c['start'] + pd.Timedelta(hours=runwin.AUTO_MAX_H)] + nxt)
             probe = dict(c, margin_s=0)
             probe['sources'] = [dict(s) for s in srcs if _file_matches(index[s['path']], probe)]
@@ -363,13 +376,20 @@ def run_csv(cases_csv, data_dir, out_dir=None, title=None, baseline=None, analys
         return {'cases': [c['id'] for c in cases], 'checks': checks,
                 'windows': {c['id']: [str(c['start']), str(c['end']), bool(c.get('end_auto'))] for c in cases}}
     name = os.path.splitext(os.path.basename(cases_csv))[0]
+    for c in cases:              # 케이스마다의 TAT 기준선 (값이 0 보다 큰 것만)
+        b = (case_baselines or {}).get(c['id'])
+        try:
+            if b and float(b.get('value') or 0) > 0:
+                c['tat_base'] = dict(b, value=float(b['value']))
+        except (TypeError, ValueError):
+            pass
     job = {'name': name, 'title': title,       # 비우면 HTML 마다 그 그룹의 케이스 이름으로 만든다
            'cases': cases, 'baseline': baseline or cases[0]['id'],
            'analysis': analysis or 'profiles/analysis/default.yaml',
            'roles': roles or {}, 'include_unassigned': include_unassigned,
            'palette': palette_mod.palette_index(palette), 'chart_width_cm': chart_width_cm, 'workers': workers,
            'selection': sel, 'to_gb': bool(to_gb), 'to_gbps': bool(to_gbps),
-           'tat_base': ({'value': float(tat_baseline), 'note': (tat_baseline_note or '').strip()}
+           'tat_base': ({'value': float(tat_baseline), 'note': (tat_baseline_note or '').strip(), 'name': (tat_baseline_note or '').strip() or '기준선'}
                         if tat_baseline not in (None, '') and float(tat_baseline) > 0 else None),
            'output': out_dir or os.path.join(os.path.dirname(os.path.abspath(cases_csv)), 'out_' + name)}
     return run_job(job, os.path.dirname(os.path.abspath(cases_csv)), log)
@@ -391,7 +411,7 @@ def _build_docs(cases, meta, df, outdir, date, log, roles, include_unassigned, p
                                       df[df['case'] == c['id']], os.path.join(outdir, 'charts', _safe(c['id'])), date, log,
                                       roles=roles, include_unassigned=include_unassigned,
                                       palette=pal, chart_width_cm=width_cm, pool=pool, phase=c.get('phase'),
-                                      jobs=c.get('jobs'), tat_base=tat_base)
+                                      jobs=c.get('jobs'), tat_base=c.get('tat_base') or tat_base)
         out.append((dpath, k, text))
         log(f'[문서] {c["id"]}: 그래프 {k}장')
     return out
@@ -533,7 +553,8 @@ def run_job(job, base, log=print):
                'metric_roles': {m: v for m, v in roles.items() if m in gset},
                'phases': {c['id']: c['phase'] for c in cases if c.get('phase') and c['id'] in ids},
                'jobs': {c['id']: c['jobs'] for c in cases if c.get('jobs') and c['id'] in ids},
-               'tat_base': job.get('tat_base')}
+               'tat_base': job.get('tat_base'),
+               'tat_bases': {c['id']: c['tat_base'] for c in cases if c['id'] in ids and c.get('tat_base')}}
         fname = re.sub(r'[\\/:*?"<>|]+', '_', g).strip() if g else _safe(job.get('name', 'report'))
         htmls.append(report_html.build(os.path.join(outdir, f'{fname}.html'), ctx, sub, gcmp))
         if g:

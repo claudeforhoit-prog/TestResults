@@ -426,38 +426,45 @@ function jobBox(id, title){
 }
 const n2 = v => Math.round(v * 100) / 100, f2 = v => n2(v).toLocaleString('ko-KR', {minimumFractionDigits: 2, maximumFractionDigits: 2});
 
-// TAT: 체크한 케이스 가운데 TAT 측정 잡이 있는 케이스마다 막대 1개. 비교 기준값을 줬으면 점선과 저하율
+// TAT: 체크한 케이스 가운데 TAT 측정 잡이 있는 케이스마다 막대 1개. 케이스의 기준선이 있으면 Degradation, 기준선이 모두 같으면 점선
 function drawTat(cfg){
   document.getElementById('tatbox').innerHTML = '';
   const items = [];
   D.cases.filter(c => st.tcs.includes(c.id) && JB[c.id]).forEach(c => (JB[c.id].mains || []).forEach(m => items.push({c, m})));
   if (!items.length || !st.opt.tat) return;
-  const base = D.tatBase && D.tatBase.value > 0 ? D.tatBase : null;
-  const div = jobBox('tatbox', '그림. TAT (케이스 · VM 마다 TAT 측정 잡의 잡 elapsed 평균' + (base ? ' · 점선 = 비교 기준' : '') + ')');
+  const baseOf = id => { const b = (D.tatBases || {})[id] || D.tatBase; return b && b.value > 0 ? b : null; };
+  const bname = b => b.name || b.note || '기준선';
+  const degv = (y, b) => (y - b.value) / b.value * 100;
+  const degs = (y, b) => b ? `${degv(y, b) >= 0 ? '+' : ''}${degv(y, b).toFixed(2)}%` : '';
+  const bases = items.map(o => baseOf(o.c.id));
+  const any = bases.some(Boolean);
+  const one = any && bases.every(b => b && b.value === bases[0].value && bname(b) === bname(bases[0])) ? bases[0] : null;
+  const div = jobBox('tatbox', '그림. TAT (케이스 · VM 마다 TAT 측정 잡의 잡 elapsed 평균' + (one ? ' · 점선 = 기준선' : '') + (any ? ' · 막대 위 % = Degradation' : '') + ')');
   const multi = items.some(o => (JB[o.c.id].mains || []).length > 1);
-  const cs = items.map(o => ({id: multi ? `${o.c.id} · ${o.m.label}` : o.c.id, m: o.m}));
-  const ys = cs.map(c => c.m.tat), mx = Math.max(...ys, base ? base.value : 0) || 1;
-  const deg = y => base ? ` · 저하율 ${((y - base.value) / base.value * 100).toFixed(2)}%` : '';
+  const cs = items.map((o, i) => ({id: multi ? `${o.c.id} · ${o.m.label}` : o.c.id, m: o.m, b: bases[i]}));
+  const ys = cs.map(c => c.m.tat), mx = Math.max(...ys, ...bases.filter(Boolean).map(b => b.value)) || 1;
   const JC = D.jobColors;
   const data = [{type: 'bar', x: cs.map(c => c.id), y: ys, marker: {color: JC.tat},
     textfont: {color: st.dark ? css('--text-primary') : JC.ink},
-    text: ys.map(y => `<b>${f2(y)}</b>` + (base ? `<br>${((y - base.value) / base.value * 100 >= 0 ? '+' : '')}${((y - base.value) / base.value * 100).toFixed(2)}%` : '')),
+    text: cs.map(c => `<b>${f2(c.m.tat)}</b>` + (c.b ? `<br>${degs(c.m.tat, c.b)}` : '')),
     textposition: 'outside', cliponaxis: false,
-    customdata: cs.map(c => { const m = c.m; return [m.label, m.jobs.length, f2(m.min), f2(m.max), deg(m.tat)]; }),
+    customdata: cs.map(c => { const m = c.m; return [m.label, m.jobs.length, f2(m.min), f2(m.max), c.b ? ` · Degradation ${degs(m.tat, c.b)} (기준선 ${bname(c.b)} ${f2(c.b.value)} s)` : '']; }),
     hovertemplate: '%{x} · %{customdata[0]}<br>TAT %{y:,.2f} s (잡 %{customdata[1]}개 평균 · 최소 %{customdata[2]} · 최대 %{customdata[3]})%{customdata[4]}<extra></extra>'}];
-  const extra = base ? {shapes: [{type: 'line', xref: 'paper', x0: 0, x1: 1, y0: base.value, y1: base.value, line: {color: JC.base, width: 1.3, dash: 'dash'}}],
-    annotations: [{xref: 'paper', x: 1, y: base.value, xanchor: 'right', yanchor: 'bottom', showarrow: false, font: {size: 11, color: st.dark ? css('--text-secondary') : JC.ink2},
-                   text: `비교 기준 ${base.note ? base.note + ' ' : ''}${f2(base.value)} s`}]} : {};
+  const extra = one ? {shapes: [{type: 'line', xref: 'paper', x0: 0, x1: 1, y0: one.value, y1: one.value, line: {color: JC.base, width: 1.3, dash: 'dash'}}],
+    annotations: [{xref: 'paper', x: 1, y: one.value, xanchor: 'right', yanchor: 'bottom', showarrow: false, font: {size: 11, color: st.dark ? css('--text-secondary') : JC.ink2},
+                   text: `기준선 ${bname(one)} ${f2(one.value)} s`}]} : {};
   Plotly.newPlot(div, data, jobLayout('TAT (s)', mx, {...extra, showlegend: false, bargap: 0.5}), cfg);
   const t = document.createElement('div'); t.className = 'ptitle'; t.textContent = '표. TAT 측정 잡';
   const w = document.createElement('div'); w.className = 'tblwrap';
   w.innerHTML = '<table><thead><tr><th style="text-align:left">케이스</th><th style="text-align:left">TAT 측정 잡</th><th style="text-align:left">호스트</th><th>잡 수</th>'
-    + '<th style="text-align:left">잡마다의 elapsed (s)</th><th>TAT (s)</th><th>최대 − 최소 (s)</th>' + (base ? '<th>저하율</th>' : '') + '</tr></thead><tbody>'
-    + items.map(o => `<tr><td style="text-align:left">${o.c.id}</td><td style="text-align:left">${o.m.code}</td><td style="text-align:left">${o.m.hosts.join(', ')}</td>`
+    + '<th style="text-align:left">잡마다의 elapsed (s)</th><th>TAT (s)</th><th>최대 − 최소 (s)</th>'
+    + (any ? '<th style="text-align:left">기준선</th><th>기준선 TAT (s)</th><th>Degradation</th>' : '') + '</tr></thead><tbody>'
+    + items.map((o, i) => `<tr><td style="text-align:left">${o.c.id}</td><td style="text-align:left">${o.m.code}</td><td style="text-align:left">${o.m.hosts.join(', ')}</td>`
       + `<td>${o.m.jobs.length}</td><td style="text-align:left">${o.m.jobs.map(j => f2(j[4])).join(' · ')}</td><td><b>${f2(o.m.tat)}</b></td>`
-      + `<td>${f2(o.m.max - o.m.min)}</td>` + (base ? `<td>${((o.m.tat - base.value) / base.value * 100 >= 0 ? '+' : '')}${((o.m.tat - base.value) / base.value * 100).toFixed(2)}%</td>` : '')
+      + `<td>${f2(o.m.max - o.m.min)}</td>`
+      + (any ? (bases[i] ? `<td style="text-align:left">${bname(bases[i])}${bases[i].kind ? ' (' + bases[i].kind + ')' : ''}</td><td>${f2(bases[i].value)}</td><td>${degs(o.m.tat, bases[i])}</td>` : '<td></td><td></td><td></td>') : '')
       + '</tr>').join('') + '</tbody></table>'
-    + (base ? `<div class="sub">저하율 = (TAT − 비교 기준) ÷ 비교 기준 × 100. 비교 기준: ${base.note || '설명 없음'} ${f2(base.value)} s</div>` : '');
+    + (any ? '<div class="sub">Degradation = (TAT − 기준선 TAT) ÷ 기준선 TAT × 100</div>' : '');
   document.getElementById('tatbox').append(t, w);
 }
 

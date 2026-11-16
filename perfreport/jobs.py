@@ -252,7 +252,7 @@ def assign(cases, jobs, log=print):
 
 
 def degradation(tat, base):
-    """저하율 % = (TAT - 기준) ÷ 기준 × 100. 기준이 없으면 None."""
+    """Degradation % = (TAT - 기준) ÷ 기준 × 100. 기준이 없으면 None."""
     try:
         b = float(base)
     except (TypeError, ValueError):

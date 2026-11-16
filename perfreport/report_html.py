@@ -83,6 +83,7 @@ def build(path, ctx, df, stats):
         'phases': ctx.get('phases') or {},
         'jobs': ctx.get('jobs') or {},          # 잡 TAT 원장 (jobs.py): 케이스별 TAT 측정 잡 · 동시 실행 잡
         'tatBase': ctx.get('tat_base'),         # TAT 비교 기준값과 설명 (없으면 null)
+        'tatBases': ctx.get('tat_bases') or {},  # 케이스마다의 TAT 기준선 {케이스: {name, kind, value, ...}}. 없는 케이스는 tatBase
         'jobColors': jobs_mod.COLORS,           # 잡 결과 그래프 색: 이전 리포트와 같은 색
         'phaseColors': phase_cols,
         'phaseText': {n: ('#2a2a2a' if c in phase_mod.REST else '#ffffff') for n, c in phase_cols.items()},
