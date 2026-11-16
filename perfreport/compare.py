@@ -10,6 +10,7 @@
 """
 import os
 import re
+import textwrap
 
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Cm
@@ -124,33 +125,45 @@ def bar_chart(path, groups, ylabel, base=None, pair=False):
     bw = slot * (0.42 if pair else 0.8)
     top = max([v for _, bars in groups for b in bars for v in (b[1], b[4] if pair and b[4] is not None else b[1])] + [base[0] if base else 0]) or 1.0
     xt, xl = [], []
+    # 가로축 글자 겹침 방지: 막대 아래 이름(VM)은 한 칸에 들어가지 않으면 기울이고, 케이스 이름은 칸 폭에 맞춰 줄을 바꾼다
+    short = [_short_names([b[0] for b in bars]) for _, bars in groups]
+    slot_in = 11.5 / max(1, len(groups)) * slot                         # 막대 한 칸의 폭(인치, 그림 폭 14 in 기준)
+    longest = max([len(x) for subs in short for x in subs] or [0])
+    tilt = nmax > 1 and longest * 0.092 > slot_in * 0.95                # 10.5 pt 글자 1자 ≈ 0.092 in
+    bw_in = 11.5 / max(1, len(groups)) * bw                             # 막대 하나의 폭(인치)
+    vkw = ({'rotation': 90, 'fontsize': 10} if bw_in < 0.42 else {'fontsize': 10.5})      # 막대가 좁으면 막대 위 값을 세로로 적는다
+    wrap = max(8, int(11.5 / max(1, len(groups)) / 0.115))              # 케이스 이름 한 줄 글자 수 (13 pt 1자 ≈ 0.115 in)
     for gi, (gname, bars) in enumerate(groups):
         n = len(bars)
-        subs = _short_names([b[0] for b in bars])
+        subs = short[gi]
         for bi, (sub, val, color, note, val2) in enumerate(bars):
             x = gi + (bi - (n - 1) / 2) * slot
             if pair:
                 ax.bar(x - bw / 2, val, width=bw, color=color, zorder=3)
                 ax.bar(x + bw / 2, val2, width=bw, color=color, alpha=0.45, hatch='//', edgecolor='white', zorder=3)
-                ax.text(x - bw / 2, val + top * 0.012, _fmt(val), ha='center', va='bottom', fontsize=10.5, color=P.TEXT_PRIMARY)
-                ax.text(x + bw / 2, val2 + top * 0.012, _fmt(val2), ha='center', va='bottom', fontsize=10.5, color=P.TEXT_PRIMARY)
+                ax.text(x - bw / 2, val + top * 0.012, _fmt(val), ha='center', va='bottom', color=P.TEXT_PRIMARY, **vkw)
+                ax.text(x + bw / 2, val2 + top * 0.012, _fmt(val2), ha='center', va='bottom', color=P.TEXT_PRIMARY, **vkw)
             else:
                 ax.bar(x, val, width=bw, color=color, zorder=3)
                 ax.text(x, val + top * 0.012, _fmt(val) + (f'\n{note}' if note else ''), ha='center', va='bottom', fontsize=11.5,
                         color=P.TEXT_PRIMARY, linespacing=1.25)
             if sub and nmax > 1:
-                ax.text(x, -top * 0.02, subs[bi], ha='center', va='top', fontsize=10.5, color=P.TEXT_SECONDARY)
+                if tilt:
+                    ax.text(x + bw * 0.25, -top * 0.015, subs[bi][:18], ha='right', va='top', fontsize=10.5, color=P.TEXT_SECONDARY,
+                            rotation=35, rotation_mode='anchor')
+                else:
+                    ax.text(x, -top * 0.02, subs[bi], ha='center', va='top', fontsize=10.5, color=P.TEXT_SECONDARY)
         xt.append(gi)
-        xl.append(gname)
+        xl.append(textwrap.fill(gname, wrap))
     if base:
         ax.axhline(base[0], color=jobs_mod.COLORS['base'], linewidth=1.6, linestyle=(0, (5, 4)), zorder=2)
         ax.annotate(f'기준선 {base[1]}\n{base[0]:,.2f}', xy=(1.01, base[0]), xycoords=('axes fraction', 'data'), ha='left', va='center',
                     fontsize=11.5, color=P.TEXT_SECONDARY, annotation_clip=False)      # 그림 오른쪽 바깥: 막대 · 값과 겹치지 않는다
     ax.set_xticks(xt)
     ax.set_xticklabels(xl, fontsize=13)
-    ax.tick_params(axis='x', pad=22 if nmax > 1 else 6, length=0)
+    ax.tick_params(axis='x', pad=((16 + min(longest, 18) * 3.7) if tilt else 22) if nmax > 1 else 6, length=0)     # 기울인 이름 아래에 케이스 이름
     ax.set_xlim(-0.6, len(groups) - 0.4)
-    ax.set_ylim(0, top * (1.2 if not pair else 1.13))
+    ax.set_ylim(0, top * (1.2 if not pair else (1.2 if bw_in < 0.42 else 1.13)))
     _axes(ax, ylabel)
     if pair:
         from matplotlib.patches import Patch

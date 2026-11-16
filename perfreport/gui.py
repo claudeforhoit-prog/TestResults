@@ -832,6 +832,7 @@ def build(root):
     cmp_word = tk.BooleanVar(value=True)
     cmp_html = tk.BooleanVar(value=True)
     cmp_add = tk.StringVar(value=CMP.TAT)
+    cmp_pal = tk.StringVar(value=P.PALETTES[P.DEFAULT_PALETTE][0])
     hold = {'cmp': False}
     VAL_NAMES = {v_: k for k, v_ in CMP.VALUES.items()}
     CHART_NAMES = {v_: k for k, v_ in CMP.CHARTS.items()}
@@ -879,7 +880,9 @@ def build(root):
     lb = ttk.Frame(cl)
     lb.pack(fill='x', pady=(0, 4))
     lb2 = ttk.Frame(cl)
-    lb2.pack(fill='x', pady=(0, 6))
+    lb2.pack(fill='x', pady=(0, 4))
+    lb3 = ttk.Frame(cl)
+    lb3.pack(fill='x', pady=(0, 6))
     ttk.Label(lb, text='비교할 테스트 케이스', style='Head.TLabel').pack(side='left', padx=(0, 10))
     ctree = ttk.Treeview(cl, columns=('sel', 'ord', 'id', 'name', 'pal'), show='headings', selectmode='browse', height=8)
     for key, text, w_, anchor in (('sel', '선택', 46, 'center'), ('ord', '순서', 46, 'center'), ('id', '케이스명', 170, 'w'),
@@ -889,8 +892,8 @@ def build(root):
     ctree.tag_configure('on', background=C['case'])
     ctree.tag_configure('off', foreground=C['off'])
     ctree.pack(fill='both', expand=True)
-    ttk.Label(cl, text='선택 칸을 누르면 체크가 바뀐다. 순서 = 막대그래프 가로축 순서(위로 · 아래로). 표시 이름과 색 계열은 두 번 눌러 고친다.\n'
-                       '케이스마다 색 계열 하나를 쓰고, 그 케이스의 VM 은 계열의 색을 왼쪽부터 순서대로 받는다.',
+    ttk.Label(cl, text='선택 칸을 누르면 체크가 바뀐다. 순서 = 막대그래프 가로축 순서(위로 · 아래로). 표시 이름은 두 번 눌러 고친다.\n'
+                       '색: 표에서 케이스를 고르고 위의 색 계열 목록에서 바꾼다. VM 은 그 계열의 색을 왼쪽부터 순서대로 받는다.',
               style='Hint.TLabel', justify='left').pack(anchor='w', pady=(4, 2))
     cmp_cv = tk.Canvas(cl, height=120, bg=C['card'], highlightthickness=0)       # 선택한 케이스의 실제 색
     cmp_cv.pack(fill='x')
@@ -1136,6 +1139,36 @@ def build(root):
     ttk.Button(lb2, text='위로', width=7, command=lambda: cmp_case_move(-1)).pack(side='left')
     ttk.Button(lb2, text='아래로', width=7, command=lambda: cmp_case_move(1)).pack(side='left', padx=(4, 0))
     ttk.Button(lb2, text='색 계열 자동 지정', command=cmp_auto_colors).pack(side='left', padx=(4, 0))
+    # 색 고르기: 탭 3 의 그래프 색 계열과 같은 방식(목록 + 실제 색). 표에서 고른 케이스에 적용한다
+    ttk.Label(lb3, text='고른 케이스의 색 계열').pack(side='left', padx=(0, 6))
+    cmp_pal_cb = ttk.Combobox(lb3, textvariable=cmp_pal, values=PAL_NAMES, state='readonly', width=16)
+    cmp_pal_cb.pack(side='left')
+    cmp_pal_cv = tk.Canvas(lb3, width=8 * 30 + 4, height=22, bg=C['card'], highlightthickness=0)
+    cmp_pal_cv.pack(side='left', padx=8)
+
+    def cmp_pal_draw(*_):
+        cmp_pal_cv.delete('all')
+        if cmp_pal.get() in PAL_NAMES:
+            for i, col in enumerate(P.palette_colors(P.palette_index(cmp_pal.get()))[:8]):
+                cmp_pal_cv.create_rectangle(2 + i * 30, 2, 2 + i * 30 + 25, 20, fill=col, outline=C['mut'])
+
+    def cmp_pal_pick(_e=None):
+        sel = ctree.selection()
+        cmp_pal_draw()
+        if sel and cmp_pal.get() in PAL_NAMES:
+            cmp_case_done(sel[0], '#5', cmp_pal.get())
+
+    def cmp_row_selected(_e=None):
+        sel = ctree.selection()
+        if sel:
+            r = next((x for x in state['cmp_rows'] if x['id'] == sel[0]), None)
+            if r and cmp_pal.get() != r['palette']:
+                cmp_pal.set(r['palette'])
+            cmp_pal_draw()
+
+    cmp_pal_cb.bind('<<ComboboxSelected>>', cmp_pal_pick)
+    ctree.bind('<<TreeviewSelect>>', cmp_row_selected)
+    cmp_pal_draw()
     ttk.Button(rb, text='+ 지표 추가', style='Green.TButton', command=cmp_metric_add).pack(side='left', padx=(6, 0))
     names_btn = ttk.Button(rb, text='지표 목록 읽기', command=cmp_load_names)
     names_btn.pack(side='left', padx=(6, 0))
@@ -1350,7 +1383,7 @@ def build(root):
             'load_cases': load_cases, 'set_gen': set_gen, 'apply_base': apply_base, 'apply_vms': apply_vms, 'vmf_var': vmf_var, 'cell_done': cell_done,
             'base_add': base_add, 'base_done': base_done, 'base_del': base_del, 'run_args': run_args, 'check': check,
             'refresh_cases': refresh_cases, 'count_var': count_var, 'pb_base': pb_base, 'pb_opt': pb_opt, 'pb_cmp': pb_cmp,
-            'cmp': {'title': cmp_title, 'base': cmp_base, 'phase': cmp_phase, 'pcase': cmp_pcase, 'word': cmp_word, 'html': cmp_html,
+            'cmp': {'pal': cmp_pal, 'pal_pick': cmp_pal_pick, 'title': cmp_title, 'base': cmp_base, 'phase': cmp_phase, 'pcase': cmp_pcase, 'word': cmp_word, 'html': cmp_html,
                     'toggle': cmp_toggle, 'case_done': cmp_case_done, 'case_move': cmp_case_move, 'auto_colors': cmp_auto_colors,
                     'metric_add': cmp_metric_add, 'metric_del': cmp_metric_del, 'metric_move': cmp_metric_move,
                     'metric_done': cmp_metric_done, 'spec': cmp_spec, 'sync': cmp_sync}}
