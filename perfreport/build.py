@@ -195,6 +195,13 @@ def _file_matches(ix, case):
     return True
 
 
+def vm_filter_patterns(text):
+    """VM 이름 필터(예: 'vm01' · 'vm01,vm02')를 케이스 정보의 VM 열 형식으로 바꾼다.
+    와일드카드(* ?)가 없는 낱말은 이름에 그 글자가 들어 있는 VM 을 뜻한다(vm01 → *vm01*). 빈 값은 호스트의 VM 전부."""
+    toks = [t.strip() for t in re.split(r'[;,]', str(text or '')) if t.strip()]
+    return ';'.join(t if any(ch in t for ch in '*?') else f'*{t}*' for t in toks)
+
+
 def scan_sources(cases_csv, data_dir, log=print, phase_out=None, tat_out=None, unknown_out=None):
     """케이스 정보와 데이터 폴더를 읽어 (케이스 목록, 입력 프로파일, 읽을 수 있는 파일, 파일 색인) 을 돌려준다.
     phase 소요 시간 CSV(phase.py)와 잡 TAT 원장 CSV(jobs.py)는 지표 파일이 아니라 phase_out · tat_out 목록에 넣는다.
@@ -294,7 +301,7 @@ def default_workers():
 def run_csv(cases_csv, data_dir, out_dir=None, title=None, baseline=None, analysis=None, log=print,
             split_dir=None, report=True, margin_s=None, roles=None, include_unassigned=True,
             palette=None, chart_width_cm=None, workers=None, selection=None, to_gb=False, to_gbps=False,
-            tat_baseline=None, tat_baseline_note='', end_ref_vms='', only=None, case_desc=None, case_baselines=None):
+            tat_baseline=None, tat_baseline_note='', end_ref_vms='', only=None, case_desc=None, case_baselines=None, case_vms=None, vm_filter=None):
     """케이스 정보 CSV + 데이터 폴더 방식. 데이터 폴더의 모든 파일을 읽어 케이스마다 호스트·잡 실행 구간으로 잘라 쓴다.
     roles: 지표 역할 {지표: (역할, 순서)} 또는 역할 파일 경로. 없으면 기본 리포트 양식.
     palette: 케이스 문서 그래프의 색상 팔레트(1부터 센 번호 또는 이름, 기본 1 파랑 계열).
@@ -304,6 +311,8 @@ def run_csv(cases_csv, data_dir, out_dir=None, title=None, baseline=None, analys
     tat_baseline · tat_baseline_note: TAT 비교 기준값(초)과 그 설명. 주면 문서 · HTML 에 Degradation을 적는다.
     end_ref_vms: 종료 시각을 비운 케이스에서 종료를 판단할 VM 이름 · 패턴(; 로 구분). 케이스 정보의 '종료 기준 VM' 열이 있으면 그 값이 먼저다.
     only: 리포트를 만들 케이스 이름 목록(없으면 전부). case_desc: {케이스명: 설명} 으로 설명을 바꾼다.
+    case_vms: {케이스명: VM 이름 필터} 케이스마다 리포트에 넣을 VM (예: 'vm01,vm02', vm_filter_patterns). 빈 값은 호스트의 VM 전부.
+              이 값이 있는 케이스는 케이스 정보 파일의 VM 열 대신 이 값을 쓴다. vm_filter: 모든 케이스에 같은 필터(명령 옵션용).
     case_baselines: {케이스명: 기준선} 케이스마다의 TAT 기준선. 기준선 = {'name', 'kind'(BM · VM), 'value'(초), 'cond', 'note'}.
                     없는 케이스는 tat_baseline 을 쓴다."""
     phase_files, tat_files, unknown_files = [], [], []
@@ -312,6 +321,10 @@ def run_csv(cases_csv, data_dir, out_dir=None, title=None, baseline=None, analys
     for c in cases:
         if case_desc and c['id'] in case_desc:
             c['label'] = str(case_desc[c['id']] or '')
+        if case_vms is not None and c['id'] in case_vms:
+            c['vms'] = vm_filter_patterns(case_vms[c['id']])
+        elif vm_filter:
+            c['vms'] = vm_filter_patterns(vm_filter)
     all_cases = cases            # 종료 시각 감지는 만들지 않는 케이스의 시작 시각도 경계로 쓴다
     if only is not None:
         want = set(only)

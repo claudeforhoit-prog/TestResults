@@ -62,6 +62,7 @@ Windows PC 한 대에서 인터넷 연결 없이 동작한다.
 | 크기를 GB 로 | `--to-gb` | 꺼짐 | KB · MB · Bytes 를 GB 로(1024 배수) |
 | 네트워크 속도를 Gbps 로 | `--to-gbps` | 꺼짐 | KBps · Mbps 를 Gbps 로 |
 | 탭 1 의 생성 칸 | `--only 케이스명;케이스명` | 모든 케이스 | 고른 케이스만 리포트를 만든다 |
+| 탭 1 의 VM 필터 칸 | `--vm-filter 이름,이름` | 케이스 정보 파일의 VM 열 | 리포트에 넣을 VM 의 이름 필터. 창 화면은 케이스마다, 명령은 모든 케이스에 같은 값 |
 | 탭 1 의 설명 칸 | (없음) | 케이스 정보 파일의 설명 | 문서와 HTML 에 들어가는 설명을 바꾼다 |
 | 탭 2 기준선, 탭 1 의 기준선 칸 | `--tat-baseline 초`, `--tat-baseline-note 이름` | 없음(Degradation 미기재) | Degradation = (TAT − 기준선 TAT) ÷ 기준선 TAT × 100. 창 화면은 케이스마다 기준선을 고르고, 명령은 모든 케이스에 같은 값을 쓴다 |
 | 종료 기준 VM | `--end-ref-vm 이름;패턴` | 없음(케이스의 모든 VM) | 종료 시각을 판단할 VM. 케이스 정보의 `종료 기준 VM` 열이 먼저다 |
@@ -265,6 +266,8 @@ perfreport.exe run <케이스정보.xlsx> <원본폴더> --split <정리폴더> 
 | :-- | :-- |
 | `생성` 칸 | 누르면 체크가 바뀐다. 체크한 케이스만 리포트를 만든다. 체크하지 않은 케이스의 시작 시각도 종료 시각 자동 감지의 경계로는 쓴다 |
 | `설명` 칸 | 두 번 눌러 고친다. 고친 설명이 문서와 HTML 에 들어간다 |
+| `VM 필터` 칸 | 두 번 눌러 리포트에 넣을 VM 의 이름 필터를 적는다. 예: `vm01`, `vm01,vm02`. 이름에 그 글자가 들어 있는 VM 만 넣는다. 비우면 호스트의 VM 전부다. 처음 값은 케이스 정보 파일의 VM 열이고, 고치지 않은 케이스는 2.3 의 규칙 그대로다 |
+| `VM 필터 일괄 적용` | 필터를 적고 `전체 케이스에 적용` 또는 `선택한 케이스에 적용` 을 누른다. 빈 칸으로 적용하면 호스트의 VM 전부가 된다 |
 | `기준선 (TAT)` 칸 | 두 번 눌러 탭 2 에서 정의한 기준선을 고른다. `(기준선 없음)` 이면 Degradation 을 적지 않는다 |
 | `기준선 일괄 적용` | 목록에서 기준선을 고르고 `전체 케이스에 적용` 또는 `선택한 케이스에 적용`(표에서 Shift · Ctrl 로 여러 줄 선택)을 누른다. 일괄 적용한 뒤 일부 케이스만 칸에서 따로 바꿀 수 있다 |
 | `다시 불러오기` | 케이스 정보 파일을 다시 읽는다. 생성 체크, 설명, 기준선은 케이스 이름으로 유지된다 |
@@ -337,7 +340,7 @@ TAT 기준선을 미리 정의한다. 기준선은 BM 의 TAT 일 수도, 다른
 ```
 perfreport.exe run <케이스정보.csv> <데이터폴더> [--out 결과폴더] [--title 제목] [--core]
                    [--roles 역할파일.csv] [--no-unassigned] [--palette 1~7] [--chart-width cm] [--workers N]
-                   [--selection HTML선택파일.json] [--to-gb] [--to-gbps] [--tat-baseline 초] [--tat-baseline-note 설명] [--end-ref-vm 이름;패턴] [--only 케이스명;케이스명]
+                   [--selection HTML선택파일.json] [--to-gb] [--to-gbps] [--tat-baseline 초] [--tat-baseline-note 설명] [--end-ref-vm 이름;패턴] [--only 케이스명;케이스명] [--vm-filter 이름,이름]
 perfreport.exe inspect <파일> [프로파일]      파일에서 읽히는 지표 · VM · 시각 범위 확인
 perfreport.exe gui
 ```
@@ -350,6 +353,7 @@ perfreport.exe gui
 - `--to-gb` · `--to-gbps`: 크기 단위를 GB 로, 네트워크 속도를 Gbps 로 바꾼다(3.8).
 - `--tat-baseline 초` · `--tat-baseline-note 이름`: TAT 기준선 값과 이름. 주면 모든 케이스에 Degradation = (TAT − 기준선 TAT) ÷ 기준선 TAT × 100 을 적는다.
 - `--only 케이스명;케이스명`: 고른 케이스만 리포트를 만든다.
+- `--vm-filter 이름,이름`: 리포트에 넣을 VM 의 이름 필터(예: `vm01,vm02`). 모든 케이스에 적용한다.
 - `--end-ref-vm 이름;패턴`: 잡 종료 시각을 비운 케이스에서 종료를 판단할 VM(2.4).
 - `--selection`: HTML 의 `선택 내보내기` 파일. 그 케이스, VM, 지표만으로 만든다.
 - `--workers`: 그래프를 나눠 그릴 프로세스 수. 기본은 CPU 수 - 1 (최대 6). 1 이면 순서대로 그린다.

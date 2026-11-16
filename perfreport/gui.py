@@ -297,6 +297,7 @@ def build(root):
     to_gbps = tk.BooleanVar(value=False)
     end_refs = tk.StringVar(value=str(saved.get('end_ref_vms', '')))      # 종료 기준 VM: 바꿀 때까지 저장
     bulk_var = tk.StringVar(value=NO_BASE)
+    vmf_var = tk.StringVar()                # VM 필터 일괄 적용 입력 칸
     count_var = tk.StringVar(value='케이스 정보 파일을 고르면 케이스가 표로 나온다')
     q = queue.Queue()
     last = {}
@@ -368,10 +369,12 @@ def build(root):
 
     # ── 탭 1: 테스트 케이스
     bar = ttk.Frame(tab1)
-    bar.pack(fill='x', pady=(0, 8))
-    COLS = (('gen', '생성', 46, 'center'), ('id', '케이스명', 140, 'w'), ('label', '설명 (수정 가능)', 190, 'w'), ('group', '테스트 그룹', 90, 'w'),
-            ('host', '호스트', 80, 'w'), ('start', '잡 시작', 135, 'w'), ('end', '잡 종료', 135, 'w'), ('vms', 'VM', 120, 'w'),
-            ('end_refs', '종료 기준 VM', 100, 'w'), ('base', '기준선 (TAT)', 180, 'w'))
+    bar.pack(fill='x', pady=(0, 6))
+    bar2 = ttk.Frame(tab1)
+    bar2.pack(fill='x', pady=(0, 8))
+    COLS = (('gen', '생성', 46, 'center'), ('id', '케이스명', 140, 'w'), ('label', '설명 (수정 가능)', 180, 'w'), ('group', '테스트 그룹', 90, 'w'),
+            ('host', '호스트', 80, 'w'), ('start', '잡 시작', 135, 'w'), ('end', '잡 종료', 135, 'w'), ('vms', 'VM 필터 (수정 가능)', 150, 'w'),
+            ('end_refs', '종료 기준 VM', 100, 'w'), ('base', '기준선 (TAT)', 170, 'w'))
     wrap = ttk.Frame(tab1)
     wrap.pack(fill='both', expand=True)
     tree = ttk.Treeview(wrap, columns=[c_[0] for c_ in COLS], show='headings', selectmode='extended')
@@ -388,7 +391,7 @@ def build(root):
     tree.grid(row=0, column=0, sticky='nsew')
     sy.grid(row=0, column=1, sticky='ns')
     sx.grid(row=1, column=0, sticky='we')
-    ttk.Label(tab1, text='생성 칸을 누르면 체크가 바뀐다. 설명 칸과 기준선 칸은 두 번 눌러 고친다. 체크한 케이스만 리포트를 만든다. '
+    ttk.Label(tab1, text='생성 칸을 누르면 체크가 바뀐다. 설명 · VM 필터 · 기준선 칸은 두 번 눌러 고친다. 체크한 케이스만 리포트를 만든다. '
                          '고친 내용은 자동 저장되고 원본 파일은 바꾸지 않는다.', style='Hint.TLabel').pack(anchor='w', pady=(6, 0))
     ttk.Label(tab1, textvariable=count_var, style='Hint.TLabel').pack(anchor='w')
 
@@ -411,7 +414,7 @@ def build(root):
             tree.insert('', 'end', iid=c_['id'], tags=('on' if r['gen'] else 'off',), values=(
                 '☑' if r['gen'] else '☐', c_['id'], r['label'], c_.get('group') or '', c_.get('host') or '',
                 f'{c_["start"]:%Y-%m-%d %H:%M:%S}', '자동' if c_.get('end_auto') else f'{c_["end"]:%Y-%m-%d %H:%M:%S}',
-                c_.get('vms') or '', c_.get('end_refs') or '', btxt))
+                r['vms'], c_.get('end_refs') or '', btxt))
         if state['cases']:
             count_var.set(f'케이스 {len(state["cases"])}건 중 {n}건 생성 · 기준선 지정 {sum(1 for r in state["rows"].values() if base_by_name(r.get("base", "")))}건')
 
@@ -437,7 +440,7 @@ def build(root):
         for c_ in cases:
             o = old.get(c_['id'], {}) if isinstance(old.get(c_['id']), dict) else {}
             state['rows'][c_['id']] = {'gen': bool(o.get('gen', True)), 'label': str(o.get('label', c_.get('label') or '')),
-                                       'base': str(o.get('base', ''))}
+                                       'base': str(o.get('base', '')), 'vms': str(o.get('vms', c_.get('vms') or ''))}
         refresh_cases()
         return True
 
@@ -453,6 +456,8 @@ def build(root):
             state['rows'][iid]['label'] = val.strip()
         elif key == 'base':
             state['rows'][iid]['base'] = name_of_choice(val)
+        elif key == 'vms':
+            state['rows'][iid]['vms'] = val.strip()
         save_cases()
         refresh_cases()
 
@@ -469,7 +474,7 @@ def build(root):
         if not iid or not col:
             return
         key = tree['columns'][int(col[1:]) - 1]
-        if key == 'label':
+        if key in ('label', 'vms'):
             state['edit'] = edit_cell(tree, iid, col, None, cell_done)
         elif key == 'base':
             state['edit'] = edit_cell(tree, iid, col, base_choices(), cell_done)
@@ -485,6 +490,17 @@ def build(root):
         refresh_cases()
         tree.selection_set([i for i in ids if tree.exists(i)])
 
+    def apply_vms(all_rows):
+        ids = [c_['id'] for c_ in state['cases']] if all_rows else list(tree.selection())
+        if not ids:
+            messagebox.showinfo('VM 필터 일괄 적용', '표에서 적용할 케이스를 먼저 고르십시오. (Shift · Ctrl 로 여러 줄 선택)')
+            return
+        for cid in ids:
+            state['rows'][cid]['vms'] = vmf_var.get().strip()
+        save_cases()
+        refresh_cases()
+        tree.selection_set([i for i in ids if tree.exists(i)])
+
     tree.bind('<Button-1>', on_click)
     tree.bind('<Double-1>', on_double)
     ttk.Button(bar, text='다시 불러오기', style='Green.TButton', command=load_cases).pack(side='left')
@@ -495,6 +511,12 @@ def build(root):
     bulk_cb.pack(side='left')
     ttk.Button(bar, text='전체 케이스에 적용', style='Purple.TButton', command=lambda: apply_base(True)).pack(side='left', padx=(6, 0))
     ttk.Button(bar, text='선택한 케이스에 적용', style='Purple.TButton', command=lambda: apply_base(False)).pack(side='left', padx=(4, 0))
+    ttk.Label(bar2, text='VM 필터 일괄 적용').pack(side='left', padx=(0, 6))
+    ttk.Entry(bar2, textvariable=vmf_var, width=30).pack(side='left')
+    ttk.Button(bar2, text='전체 케이스에 적용', style='Purple.TButton', command=lambda: apply_vms(True)).pack(side='left', padx=(6, 0))
+    ttk.Button(bar2, text='선택한 케이스에 적용', style='Purple.TButton', command=lambda: apply_vms(False)).pack(side='left', padx=(4, 0))
+    ttk.Label(bar2, text='리포트에 넣을 VM 의 이름 필터. 예: vm01 또는 vm01,vm02 (이름에 그 글자가 든 VM). 비우면 호스트의 VM 전부',
+              style='Hint.TLabel').pack(side='left', padx=10)
 
     # ── 탭 2: 기준선 사전 정의
     bbar = ttk.Frame(tab2)
@@ -705,7 +727,9 @@ def build(root):
                     roles=dict(state['roles']) or None, include_unassigned=include_un.get(),
                     palette=pal_var.get(), chart_width_cm=width, selection=v['selection'].get() or None,
                     to_gb=to_gb.get(), to_gbps=to_gbps.get(), end_ref_vms=end_refs.get().strip(),
-                    only=only, case_desc={cid: r['label'] for cid, r in state['rows'].items()}, case_baselines=bases), ''
+                    only=only, case_desc={cid: r['label'] for cid, r in state['rows'].items()}, case_baselines=bases,
+                    case_vms={c_['id']: state['rows'][c_['id']]['vms'] for c_ in state['cases']      # 화면에서 고친 케이스만 (그대로면 파일의 VM 열 규칙)
+                              if state['rows'][c_['id']]['vms'] != (c_.get('vms') or '')}), ''
 
     def start():
         kw, why = run_args()
@@ -769,7 +793,7 @@ def build(root):
             'open_roles': open_roles, 'set_roles': set_roles, 'run_btn': run_btn, 'role_btn': role_btn, 'un_chk': un_chk,
             'pal_var': pal_var, 'width_var': width_var, 'to_gb': to_gb, 'to_gbps': to_gbps, 'end_refs': end_refs,
             'nb': nb, 'tabs': (tab1, tab2, tab3, tab4), 'tree': tree, 'btree': btree, 'bulk_var': bulk_var,
-            'load_cases': load_cases, 'set_gen': set_gen, 'apply_base': apply_base, 'cell_done': cell_done,
+            'load_cases': load_cases, 'set_gen': set_gen, 'apply_base': apply_base, 'apply_vms': apply_vms, 'vmf_var': vmf_var, 'cell_done': cell_done,
             'base_add': base_add, 'base_done': base_done, 'base_del': base_del, 'run_args': run_args,
             'refresh_cases': refresh_cases, 'count_var': count_var}
 

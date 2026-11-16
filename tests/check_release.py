@@ -119,6 +119,9 @@ def unit_checks(tmp):
     check('phase: 열이 알파벳순이어도 실행 순서', js and js[0]['order'] == stages, str(js[0]['order'][:4]) if js else '읽지 못함')
     check('phase: VM 은 …Phase-Hostname 열', js and js[0]['host'] == 'esx01-vm01', js[0]['host'] if js else '')
 
+    from perfreport.build import vm_filter_patterns as vf
+    check('VM 필터: 낱말은 포함 검색, 빈 값은 전부', [vf(x) for x in ('vm01', 'vm01, vm02', '', 'app-*')] == ['*vm01*', '*vm01*;*vm02*', '', 'app-*'])
+
     # 잡 구분: TAT 측정 잡과 같은 종류의 다른 실행은 동시 실행 잡이 아니다
     t0 = pd.Timestamp('2026-01-05 10:00:00')
     rows = []
