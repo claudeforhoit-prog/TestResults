@@ -975,8 +975,10 @@ class App(object):
                 "최대 대기: 잡 시작부터 이 시간(시간:분, 예 12:00)이 지나도 잡이 끝나지 않으면 진행을 멈춘다. 비우면 제한이 없다.",
                 "잡, 모니터링, 설정을 하나도 지정하지 않은 VM 행은 그 케이스에서 쓰지 않는다. 끄지도 켜지도 않는다.",
                 "잡 없이 설정만 지정한 케이스는 설정만 적용하고 다음 케이스로 넘어간다. 모니터링만 있고 잡이 없는 케이스는 오류다.",
-                "적용 체크한 케이스는 [명령어 생성] 에서 빠진다. 진행이 중간에 멈추면 끝난 케이스를 적용 체크하고 다시 생성해 "
-                "나머지를 이어서 실행한다.",
+                "[명령어 생성] 을 누르면 넣을 케이스를 고르는 창이 열린다. 처음에는 적용 체크하지 않은 케이스가 골라져 있다. "
+                "진행이 중간에 멈추면 끝난 케이스를 적용 체크하고 다시 생성해 나머지를 이어서 실행한다.",
+                "칸 고치기: 칸을 두 번 누르거나 행을 고르고 Enter(또는 F2)를 누른다. [+ 케이스 추가] 를 누르면 새 케이스의 이름 칸이 바로 "
+                "열린다. 케이스 이름과 VM 이름은 영문, 숫자, . _ - 만 쓴다(공백, 한글 불가). 한글은 설명 칸에 적는다.",
                 "새 케이스는 VM %d대(ESX 호스트 + %s01, %s02)가 기본이다. [+ VM 추가] 는 선택한 케이스에 다음 번호 VM 을 추가한다. "
                 "[+ 케이스 추가] 는 선택한 케이스를 VM 구성과 설정까지 복사한다." % (n, p, p),
                 "삭제, 위로, 아래로: 케이스 행을 고르면 케이스를, VM 행을 고르면 그 VM 을 대상으로 한다. 케이스의 순서가 실행 순서이고, "
@@ -988,7 +990,8 @@ class App(object):
             "케이스 행(옅은 파란 바탕, 굵은 글씨): 적용 체크, 케이스 이름, 설명, ESX 호스트, ESX 모니터링, 간격, 잡 시작, "
             "모니터링 중지, 테스트 그룹, 잡 종료 (리포트)",
             "VM 행(└): VM 이름, 잡, 그 VM 의 모니터링, 종료 기준 VM",
-            "칸을 두 번 누르면 고친다. 적용 칸을 누르면(또는 Space) 체크되고, 체크한 케이스는 [명령어 생성] 에서 빠진다. "
+            "칸을 두 번 누르거나 행을 고르고 Enter(또는 F2)를 누르면 고친다. 적용 칸을 누르면(또는 Space) 체크되고, 체크한 케이스는 "
+            "[명령어 생성] 의 선택 창에서 처음에 빠진 채로 나온다. "
             "표는 바뀔 때마다 데이터 폴더의 test_cases.json 에 저장된다.",
             "새 케이스는 VM %d대(ESX 호스트 + %s01, %s02)가 기본이다. [+ VM 추가] 는 선택한 케이스에 다음 번호 VM(%s03, %s04 …)을 추가한다. "
             "ESX 호스트를 바꾸면 자동으로 붙은 VM 이름도 따라 바뀐다." % (n, p, p, p, p),
@@ -1123,13 +1126,14 @@ class App(object):
         t.refresh()
 
     CASE_HINT = {
-        "time": "칸을 두 번 누르면 고친다. 케이스 행(옅은 파란 바탕)은 케이스 설정, VM 행(└)은 그 VM 의 잡과 모니터링. "
-                "적용 체크한 케이스는 [명령어 생성] 에서 빠진다. 테스트 그룹, 잡 종료 (리포트), 종료 기준 VM 은 "
+        "time": "칸을 두 번 누르거나 행을 고르고 Enter 를 누르면 고친다. 케이스 행(옅은 파란 바탕)은 케이스 설정, VM 행(└)은 그 VM 의 잡과 모니터링. "
+                "[명령어 생성] 을 누르면 넣을 케이스를 고르는 창이 열린다. 테스트 그룹, 잡 종료 (리포트), 종료 기준 VM 은 "
                 "리포트용 CSV 에만 들어간다. 자세한 설명은 [도움말].",
         "seq": "순서 실행: 점프 VM 이 케이스를 표의 순서대로 진행하고, 잡의 프로세스가 끝난 것을 확인한 뒤 다음 케이스로 넘어간다. "
                "시작 시각 칸을 비우면 자동(앞 케이스의 잡이 끝나고 '케이스 사이 간격' 뒤), 시각을 적으면 그 시각에 잡을 시작한다. "
                "케이스 행의 설정 칸은 ESX 호스트 설정, VM 행의 설정 칸은 VM 설정(탭 3 의 프로파일)이다. "
-               "적용 체크한 케이스는 [명령어 생성] 에서 빠진다. 자세한 설명은 [도움말].",
+               "칸을 두 번 누르거나 행을 고르고 Enter 를 누르면 고친다. [명령어 생성] 을 누르면 넣을 케이스를 고르는 창이 열린다. "
+               "자세한 설명은 [도움말].",
     }
     RESULT_HINT = {
         "time": "블록마다 [복사] 를 누른 뒤 붙여넣을 창에 붙여넣는다. A 는 점프 VM 에서 처음 한 번만 붙여넣고, "
@@ -2047,7 +2051,12 @@ class App(object):
         if k is None:
             if key in ("name", "esx"):
                 if t and not core.NAME_RE.match(t):
-                    messagebox.showerror(TITLE, "영문, 숫자, . _ - 만 사용: '%s'" % t, parent=self.root)
+                    if key == "name":
+                        msg = ("케이스 이름은 영문, 숫자, . _ - 만 쓸 수 있음: '%s'\n\n공백, 한글, 괄호 같은 글자는 쓸 수 없다. 케이스 이름은 "
+                               "VM 의 crontab 줄과 점프 VM 의 진행 파일에 그대로 들어가기 때문이다. 한글 설명은 '설명' 칸에 적는다." % t)
+                    else:
+                        msg = "ESX 호스트 이름은 영문, 숫자, . _ - 만 쓸 수 있음: '%s'" % t
+                    messagebox.showerror(TITLE, msg, parent=self.root)
                     return
                 if key == "esx":
                     core.rename_vms_for_esx(c, c.get("esx", ""), t, self.vm_prefix())
@@ -2136,8 +2145,8 @@ class App(object):
             core.recalc_starts(self.cases, new)
         self.mark_cases()
         self.t_case.refresh("c%d" % new)
-        if not row["name"]:
-            self.t_case.start_edit("c%d" % new, 0)
+        # 이름 칸을 바로 편집 상태로 연다. 복사한 케이스는 자동 이름(-r2)이 골라진 채로 열려, 바로 치면 새 이름으로 바뀐다
+        self.t_case.start_edit("c%d" % new, 0)
 
     def add_vm(self):
         """선택한 케이스(케이스 행이나 그 아래 VM 행)에 다음 번호 VM 을 추가한다."""
@@ -2504,29 +2513,119 @@ class App(object):
 
     # ------------------------------------------------------------ 생성
     def generate(self):
+        """[명령어 생성]: 블록에 넣을 케이스를 고르는 창을 연다. 창의 [생성] 이 generate_picked 를 부른다.
+        처음에는 적용 체크하지 않은 케이스가 골라져 있다."""
         self.finish_all_edits()
         if not self.cases:
             messagebox.showinfo(TITLE, "탭 4 에 테스트 케이스를 먼저 추가할 것", parent=self.root)
             return
+        if self.current_settings() is None:
+            return
+        self.calc_schedule()
+        seq = self.mode() == "seq"
+        C, px = COLORS, self.px
+        top = tk.Toplevel(self.root, bg=C["card"])
+        top.title("명령어 생성: 넣을 테스트 케이스 선택")
+        top.transient(self.root)
+        self.gen_pick_win = top
+        fr = ttk.Frame(top, padding=(px(14), px(10), px(14), px(12)))
+        fr.pack(fill="both", expand=True)
+        ttk.Label(fr, text="블록에 넣을 테스트 케이스를 고른다.", style="Bold.TLabel").pack(anchor="w")
+        ttk.Label(fr, text="넣기 칸을 누르면(또는 Space) 체크가 바뀐다. 처음에는 적용 체크하지 않은 케이스가 체크되어 있다. "
+                           + ("고른 케이스를 탭 4 의 표 순서대로 진행한다. 순서는 탭 4 의 [위로], [아래로] 로 바꾼다."
+                              if seq else "고르지 않은 케이스도 다른 케이스의 시각 계산에는 그대로 쓴다."),
+                  style="Hint.TLabel").pack(anchor="w", pady=(px(2), px(8)))
+        rows = []
+        for i, c in enumerate(self.cases):
+            sc = self.sched[i] if i < len(self.sched) else {}
+            if seq:
+                when = c.get("seq_start") or "자동"
+            else:
+                when = core.fmt_dt(sc["job"]) if sc.get("job") else "확인 필요"
+            rows.append({"sel": not c.get("applied"), "i": i, "name": c.get("name") or "(이름 없음)", "desc": c.get("desc", ""),
+                         "esx": c.get("esx", ""), "vms": ", ".join(core.report_vms(c)) or "(없음)", "when": when,
+                         "applied": "예" if c.get("applied") else ""})
+        cols = [dict(key="name", title="케이스", width=210, kind="readonly"),
+                dict(key="desc", title="설명", width=200, kind="readonly"),
+                dict(key="esx", title="ESX 호스트", width=90, kind="readonly"),
+                dict(key="vms", title="잡이나 모니터링이 있는 VM", width=280, kind="readonly", stretch=True),
+                dict(key="when", title=("시작 시각" if seq else "잡 시작 (KST)"), width=140, kind="readonly"),
+                dict(key="applied", title="적용", width=50, kind="readonly")]
+        v_count = tk.StringVar()
+
+        def update():
+            v_count.set("고른 케이스 %d개 / 전체 %d개" % (sum(1 for r in rows if r["sel"]), len(rows)))
+
+        def toggle(iid):
+            r = rows[int(iid)]
+            r["sel"] = not r["sel"]
+            table.refresh(iid)
+            update()
+
+        def set_all(how):
+            for r in rows:
+                r["sel"] = how(r)
+            table.refresh()
+            update()
+
+        table = EditableTable(fr, self, cols, height=min(14, max(5, len(rows))),
+                              check=dict(title="넣기", width=48, on=self.img_on, off=self.img_off, toggle=toggle, key="sel"))
+        table.rows = rows
+        table.row_tags = lambda iid: ("pick",) if rows[int(iid)]["sel"] else (("odd",) if int(iid) % 2 else ())
+        table.tree.tag_configure("pick", background=C["case"])
+        table.pack(fill="both", expand=True)
+        table.refresh(0)
+        self.gen_pick_table = table
+        opt = ttk.Frame(fr)
+        opt.pack(fill="x", pady=(px(8), 0))
+        ttk.Button(opt, text="모두 선택", command=lambda: set_all(lambda r: True)).pack(side="left")
+        ttk.Button(opt, text="모두 해제", command=lambda: set_all(lambda r: False)).pack(side="left", padx=(px(6), 0))
+        ttk.Button(opt, text="적용 체크하지 않은 케이스만",
+                   command=lambda: set_all(lambda r: not self.cases[r["i"]].get("applied"))).pack(side="left", padx=(px(6), px(16)))
+        ttk.Label(opt, textvariable=v_count).pack(side="left")
+        bf = ttk.Frame(fr)
+        bf.pack(fill="x", pady=(px(12), 0))
+
+        def go():
+            picks = [r["i"] for r in rows if r["sel"]]
+            if not picks:
+                messagebox.showinfo(TITLE, "넣을 케이스를 하나 이상 고를 것", parent=top)
+                return
+            top.destroy()
+            self.generate_picked(picks)
+
+        ttk.Button(bf, text="취소", command=top.destroy).pack(side="right")
+        ttk.Button(bf, text="생성", style="Red.TButton", command=go).pack(side="right", padx=(0, px(6)))
+        update()
+        top.bind("<Escape>", lambda e: top.destroy())
+        self._center(top)
+        top.grab_set()
+        table.tree.focus_set()
+
+    def generate_picked(self, picks):
+        """고른 케이스(탭 4 의 순번)만 넣어 블록과 기록을 만든다. 고르지 않은 케이스는 적용 체크한 케이스처럼 다룬다
+        (블록과 기록에서 빠지고, 시각 지정의 시각 계산에는 남는다). 탭 4 의 적용 체크는 바꾸지 않는다."""
         s = self.current_settings()
         if s is None:
             return
+        picked = set(picks)
+        cases = copy.deepcopy(self.cases)
+        for i, c in enumerate(cases):
+            c["applied"] = i not in picked
         paths = core.resolve_paths(self.base, s)
         seq = core.run_mode(paths) == "seq"
         if seq:
-            plan, errors, warnings, _ = core.build_seq(self.cases, self.run_cmds, self.mon_cmds, self.profiles, paths)
+            plan, errors, warnings, _ = core.build_seq(cases, self.run_cmds, self.mon_cmds, self.profiles, paths)
             empty = not plan
         else:
-            entries, errors, warnings, _ = core.build_entries(self.cases, self.run_cmds, self.mon_cmds, paths)
-            warnings = warnings + core.profile_warnings_time(self.cases)
+            entries, errors, warnings, _ = core.build_entries(cases, self.run_cmds, self.mon_cmds, paths)
+            warnings = warnings + core.profile_warnings_time(cases)
             empty = not entries
         if not errors and empty:
-            if all(c.get("applied") for c in self.cases):
-                errors = ["모든 케이스가 적용 체크되어 있어 생성할 케이스가 없음. 새로 등록할 케이스는 적용 체크를 끌 것"]
-            elif seq:
-                errors = ["실행할 케이스가 없음. 적용 체크를 끈 케이스의 VM 에 잡을 지정하거나 설정 프로파일을 고를 것"]
+            if seq:
+                errors = ["고른 케이스에 실행할 내용이 없음. 고른 케이스의 VM 에 잡을 지정하거나 설정 프로파일을 고를 것"]
             else:
-                errors = ["등록할 줄이 없음. 적용 체크를 끈 케이스의 VM 에 잡이나 모니터링을 하나 이상 지정할 것"]
+                errors = ["고른 케이스에 등록할 줄이 없음. 고른 케이스의 VM 에 잡이나 모니터링을 하나 이상 지정할 것"]
         if errors:
             self.show_messages("오류 %d건. 블록과 기록을 만들지 않았음. 고친 뒤 다시 생성할 것." % len(errors), errors, warnings)
             self.nb.select(4)
@@ -2538,7 +2637,7 @@ class App(object):
                 % (len(warnings), "\n".join(warnings[:12]), "\n..." if len(warnings) > 12 else ""), parent=self.root):
             return
         try:
-            res = core.generate(self.cases, self.run_cmds, self.mon_cmds, paths, write=True,
+            res = core.generate(cases, self.run_cmds, self.mon_cmds, paths, write=True,
                                 backup_dir=os.path.join(self.base, "backup"), profiles=self.profiles)
         except (OSError, ValueError) as e:
             messagebox.showerror(TITLE, "기록 파일을 저장하지 못해 블록을 만들지 않았음.\n%s\n\n"
@@ -2547,6 +2646,9 @@ class App(object):
         if res["errors"]:
             self.show_messages("오류", res["errors"], res["warnings"])
             return
+        if res.get("mode") != "seq":
+            # D 블록 확인 창의 '줄이 지워지는 케이스' 는 실제로 적용 체크한 케이스로 다시 계산한다(고르지 않았을 뿐인 케이스는 등록된 줄이 없다)
+            res["wipe_conflicts"] = core.wipe_conflicts(self.cases, res["sched"], res["wipe_hosts"], res["gen_time"])
         self.result = res
         self.show_result(res)
         self.nb.select(4)
@@ -2573,7 +2675,7 @@ class App(object):
                                                                  res["record"]), "ok")
         t.insert("end", "로그: %s\n" % res["log"], "ok")
         hosts = ["ESX 호스트 없음" if h == "-" else h for h in res["chains"]]
-        t.insert("end", "순서 실행. 실행 ID %s. 케이스 %d개, 적용 체크로 뺀 케이스 %d개. ESX 호스트별 진행 %d개: %s\n"
+        t.insert("end", "순서 실행. 실행 ID %s. 케이스 %d개, 선택 창에서 뺀 케이스 %d개. ESX 호스트별 진행 %d개: %s\n"
                  % (res["run_id"], len(res["cases"]), res.get("skipped", 0), len(hosts), ", ".join(hosts)))
         t.insert("end", "붙여넣는 순서: A 는 점프 VM 에서 처음 한 번, 그 뒤 P(점검)에서 CHECK RESULT: OK 를 확인하고 S(실행). "
                         "점프 VM 로그 폴더: %s\n" % res["jump_log_dir"])
@@ -2606,7 +2708,7 @@ class App(object):
                                                                  res["record"]), "ok")
         t.insert("end", "로그: %s\n" % res["log"], "ok")
         made = len(set(e["case"] for e in res["entries"]))
-        t.insert("end", "생성한 케이스 %d개, 적용 체크로 뺀 케이스 %d개\n" % (made, res.get("skipped", 0)))
+        t.insert("end", "생성한 케이스 %d개, 선택 창에서 뺀 케이스 %d개\n" % (made, res.get("skipped", 0)))
         t.insert("end", "VM %d대: %s\n" % (len(vm_cnt), ", ".join("%s %d줄" % kv for kv in vm_cnt.items()) or "없음"))
         t.insert("end", "ESX %d대: %s\n" % (len(esx_cnt), ", ".join("%s %d줄" % kv for kv in esx_cnt.items()) or "없음"))
         if res.get("record_added"):

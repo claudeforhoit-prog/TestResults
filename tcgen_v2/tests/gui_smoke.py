@@ -72,6 +72,22 @@ def last_toplevel(root):
     return tops[-1] if tops else None
 
 
+def gen(a, r, picks=None):
+    """[명령어 생성] 을 누르고, 열린 선택 창에서 picks(탭 4 순번 목록. None 이면 처음 골라진 그대로)를 고른 뒤 [생성] 을 누른다."""
+    a.generate()
+    r.update()
+    top = getattr(a, "gen_pick_win", None)
+    if top is None or not top.winfo_exists():
+        return None
+    if picks is not None:
+        for row in a.gen_pick_table.rows:
+            row["sel"] = row["i"] in picks
+        a.gen_pick_table.refresh()
+    press(top, "생성")
+    r.update()
+    return top
+
+
 def cell_of(table, iid, key):
     """표 칸에 보이는 글자 (열 이름으로 찾음)."""
     return table.tree.item(iid, "values")[[c["key"] for c in table.columns].index(key)]
@@ -320,7 +336,19 @@ def main():
           and saved["vms"][2]["end_ref"] is True, "리포트용 칸도 test_cases.json 에 자동 저장")
     t.refresh("c0")
     app.add_case()
+    check(t.editor is not None and t.editor[2:] == ("c1", "name") and t.editor[1].get() == "TC-base-a-r2",
+          "+ 케이스 추가: 복사한 케이스의 이름 칸이 자동 이름이 골라진 채로 바로 열림")
+    t.editor[1].set("TC-renamed")
+    t._finish_key(True)                       # Enter
+    check(app.cases[1]["name"] == "TC-renamed" and cell_of(t, "c1", "name") == "TC-renamed", "추가한 케이스 이름을 바로 바꿈")
+    n_log = len(LOG)
+    app.commit_case("c1", "name", "TC 이름")
+    check(app.cases[1]["name"] == "TC-renamed" and any(x[0] == "error" and "케이스 이름은 영문, 숫자, . _ - 만" in x[1]
+                                                        and "설명' 칸" in x[1] for x in LOG[n_log:]),
+          "공백, 한글이 든 케이스 이름은 거부하고 이유와 설명 칸을 알림")
+    app.commit_case("c1", "name", "TC-base-a-r2")            # 아래 점검을 위해 원래 이름으로 되돌린다(c1 이 선택된 상태)
     app.add_case()
+    t.finish_edit(commit=False)
     check(all(c["desc"] == c0["desc"] and c["group"] == "tuning" and c["vms"][2]["end_ref"] for c in app.cases[1:]),
           "+ 케이스 추가: 설명, 테스트 그룹, 종료 기준 VM 복사")
     check([c["end_time"] for c in app.cases] == ["2030-01-15 11:40:00", "", ""], "+ 케이스 추가: 잡 종료는 복사하지 않음 (자동)")
@@ -376,7 +404,7 @@ def main():
     shot(root, app, 0, "tcgen_tab1.png")
     shot(root, app, 1, "tcgen_tab2.png")
     shot(root, app, 3, "tcgen_time_tab4.png")
-    app.generate()
+    gen(app, root)
     res = app.result
     check(res is not None and not res["errors"], "명령어 생성 성공")
     check(app.blk_vm.get("1.0", "end-1c") == res["vm"], "B 블록 표시")
@@ -428,16 +456,49 @@ def main():
     click_check()
     check(app.cases[0]["applied"] is False, "다시 누르면 체크 해제")
     click_check()
-    app.generate()
+    gen(app, root)
     res2 = app.result
     made = set(e["case"] for e in res2["entries"]) if res2 else set()
     check(res2 is not None and res2["skipped"] == 1 and "TC-base-a" not in made and made, "체크한 케이스는 생성에서 빠짐 %s" % sorted(made))
-    check("적용 체크로 뺀 케이스 1개" in app.res_text.get("1.0", "end"), "생성 결과에 뺀 케이스 수 표시")
+    check("선택 창에서 뺀 케이스 1개" in app.res_text.get("1.0", "end"), "생성 결과에 뺀 케이스 수 표시")
     check(res2["wipe_conflicts"] == ["TC-base-a"] and "주의: 적용 체크한 케이스 TC-base-a" in app.res_text.get("1.0", "end"),
           "적용 체크한 케이스(실행 전)가 같은 VM 을 쓰면 D 블록 주의 표시")
     n_log = len(LOG)
     app.copy_block("wipe")
     check(any(x[0] == "ask" and "TC-base-a 의 줄도 지워진다" in x[1] for x in LOG[n_log:]), "D 블록 확인 창에 그 케이스 이름")
+
+    # [명령어 생성] 의 선택 창: 처음에는 적용 체크하지 않은 케이스가 골라져 있고, 고른 케이스만 넣는다
+    app.generate()
+    root.update()
+    top = app.gen_pick_win
+    pt = app.gen_pick_table
+    check(top.winfo_exists() and top.title() == "명령어 생성: 넣을 테스트 케이스 선택", "[명령어 생성] 을 누르면 선택 창이 열림")
+    check([r["name"] for r in pt.rows] == [c["name"] for c in app.cases] and [r["sel"] for r in pt.rows] == [False, True, True]
+          and [r["applied"] for r in pt.rows] == ["예", "", ""], "선택 창: 케이스 전부, 적용 체크한 케이스만 처음에 빠짐")
+    check(any(isinstance(w, ttk.Label) and str(w.cget("textvariable")) and "고른 케이스 2개 / 전체 3개" in str(top.getvar(str(w.cget("textvariable"))))
+              for w in walk(top)), "고른 케이스 수 표시")
+    shot_window(root, "넣을 테스트 케이스 선택", "tcgen_generate_pick.png")
+    press(top, "모두 해제")
+    n_log = len(LOG)
+    press(top, "생성")
+    check(top.winfo_exists() and any(x[0] == "info" and "하나 이상" in x[1] for x in LOG[n_log:]), "하나도 고르지 않으면 안내만 하고 창은 남음")
+    pt.check["toggle"]("0")                                       # 적용 체크한 케이스도 고를 수 있다
+    pt.check["toggle"]("2")
+    press(top, "생성")
+    root.update()
+    made = sorted(set(e["case"] for e in app.result["entries"])) if app.result else []
+    check(not top.winfo_exists() and made == sorted([app.cases[0]["name"], app.cases[2]["name"]])
+          and app.result["skipped"] == 1 and "선택 창에서 뺀 케이스 1개" in app.res_text.get("1.0", "end"),
+          "고른 케이스만 넣음(적용 체크한 케이스도 고르면 넣음) %s" % made)
+    check(app.cases[0]["applied"] is True and app.cases[1]["applied"] is False, "선택 창은 탭 4 의 적용 체크를 바꾸지 않음")
+    check(app.result["wipe_conflicts"] == ["TC-base-a"], "D 블록 주의는 실제로 적용 체크한 케이스로 계산")
+    app.generate()
+    root.update()
+    top = app.gen_pick_win
+    press(top, "취소")
+    root.update()
+    check(not top.winfo_exists() and app.result is not None and sorted(set(e["case"] for e in app.result["entries"])) == made,
+          "[취소] 는 아무것도 만들지 않음(앞 결과 그대로)")
     check([c["applied"] for c in core.load_cases(BASE)] == [True, False, False], "체크 상태가 test_cases.json 에 저장됨")
 
     # 리포트용 CSV 저장: 케이스 고르기, 저장 위치 (비교 기준 칸은 없다. 표 순서대로 저장한다)
@@ -733,7 +794,7 @@ def main():
     shot(root, app, 3, "tcgen_seq_tab4.png")
 
     # 생성: 블록 A, P, S, D 와 실행 계획
-    app.generate()
+    gen(app, root)
     res = app.result
     check(res is not None and res["mode"] == "seq" and not res["errors"], "순서 실행으로 명령어 생성 성공")
     check(app.nb.index(app.nb.select()) == 4, "생성하면 탭 5 로 이동")
@@ -792,7 +853,7 @@ def main():
           "순서 실행의 [리포트용 CSV 저장] 은 점프 VM 로그 폴더의 파일을 안내만 함")
     app.run_cmds[0]["proc"] = ""
     n_log = len(LOG)
-    app.generate()
+    gen(app, root)
     check(app.result is None and any(x[0] == "error" and "프로세스 이름이 비어 있음" in x[1] for x in LOG[n_log:])
           and app.blk_esx.get("1.0", "end-1c") == "" and app.plan_text.get("1.0", "end-1c") == "",
           "잡의 프로세스 이름이 없으면 오류, 블록과 실행 계획을 비움")
@@ -801,7 +862,7 @@ def main():
     app.cases[1]["vms"][1]["job"] = "(없음)"
     app.cases[1]["vms"][2]["job"] = "(없음)"
     n_log = len(LOG)
-    app.generate()
+    gen(app, root)
     check(app.result is None and any(x[0] == "error" and "모니터링만 있고 잡이 없음" in x[1] for x in LOG[n_log:]),
           "모니터링만 있고 잡이 없는 케이스는 오류")
     for k, jn in enumerate(("job_a", "job_a", "job_b4")):
@@ -833,7 +894,7 @@ def main():
     vis = list(app.t_case.tree.cget("displaycolumns"))
     check("prof" not in vis and "start" in vis and app.blk_vm.frame.cget("text").startswith("B. "), "시각 지정으로 돌아가면 열과 블록 제목도 돌아감")
     n_log = len(LOG)
-    app.generate()
+    gen(app, root)
     res = app.result
     check(res is not None and res["mode"] == "time" and any("순서 실행에서만 적용" in w for w in res["warnings"])
           and any(x[0] == "ask" and "순서 실행에서만 적용" in x[1] for x in LOG[n_log:]) and res["vm"] == app.blk_vm.get("1.0", "end-1c"),
@@ -842,7 +903,7 @@ def main():
 
     # 오류가 있으면 만들지 않음
     app.cases[1]["vms"][2]["job"] = "nojob"
-    app.generate()
+    gen(app, root)
     check(app.result is None and app.blk_vm.get("1.0", "end-1c") == "", "오류가 있으면 블록 비움")
     app.cases[1]["vms"][2]["job"] = "job_b4"
 
@@ -1068,7 +1129,7 @@ def main():
     # 생성: 지금 파일의 기록 CSV 에 기록. 파일을 바꾸면 탭 5 의 이전 결과를 지움
     app6.cases[0]["applied"] = False
     app6.mark_cases()
-    app6.generate()
+    gen(app6, root6)
     root6.update()
     check(app6.result is not None and app6.result["errors"] == [] and os.path.isfile(os.path.join(ext, "spr_record.csv"))
           and not os.path.exists(os.path.join(ext, "emr_record.csv")), "생성 기록은 지금 파일의 테스트 기록 CSV 에 추가")
