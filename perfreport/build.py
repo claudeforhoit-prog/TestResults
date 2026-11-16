@@ -408,13 +408,26 @@ def run_csv(cases_csv, data_dir, out_dir=None, title=None, baseline=None, analys
     return run_job(job, os.path.dirname(os.path.abspath(cases_csv)), log)
 
 
+def versioned_path(path):
+    """같은 이름의 파일이 이미 있으면 버전을 붙인 새 이름: CASE-A.docx → CASE-A_v2.docx → CASE-A_v3.docx. 없으면 그대로."""
+    if not os.path.exists(path):
+        return path
+    base, ext = os.path.splitext(path)
+    n = 2
+    while os.path.exists(f'{base}_v{n}{ext}'):
+        n += 1
+    return f'{base}_v{n}{ext}'
+
+
 def _build_docs(cases, meta, df, outdir, date, log, roles, include_unassigned, pal, width_cm, pool, tat_base=None):
     """케이스마다 docx 1개. 반환: [(저장한 경로, 그래프 수, 문서 글자)]."""
     out = []
     for c in cases:
         cm = meta[c['id']]
         cm['group'] = c.get('group', '')
-        dpath = os.path.join(outdir, f'{_safe(c["id"])}_performance_report.docx')
+        dpath = versioned_path(os.path.join(outdir, f'{_safe(c["id"])}.docx'))      # 파일 이름 = 케이스 이름. 같은 이름이 있으면 _v2, _v3
+        if not dpath.endswith(f'{_safe(c["id"])}.docx'):
+            log(f'[문서] {c["id"]}: 같은 이름의 파일이 있어 {os.path.basename(dpath)} 로 저장')
         dpath, k, text = report_case.build_case(dpath, {'id': c['id'], 'label': c.get('label', ''), 'host': c.get('host', ''),
                                               'start': cm['start'], 'end': cm['end'], 'group': c.get('group', ''),
                                               'end_auto': c.get('end_auto'), 'end_reason': c.get('end_reason', ''),
@@ -569,7 +582,10 @@ def run_job(job, base, log=print):
                'tat_base': job.get('tat_base'),
                'tat_bases': {c['id']: c['tat_base'] for c in cases if c['id'] in ids and c.get('tat_base')}}
         fname = re.sub(r'[\\/:*?"<>|]+', '_', g).strip() if g else _safe(job.get('name', 'report'))
-        htmls.append(report_html.build(os.path.join(outdir, f'{fname}.html'), ctx, sub, gcmp))
+        hpath = versioned_path(os.path.join(outdir, f'{fname}.html'))
+        if os.path.basename(hpath) != f'{fname}.html':
+            log(f'[HTML] 같은 이름의 파일이 있어 {os.path.basename(hpath)} 로 저장')
+        htmls.append(report_html.build(hpath, ctx, sub, gcmp))
         if g:
             log(f'[HTML] 그룹 {g}: 케이스 {len(ids)}건')
     html_path = htmls[0]

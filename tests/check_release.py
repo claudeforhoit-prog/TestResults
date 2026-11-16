@@ -187,7 +187,7 @@ def main():
         docs = sorted(glob.glob(os.path.join(out, '*.docx')))
         check('케이스마다 문서 1개', len(docs) == 3, str(len(docs)))
         heads = {os.path.basename(p): check_docx(p, terms) for p in docs}
-        b = [re.sub(r'^\d+\. ', '', h) for h in heads.get('CASE-B_performance_report.docx', [])]
+        b = [re.sub(r'^\d+\. ', '', h) for h in heads.get('CASE-B.docx', [])]
         check('CASE-B: TAT · phase · 동시 실행 잡 절 있음', b[2:5] == ['TAT', 'phase 소요 시간', '동시 실행 잡'], str(b[:6]))
         htmls = sorted(glob.glob(os.path.join(out, '*.html')))
         check('그룹마다 HTML 1개', len(htmls) == 2, str(len(htmls)))
@@ -206,11 +206,16 @@ def main():
                              '--out', os.path.join(tmp, 'out_only'), '--workers', '1', '--only', 'CASE-B'],
                             cwd=ROOT, env=env, capture_output=True, text=True, encoding='utf-8', errors='replace')
         only_docs = sorted(os.path.basename(p) for p in glob.glob(os.path.join(tmp, 'out_only', '*.docx')))
-        check('--only: 고른 케이스만 생성', r2.returncode == 0 and only_docs == ['CASE-B_performance_report.docx'], str(only_docs))
+        check('--only: 고른 케이스만 생성', r2.returncode == 0 and only_docs == ['CASE-B.docx'], str(only_docs))
         if only_docs:
             import docx
             d2 = docx.Document(os.path.join(tmp, 'out_only', only_docs[0]))
             check('기준선이 없으면 Degradation 표 없음', not any(t.rows[0].cells[-1].text == 'Degradation (%)' for t in d2.tables))
+        r3 = subprocess.run([sys.executable, '-m', 'perfreport', 'run', 'samples/sample_cases.csv', 'samples/sample_data',
+                             '--out', os.path.join(tmp, 'out_only'), '--workers', '1', '--only', 'CASE-B'],
+                            cwd=ROOT, env=env, capture_output=True, text=True, encoding='utf-8', errors='replace')
+        again = sorted(os.path.basename(p) for p in glob.glob(os.path.join(tmp, 'out_only', '*.*')) if p.endswith(('.docx', '.html')))
+        check('같은 이름이 있으면 버전을 붙여 저장', r3.returncode == 0 and again == ['CASE-B.docx', 'CASE-B_v2.docx', 'tuning.html', 'tuning_v2.html'], str(again))
         unit_checks(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

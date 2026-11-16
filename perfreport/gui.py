@@ -621,7 +621,19 @@ def build(root):
     hint(1, '비우면 테스트 그룹마다 그 그룹의 케이스 이름으로 만든다')
     ttk.Checkbutton(tab3, text='VM 핵심 지표만 넣기 (CPU · 메모리 등 8종)', variable=core).grid(row=2, column=1, sticky='w', pady=3)
     opt_label(3, '그래프 색 계열')
-    ttk.Combobox(tab3, textvariable=pal_var, values=[n for n, _ in P.PALETTES], state='readonly', width=22).grid(row=3, column=1, sticky='w')
+    pf = ttk.Frame(tab3)
+    pf.grid(row=3, column=1, sticky='w')
+    ttk.Combobox(pf, textvariable=pal_var, values=[n for n, _ in P.PALETTES], state='readonly', width=22).pack(side='left')
+    pal_cv = tk.Canvas(pf, width=8 * 34 + 4, height=22, bg=C['card'], highlightthickness=0)     # 고른 색 계열의 실제 색 (VM 순서대로)
+    pal_cv.pack(side='left', padx=10)
+    ttk.Label(pf, text='왼쪽부터 VM 순서대로 쓰는 색', style='Hint.TLabel').pack(side='left')
+
+    def draw_palette(*_):
+        pal_cv.delete('all')
+        for i, col in enumerate(P.palette_colors(P.palette_index(pal_var.get()))[:8]):
+            pal_cv.create_rectangle(2 + i * 34, 2, 2 + i * 34 + 28, 20, fill=col, outline=C['mut'])
+    pal_var.trace_add('write', draw_palette)
+    draw_palette()
     opt_label(4, '그래프 폭 (cm)')
     wf = ttk.Frame(tab3)
     wf.grid(row=4, column=1, sticky='w')
