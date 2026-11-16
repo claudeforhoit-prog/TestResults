@@ -133,7 +133,10 @@ def classify(case, jobs):
     # TAT 측정 잡: VM(잡 종류 · hostname)마다 케이스 시작 ±10분에 시작해 실행 구간 절반 이상 실행된 세트 가운데 가장 긴 세트.
     # 같은 잡을 VM 두 대에서 실행하면 TAT 측정 잡이 둘이 되고, TAT 도 VM 마다 따로 낸다.
     picked = {}
+    allow = {str(h).lower() for h in case.get('tat_vms') or []}     # 종료 기준 VM(또는 자동으로 고른 TAT 측정 VM)만 TAT 측정 잡 대상
     for k, sets in by.items():
+        if allow and str(k[1]).lower().split('.')[0] not in allow:
+            continue
         best = None
         for i, st in enumerate(sets):
             if abs((st[0]['start'] - cs).total_seconds()) > MATCH_S:
@@ -247,8 +250,11 @@ def assign(cases, jobs, log=print):
             continue
         c['jobs'], c['_job_rows'] = r, [dict(j['row'], __file=j['file']) for j in got[c['id']]]
         log(f'[잡] {c["id"]}: '
-            + (' · '.join(f'TAT 측정 잡 {m["label"]} {len(m["jobs"])}개 평균 {m["tat"]:,.2f} s' for m in r['mains']) or 'TAT 측정 잡 없음')
-            + ''.join(f' · 동시 실행 잡 {g["label"]} {g["sets"]}세트(기준 구간 중 시작 {g["sets_in_window"]}회)' for g in r['conc']))
+            + (' · '.join(f'TAT 측정 잡 {m["label"]} ({", ".join(m["hosts"])}) {len(m["jobs"])}개 평균 {m["tat"]:,.2f} s' for m in r['mains'])
+               or 'TAT 측정 잡 없음')
+            + ''.join(f' · 동시 실행 잡 {g["label"]} {g["sets"]}세트(기준 구간 중 시작 {g["sets_in_window"]}회)' for g in r['conc'])
+            + (f' · TAT 측정 잡 대상 VM: {", ".join(c["tat_vms"])} (종료 기준 VM 또는 케이스 시작 때 시작한 가장 긴 세트의 VM)' if c.get('tat_vms') else
+               ' · TAT 측정 잡 판정: 케이스 시작 ±10분에 시작하고 실행 구간의 50% 이상 실행된 세트'))
 
 
 def degradation(tat, base):

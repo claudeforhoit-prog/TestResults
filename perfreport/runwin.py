@@ -40,44 +40,71 @@ def ref_patterns(text):
     return [p.strip().lower() for p in re.split(r'[;,]', str(text or '')) if p.strip()]
 
 
+def ref_match(name, refs):
+    """종료 기준 VM 이름 · 패턴과 맞는지. 와일드카드(* ?)가 없는 낱말은 이름에 그 글자가 들어 있으면 맞다(예: vm01)."""
+    n = str(name).lower().split('.')[0]
+    return any(fnmatch.fnmatchcase(n, p) if any(ch in p for ch in '*?') else p.strip('*') in n for p in refs)
+
+
+def tat_sets(tat_jobs, start, hosts=None):
+    """케이스 잡 시작 앞뒤 10분 안에 시작한 세트(같은 잡 종류 · 같은 VM, 시작 10초 안). VM 마다 실행 시간이 가장 긴 세트 1개.
+    반환: {VM: {'code', 'jobs', 'mean', 'end'}}. hosts 를 주면 그 VM(짧은 이름)만."""
+    near = [j for j in tat_jobs or [] if abs((j['start'] - pd.Timestamp(start)).total_seconds()) <= 600
+            and (hosts is None or j['host'].lower().split('.')[0] in hosts)]
+    groups = {}
+    for j in sorted(near, key=lambda j: j['start']):
+        key = (j['host'], j['code'])
+        g = groups.setdefault(key, [])
+        if not g or (j['start'] - g[0]['start']).total_seconds() <= 10:      # 그 VM · 잡 종류의 첫 세트
+            g.append(j)
+    best = {}
+    for (h, code), js in groups.items():
+        m = sum(j['elapsed'] for j in js) / len(js)
+        if h not in best or m > best[h]['mean']:
+            best[h] = {'code': code, 'jobs': js, 'mean': m, 'end': max(j['end'] for j in js)}
+    return best
+
+
 def detect_end(df, start, refs=None, tat_jobs=None):
-    """종료 시각 자동 감지. 반환: (종료 시각 또는 None, 설명).
-    refs: 종료 기준 VM 이름 · 패턴. 주면 그 VM 들만 본다(여러 대면 가장 늦게 끝난 VM 기준). 없으면 케이스의 모든 VM.
-    tat_jobs: 잡 TAT 원장의 잡(jobs.read_all). 기준 VM 에서 잡 시작 앞뒤 10분 안에 시작한 세트의 마지막 잡 종료 시각 가운데
-      가장 늦은 시각을 종료 시각으로 쓴다. TAT 원장에 기준 VM 의 잡이 없으면 CPU 사용률로 정한다(_cpu_end).
-    CPU 판단도 기준 VM 만 본다: 기준 VM 들의 같은 분 CPU 사용률 최댓값이 기준값 아래로 10분 이상 이어지기 시작한 분
-      (= 기준 VM 가운데 가장 늦게 끝난 VM 이 유휴가 된 시각)."""
+    """종료 시각 자동 감지. 반환: (종료 시각 또는 None, 설명, {VM: 종료 시각}, TAT 측정 VM 목록).
+    1순위 잡 TAT 원장: VM 마다 케이스 잡 시작 앞뒤 10분 안에 시작한 가장 긴 세트(TAT 측정 세트)의 마지막 잡 종료 시각.
+      refs(종료 기준 VM)를 주면 그 VM 들만, 없으면 세트 평균 실행 시간이 가장 긴 세트의 50% 이상인 VM 들(짧은 동시 실행 잡의 VM 은 뺀다).
+      케이스 종료 = 그 VM 들의 종료 가운데 가장 늦은 시각. VM 마다의 종료 시각도 돌려준다.
+    2순위 CPU 사용률: TAT 원장에 기준 VM 의 잡이 없으면 VM 마다 CPU 사용률이 기준값 아래로 10분 이상 이어지기 시작한 분(_cpu_end)."""
     notes, who = [], '케이스 VM'
+    ents = sorted(set(df['entity'].astype(str)))
     if refs:
-        ents = sorted(set(df['entity'].astype(str)))
-        pick = [e for e in ents if any(fnmatch.fnmatchcase(e.lower(), p) for p in refs)]
+        pick = [e for e in ents if ref_match(e, refs)]
         if pick:
             df = df[df['entity'].isin(pick)]
-            who = '기준 VM ' + ', '.join(pick)
+            ents, who = pick, '종료 기준 VM ' + ', '.join(pick)
         else:
             notes.append(f'종료 기준 VM({"; ".join(refs)})이 데이터에 없어 케이스의 모든 VM 으로 판단')
+    names = {e.lower().split('.')[0]: e for e in ents}
+    sets = tat_sets(tat_jobs, start, set(names))
+    if sets and not refs:                      # 기준 VM 을 정하지 않았으면 TAT 측정 세트로 볼 만큼 긴 세트의 VM 만
+        top = max(v['mean'] for v in sets.values())
+        sets = {h: v for h, v in sets.items() if v['mean'] >= top * 0.5}
+    vm_ends = {}
+    if sets:
+        for h, v in sorted(sets.items()):
+            vm_ends[names.get(h.lower().split('.')[0], h)] = v['end']
+        end = max(vm_ends.values())
+        late = max(vm_ends, key=vm_ends.get)
+        cpu_end, _ = _cpu_end(df, start)
+        why = (f'잡 TAT 원장: {who} 의 TAT 측정 세트(케이스 시작 때 시작한 가장 긴 세트) 종료 가운데 가장 늦은 {late} 의 마지막 잡 종료'
+               + (f' · CPU 사용률 기준 유휴 시작 {cpu_end:%Y-%m-%d %H:%M:%S}' if cpu_end is not None else ''))
+        return end, why + ((' · ' + ' · '.join(notes)) if notes else ''), \
+            {k: f'{t:%Y-%m-%d %H:%M:%S}' for k, t in vm_ends.items()}, sorted(h.lower().split('.')[0] for h in sets)
+    for e in ents:                             # 2순위: VM 마다 CPU 사용률
+        t, _ = _cpu_end(df[df['entity'] == e], start)
+        if t is not None:
+            vm_ends[e] = t
     cpu_end, cpu_why = _cpu_end(df, start)
-    tat_end, tat_host = None, ''
-    if tat_jobs:
-        names = {str(e).lower().split('.')[0] for e in df['entity'].unique()}
-        near = [j for j in tat_jobs if j['host'].lower().split('.')[0] in names
-                and abs((j['start'] - pd.Timestamp(start)).total_seconds()) <= 600]
-        by_host = {}
-        for j in sorted(near, key=lambda j: j['start']):
-            first = by_host.setdefault(j['host'], [])
-            if not first or (j['start'] - first[0]['start']).total_seconds() <= 10:      # 그 VM 에서 처음 시작한 세트
-                first.append(j)
-        for h, js in by_host.items():
-            e = max(j['end'] for j in js)
-            if tat_end is None or e > tat_end:
-                tat_end, tat_host = e, h
     tail = (' · ' + ' · '.join(notes)) if notes else ''
-    if tat_end is not None:
-        return tat_end, (f'잡 TAT 원장: {who} 에서 잡 시작 때 시작한 잡 가운데 가장 늦게 끝난 잡({tat_host})의 종료 시각'
-                         + (f' · CPU 사용률 기준 유휴 시작 {cpu_end:%Y-%m-%d %H:%M:%S}' if cpu_end is not None else '') + tail)
     if cpu_end is not None:
-        return cpu_end, f'{who} 의 {cpu_why}' + tail
-    return None, cpu_why + tail
+        return cpu_end, f'{who} 의 {cpu_why}' + tail, {k: f'{t:%Y-%m-%d %H:%M:%S}' for k, t in vm_ends.items()}, []
+    return None, cpu_why + tail, {}, []
 
 
 def _cpu_end(df, start):

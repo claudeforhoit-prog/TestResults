@@ -159,11 +159,25 @@ def unit_checks(tmp):
         for vm, until in (('vm01', 100), ('vm02', 150)):
             recs.append({'entity': vm, 't': t, 'metric': 'CPU|Usage (%)', 'value': 70.0 if 0 <= k < until else 1.0})
     df = pd.DataFrame(recs)
-    end, why = runwin.detect_end(df, t0, refs=['vm01'])
+    end, why, _, _ = runwin.detect_end(df, t0, refs=['vm01'])
     check('종료 시각: 기준 VM 의 CPU 유휴 시작', end is not None and abs((end - t0).total_seconds() - 6000) <= 300, str(end))
-    tj = [{'host': 'vm01', 'code': 'sim', 'start': t0, 'end': t0 + pd.Timedelta(minutes=101), 'elapsed': 6060.0}]
-    end, why = runwin.detect_end(df, t0, refs=['vm01'], tat_jobs=tj)
-    check('종료 시각: TAT 원장 종료가 1순위', end == t0 + pd.Timedelta(minutes=101), str(end))
+    tj = [{'host': 'vm01', 'code': 'sim', 'start': t0 + pd.Timedelta(seconds=k), 'end': t0 + pd.Timedelta(minutes=99 + k), 'elapsed': 5940.0 + 59 * k}
+          for k in range(4)]
+    end, why, vme, tv = runwin.detect_end(df, t0, refs=['vm01'], tat_jobs=tj)
+    check('종료 시각: TAT 원장(세트 마지막 잡 종료)이 1순위', end == t0 + pd.Timedelta(minutes=102), str(end))
+    # 다른 VM 의 긴 잡이 늦게 끝나도 종료 기준 VM 을 정하지 않았으면 가장 긴 세트(TAT 측정 세트)의 VM 만 본다
+    tj2 = tj + [{'host': 'vm02', 'code': 'load', 'start': t0 + pd.Timedelta(seconds=5), 'end': t0 + pd.Timedelta(minutes=50), 'elapsed': 2995.0},
+                {'host': 'vm02', 'code': 'load', 'start': t0 + pd.Timedelta(minutes=51), 'end': t0 + pd.Timedelta(minutes=150), 'elapsed': 5940.0}]
+    end, why, vme, tv = runwin.detect_end(df, t0, tat_jobs=tj2)
+    check('종료 시각: 기준 VM 이 없으면 TAT 측정 세트의 VM 만 (동시 실행 잡 VM 제외)', end == t0 + pd.Timedelta(minutes=102) and tv == ['vm01'], f'{end} {tv}')
+    tj3 = tj + [{'host': 'vm02', 'code': 'sim', 'start': t0 + pd.Timedelta(seconds=k), 'end': t0 + pd.Timedelta(minutes=120 + k), 'elapsed': 7200.0 + 60 * k}
+                for k in range(4)]
+    end, why, vme, tv = runwin.detect_end(df, t0, refs=['vm01', 'vm02'], tat_jobs=tj3)
+    check('종료 시각: 종료 기준 VM 여러 대면 VM 별 종료와 가장 늦은 종료', len(vme) == 2 and end == t0 + pd.Timedelta(minutes=123)
+          and vme['vm01'].endswith('11:42:00') and tv == ['vm01', 'vm02'], f'{end} {vme}')
+    c2 = jobs.classify({'id': 'T', 'start': t0, 'end': t0 + pd.Timedelta(minutes=103), 'tat_vms': ['vm01']},
+                       [dict(j, info=f'{j["code"]}_{i}', row={}) for i, j in enumerate(tj2)])
+    check('잡: TAT 측정 VM 이 정해지면 그 VM 만 TAT 측정 잡', [m['hosts'] for m in c2['mains']] == [['vm01']] and [g['code'] for g in c2['conc']] == ['load'])
 
     # THP Coverage: 케이스 · VM 단위로 판단
     recs = []
@@ -202,6 +216,10 @@ def main():
         check('케이스마다 문서 1개', len(docs) == 3, str(len(docs)))
         heads = {os.path.basename(p): check_docx(p, terms) for p in docs}
         b = [re.sub(r'^\d+\. ', '', h) for h in heads.get('CASE-B.docx', [])]
+        import docx as _docx
+        dB = _docx.Document(os.path.join(out, 'CASE-B.docx'))
+        check('Appendix: phase 잡별 self 시간 표', any(t.rows[0].cells[-1].text == '잡 평균' and len(t.rows[0].cells) >= 4 for t in dB.tables))
+        check('Appendix: TAT 측정 잡 잡별 elapsed 표', sum(1 for p in dB.paragraphs if p.text.startswith('표. ') and '잡별 elapsed' in p.text and 'bench_sim' in p.text) == 2)
         check('CASE-B: TAT · phase · 동시 실행 잡 절 있음', b[2:5] == ['TAT', 'phase 소요 시간', '동시 실행 잡'], str(b[:6]))
         htmls = sorted(glob.glob(os.path.join(out, '*.html')))
         check('그룹마다 HTML 1개', len(htmls) == 2, str(len(htmls)))

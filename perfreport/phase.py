@@ -203,7 +203,13 @@ def summarize(jobs):
         acc += v
     lv = [j['total'].get(LOAD_STAGE) for j in jobs if j['total'].get(LOAD_STAGE) is not None]
     exp = [j['total_jobs'] for j in jobs if j['total_jobs']]
-    return {'stages': stages, 'bands': bands, 'total': round(acc, 2),
+    per_job = []                               # 잡별 단계 self 시간 (Appendix 잡별 표)
+    for n, j in enumerate(sorted(jobs, key=lambda j: (str(j.get('host') or ''), str(j.get('idx') or ''), str(j.get('start') or ''))), 1):
+        vals = {s: j['self'].get(s) for s, _ in stages}
+        per_job.append({'name': f'잡 {j.get("idx") or n}' + (f' · {j["host"]}' if j.get('host') else ''),
+                        'start': str(j.get('start') or ''), 'self': {k: (round(v, 2) if v is not None else None) for k, v in vals.items()},
+                        'total': round(sum(v for v in vals.values() if v is not None), 2)})
+    return {'stages': stages, 'bands': bands, 'total': round(acc, 2), 'per_job': per_job,
             'load': round(statistics.mean(lv), 2) if lv else None,
             'jobs': len(jobs), 'expected': int(max(exp)) if exp else None,
             'hosts': sorted({j['host'] for j in jobs if j['host']})}

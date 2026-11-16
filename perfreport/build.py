@@ -387,11 +387,21 @@ def run_csv(cases_csv, data_dir, out_dir=None, title=None, baseline=None, analys
                 raise SystemExit(f'{c["id"]}: 잡 시작 이후 데이터 파일이 없어 종료 시각을 감지하지 못함')
             pdf, _, _ = ingest.load_case(probe, profiles)
             refs = runwin.ref_patterns(c.get('end_refs') or end_ref_vms)
-            end, why = runwin.detect_end(pdf, c['start'], refs=refs, tat_jobs=tat_jobs)
+            end, why, vm_ends, tat_vms = runwin.detect_end(pdf, c['start'], refs=refs, tat_jobs=tat_jobs)
             if end is None:
                 raise SystemExit(f'{c["id"]}: 종료 시각 자동 감지 실패 ({why}). 케이스 정보에 잡 종료 시각을 적는다.')
-            c['end'], c['end_reason'] = end, why
+            c['end'], c['end_reason'], c['vm_ends'] = end, why, vm_ends
+            if tat_vms:
+                c['tat_vms'] = tat_vms
             log(f'[종료 감지] {c["id"]}: {end} ({why})')
+            if len(vm_ends) > 1:
+                log(f'[종료 감지] {c["id"]}: VM 별 종료 ' + ' · '.join(f'{k} {v}' for k, v in vm_ends.items()))
+        elif tat_jobs:                         # 종료 시각을 적은 케이스: 종료 기준 VM 을 정했으면 그 VM 만 TAT 측정 잡 대상
+            refs = runwin.ref_patterns(c.get('end_refs') or end_ref_vms)
+            if refs:
+                hs = sorted({j['host'].lower().split('.')[0] for j in tat_jobs if runwin.ref_match(j['host'], refs)})
+                if hs:
+                    c['tat_vms'] = hs
         c['sources'] = [dict(s) for s in srcs if _file_matches(index[s['path']], c)]
         log(f'[선택] {c["id"]}: 데이터 파일 {len(c["sources"])}/{len(srcs)}개')
         if not c['sources']:
@@ -461,7 +471,7 @@ def _build_docs(cases, meta, df, outdir, date, log, roles, include_unassigned, p
             log(f'[문서] {c["id"]}: 같은 이름의 파일이 있어 {os.path.basename(dpath)} 로 저장')
         dpath, k, text = report_case.build_case(dpath, {'id': c['id'], 'label': c.get('label', ''), 'host': c.get('host', ''),
                                               'start': cm['start'], 'end': cm['end'], 'group': c.get('group', ''),
-                                              'end_auto': c.get('end_auto'), 'end_reason': c.get('end_reason', ''),
+                                              'end_auto': c.get('end_auto'), 'end_reason': c.get('end_reason', ''), 'vm_ends': c.get('vm_ends'),
                                               'margin_s': c.get('margin_s', 0),
                                               'collection_issues': c.get('collection_issues', []),
                                               'collection_check': c.get('collection_check', '')},

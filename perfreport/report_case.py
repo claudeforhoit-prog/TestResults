@@ -419,6 +419,7 @@ def build_case(path, case, df, chart_dir, date, log=print, roles=None, include_u
     info = [
         ['케이스명', cid], ['테스트 그룹', case.get('group') or '없음'], ['설명', case.get('label') or '없음'], ['호스트', case.get('host') or ', '.join(sorted(df['host'].unique()))],
         ['잡 시작 시각', f'{case["start"]:%Y-%m-%d %H:%M:%S}'], ['잡 종료 시각', end_txt],
+    ] + ([['VM 별 잡 종료 시각', ' · '.join(f'{vm} {t}' for vm, t in case['vm_ends'].items())]] if case.get('vm_ends') else []) + [
         ['실행 시간', f'{dur:,.0f} s'],
         ['수집 점검', case.get('collection_check', '').split('] ', 1)[-1].split('\n')[0] or '없음'],
         ['그래프 표시 구간', f'잡 시작 {mg // 60}분 전 ~ 종료 {mg // 60}분 후' if mg else '잡 실행 구간'], ['VM', ', '.join(ents)],
@@ -557,9 +558,17 @@ def build_case(path, case, df, chart_dir, date, log=print, roles=None, include_u
 
         def phase_tables():
             D._sub(doc, 'phase 소요 시간', 2)
-            table('phase별 소요 시간', ['단계 (phase)', '시작 (s)', '종료 (s)', 'self 시간 (s)', '비율 (%)'],
+            table('phase별 소요 시간 (잡 평균)', ['단계 (phase)', '시작 (s)', '종료 (s)', 'self 시간 (s)', '비율 (%)'],
                   [[n, f'{a:,.0f}', f'{z:,.0f}', f'{v:,.0f}', f'{r:.1f}' if r is not None else '']
                    for n, a, z, v, r in phase_mod.table_rows(phase)])
+            pj = phase.get('per_job') or []
+            if pj:                                 # 잡별 결과: 행 = 단계, 열 = 잡 + 평균
+                D._sub(doc, 'phase 잡별 self 시간', 3)
+                table('phase 잡별 self 시간 (s)', ['단계 (phase)'] + [j['name'] for j in pj] + ['잡 평균'],
+                      [[st_] + [f'{j["self"][st_]:,.0f}' if j['self'].get(st_) is not None else '' for j in pj] + [f'{avg:,.0f}']
+                       for st_, avg in phase['stages']]
+                      + [['전체'] + [f'{j["total"]:,.0f}' for j in pj] + [f'{phase["total"]:,.0f}']])
+                D._notes(doc, ['잡 시작 시각: ' + ' · '.join(f'{j["name"]} {j["start"]}' for j in pj if j.get('start'))])
         appx.append(phase_tables)
 
     # 동시 실행 잡 (잡 TAT 원장에 TAT 측정 잡과 종류가 다른 잡이 있을 때)
