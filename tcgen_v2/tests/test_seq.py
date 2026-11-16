@@ -400,7 +400,7 @@ class PlanTests(unittest.TestCase):
         res = gen(self.two(), st=settings(vm_user="tester", esx_addr="esx01=10.0.0.11;esx09=10.0.0.19", jump_log_dir="/data/log"))
         self.assertEqual(res["errors"], [])
         want = """TCGEN-PLAN 2
-VER 2.2
+VER 2.3
 RUNID 20261116-143000
 LOGDIR /data/log
 GEN 2026-11-16 14:30:00
@@ -612,7 +612,7 @@ class SettingsAndDataTests(unittest.TestCase):
         return snap
 
     def test_names_differ_from_v1(self):
-        self.assertEqual(core.VERSION, "2.2")
+        self.assertEqual(core.VERSION, "2.3")
         for k in self.keys:
             os.environ.pop(k, None)
         self.assertEqual(os.path.basename(core.default_data_dir()), "tcgen2_data")
@@ -689,6 +689,237 @@ class SettingsAndDataTests(unittest.TestCase):
         got = core.load_cases(d)[0]
         self.assertEqual((got["esx_profiles"], got["max_wait"], got["vms"][0]["profiles"]), (["numa0"], "2:00", ["pin"]))
         self.assertEqual(core.format_case_profiles(got), "esx01:numa0, esx01ev01:pin")
+
+
+class CaseSetTests(unittest.TestCase):
+    """테스트 종류: 케이스 표와 기록 CSV, 로그 폴더를 종류마다 따로 저장하고, 명령과 프로파일과 나머지 설정은 같이 쓴다."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="tcgen_sets_")
+
+    def tearDown(self):
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def raw(self):
+        with open(os.path.join(self.d, core.SETTINGS_FILE), encoding="utf-8") as f:
+            return json.load(f)
+
+    def save(self, st):
+        core.save_settings(self.d, core.resolve_paths(self.d, st))
+
+    def spr_case(self):
+        c = case("spr-base", esx="spr01", vms=[vm("spr01ev01", "job_a", ["guest_perf"], ["lpage_1g_on", "latency_high"]),
+                                               vm("spr01ev02", "job_b4")], esx_profiles=["ht_wholecore_1"], applied=True)
+        c.update(desc="SPR 기준", group="g-spr", max_wait="12:00")
+        return c
+
+    def test_defaults_and_old_settings_file(self):
+        st = core.load_settings(self.d)
+        self.assertEqual((st["case_set"], st["case_sets"], st["case_set_paths"]), ("", [], {"": {"record_csv": "", "log_dir": ""}}))
+        self.assertEqual((core.active_set(st), core.set_label(""), core.set_label("EMR")), ("", "기본", "EMR"))
+        self.assertEqual(core.cases_path(self.d), os.path.join(self.d, "test_cases.json"))
+        self.assertEqual(core.cases_path(self.d, "EMR"), os.path.join(self.d, "case_sets", "EMR.json"))
+        self.assertEqual(core.default_paths(self.d), (os.path.join(self.d, "testcases", "test_record.csv"), os.path.join(self.d, "testcases")))
+        self.assertEqual(core.default_paths(self.d, "EMR")[0], os.path.join(self.d, "testcases", "EMR", "test_record.csv"))
+        # v2.2 까지의 설정 파일(새 키 없음)도 그대로 읽는다
+        with open(os.path.join(self.d, core.SETTINGS_FILE), "w", encoding="utf-8") as f:
+            json.dump({"record_csv": "rec/a.csv", "log_dir": "", "vm_user": "tester", "run_mode": "time"}, f)
+        st = core.load_settings(self.d)
+        self.assertEqual((st["record_csv"], st["vm_user"], st["run_mode"], st["case_sets"], st["case_set"]), ("rec/a.csv", "tester", "time", [], ""))
+        self.save(st)
+        raw = self.raw()
+        self.assertEqual((raw["case_set"], raw["case_sets"], raw["case_set_paths"]), ("", [], {}))
+        self.assertEqual(raw["record_csv"], os.path.join(self.d, "rec", "a.csv"))
+
+    def test_name_rules(self):
+        st = dict(core.load_settings(self.d), case_sets=["EMR"])
+        for bad, word in (("", "비어"), ("  ", "비어"), ("기본", "처음부터"), ("emr", "이미 있음"), ("EMR", "이미 있음"), ("a b", "공백 불가"),
+                          ("a/b", "공백 불가"), ("x" * 41, "40자"), (".hidden", "처음과 끝"), ("SPR.", "처음과 끝"), ("con", "Windows"),
+                          ("LPT1.old", "Windows"), ("a:b", "공백 불가")):
+            self.assertIn(word, core.case_set_error(bad, st), bad)
+        for ok in ("SPR", "EMR-2P", "SPR_튜닝", "a.b", "x" * 40, "9"):
+            self.assertEqual(core.case_set_error(ok, st), "", ok)
+        self.assertEqual(core.case_set_error("emr", st, old="EMR"), "", "이름을 바꾸는 종류 자신과 겹치는 것은 허용")
+
+    def test_user_scenario_spr_then_emr_then_back(self):
+        """SPR 케이스를 만들고, EMR 종류로 바꿔 작업한 뒤 SPR 로 돌아오면 케이스와 케이스에 지정한 설정이 그대로다."""
+        st = core.load_settings(self.d)
+        st = core.switch_case_set(core.add_case_set(self.d, st, "SPR"), "SPR")
+        core.save_cases(self.d, [self.spr_case()], "SPR")
+        self.save(st)
+        st = core.switch_case_set(core.add_case_set(self.d, core.load_settings(self.d), "EMR"), "EMR")
+        self.assertEqual(core.load_cases(self.d, "EMR"), [], "새 종류는 빈 표")
+        emr = case("emr-base", esx="emr01", vms=[vm("emr01ev01", "job_a", [], ["vpmc_on"])])
+        core.save_cases(self.d, [emr], "EMR")
+        self.save(st)
+        st = core.load_settings(self.d)                       # 생성기를 다시 열었다
+        self.assertEqual((st["case_set"], st["case_sets"]), ("EMR", ["SPR", "EMR"]))
+        self.assertEqual([c["name"] for c in core.load_cases(self.d, core.active_set(st))], ["emr-base"])
+        st = core.switch_case_set(st, "SPR")
+        self.save(st)
+        back = core.load_cases(self.d, core.active_set(core.load_settings(self.d)))
+        want = core._clean_case(self.spr_case())
+        self.assertEqual(back, [want], "돌아오면 케이스 표가 그대로")
+        self.assertEqual((back[0]["esx_profiles"], back[0]["vms"][0]["profiles"], back[0]["vms"][0]["monitors"], back[0]["applied"],
+                          back[0]["max_wait"]), (["ht_wholecore_1"], ["lpage_1g_on", "latency_high"], ["guest_perf"], True, "12:00"))
+        self.assertEqual(core.load_cases(self.d), [], "기본 종류의 표(test_cases.json)는 건드리지 않음")
+        self.assertEqual(sorted(os.listdir(os.path.join(self.d, "case_sets"))), ["EMR.json", "SPR.json"])
+
+    def test_paths_per_set(self):
+        st = core.load_settings(self.d)
+        st["record_csv"] = os.path.join(self.d, "rec", "default.csv")
+        st = core.add_case_set(self.d, st, "EMR")
+        self.assertEqual(st["case_set"], "", "추가만으로는 종류가 바뀌지 않음")
+        st = core.switch_case_set(st, "EMR")
+        self.assertEqual((st["record_csv"], st["log_dir"]), ("", ""))
+        r = core.resolve_paths(self.d, st)
+        self.assertEqual((r["record_csv"], r["log_dir"]), (os.path.join(self.d, "testcases", "EMR", "test_record.csv"),
+                                                          os.path.join(self.d, "testcases", "EMR")), "종류마다 기본 위치가 다름")
+        st = dict(r, log_dir=os.path.join(self.d, "elsewhere"))      # 화면은 절대 경로를 넘긴다. 로그 폴더만 바꿨다
+        self.save(st)
+        raw = self.raw()
+        self.assertEqual(raw["record_csv"], os.path.join(self.d, "rec", "default.csv"), "파일의 맨 위 값은 기본 종류의 값")
+        self.assertEqual(raw["case_set_paths"], {"EMR": {"record_csv": "", "log_dir": os.path.join(self.d, "elsewhere")}},
+                         "기본 위치와 같은 값은 비워 저장")
+        self.assertEqual((raw["case_set"], raw["case_sets"]), ("EMR", ["EMR"]))
+        st = core.load_settings(self.d)
+        self.assertEqual((st["record_csv"], st["log_dir"]), ("", os.path.join(self.d, "elsewhere")), "읽으면 맨 위 값은 지금 고른 종류의 값")
+        st = core.switch_case_set(st, "")
+        self.assertEqual(core.resolve_paths(self.d, st)["record_csv"], os.path.join(self.d, "rec", "default.csv"))
+        self.assertEqual(core.resolve_paths(self.d, st)["log_dir"], os.path.join(self.d, "testcases"))
+        with self.assertRaises(ValueError):
+            core.switch_case_set(st, "NOPE")
+        # 공통 설정은 종류를 바꿔도 같다
+        st = dict(st, vm_user="tester", jump_log_dir="/data/log", esx_addr="esx01=10.0.0.11", mon_lead_min=7)
+        emr = core.switch_case_set(st, "EMR")
+        self.assertEqual((emr["vm_user"], emr["jump_log_dir"], emr["esx_addr"], emr["mon_lead_min"]), ("tester", "/data/log", "esx01=10.0.0.11", 7))
+
+    def test_add_copy_and_adopt(self):
+        st = core.load_settings(self.d)
+        st2 = core.add_case_set(self.d, st, "COPY", cases=[self.spr_case()])
+        self.assertEqual([c["name"] for c in core.load_cases(self.d, "COPY")], ["spr-base"], "지금 표를 복사해 시작")
+        self.assertEqual(st["case_sets"], [], "받은 설정은 바꾸지 않고 새 설정을 반환")
+        os.makedirs(os.path.join(self.d, "case_sets"), exist_ok=True)
+        core.save_cases(self.d, [case("left-over")], "OLD")       # 백업에서 돌아온 표가 남아 있는 경우
+        st3 = core.add_case_set(self.d, st2, "OLD")
+        self.assertEqual([c["name"] for c in core.load_cases(self.d, "OLD")], ["left-over"], "남아 있던 표는 지우지 않고 그대로 씀")
+        st4 = core.add_case_set(self.d, st3, "OLD2", cases=[])
+        self.assertEqual(core.load_cases(self.d, "OLD2"), [])
+        self.assertEqual(st4["case_sets"], ["COPY", "OLD", "OLD2"])
+        with self.assertRaises(ValueError):
+            core.add_case_set(self.d, st4, "copy")
+
+    def test_rename(self):
+        st = core.switch_case_set(core.add_case_set(self.d, core.load_settings(self.d), "EMR", cases=[case("e1")]), "EMR")
+        rec, logd = core.default_paths(self.d, "EMR")
+        os.makedirs(logd)
+        with open(rec, "w") as f:
+            f.write("record\n")
+        st = core.rename_case_set(self.d, st, "EMR", "EMR-2P")
+        self.assertEqual((st["case_sets"], st["case_set"]), (["EMR-2P"], "EMR-2P"))
+        self.assertEqual(os.listdir(os.path.join(self.d, "case_sets")), ["EMR-2P.json"])
+        self.assertEqual([c["name"] for c in core.load_cases(self.d, "EMR-2P")], ["e1"])
+        new_rec = core.default_paths(self.d, "EMR-2P")[0]
+        self.assertTrue(os.path.isfile(new_rec) and not os.path.exists(logd), "기본 위치의 기록 폴더도 이름을 바꿈")
+        self.assertEqual(core.resolve_paths(self.d, st)["record_csv"], new_rec)
+        # 새 이름의 폴더가 이미 있으면 옛 폴더를 계속 쓴다
+        os.makedirs(core.default_paths(self.d, "TAKEN")[1])
+        st = core.rename_case_set(self.d, st, "EMR-2P", "TAKEN")
+        self.assertEqual(core.resolve_paths(self.d, st)["record_csv"], new_rec, "옛 폴더의 기록 파일을 계속 씀")
+        # 직접 지정한 경로는 그대로
+        st = dict(st, record_csv=os.path.join(self.d, "my", "r.csv"))
+        st = core.rename_case_set(self.d, st, "TAKEN", "taken")
+        self.assertEqual((st["case_set"], st["record_csv"]), ("taken", os.path.join(self.d, "my", "r.csv")), "대소문자만 바꾸는 것도 됨")
+        st = core.add_case_set(self.d, st, "OTHER")
+        with self.assertRaises(ValueError):
+            core.rename_case_set(self.d, st, "taken", "other")
+        with self.assertRaises(ValueError):
+            core.rename_case_set(self.d, st, "none", "x")
+        st2 = core.rename_case_set(self.d, core.switch_case_set(st, ""), "OTHER", "OTHER2")
+        self.assertEqual((st2["case_set"], st2["case_sets"]), ("", ["taken", "OTHER2"]), "고르지 않은 종류의 이름도 바꿀 수 있음")
+
+    def test_delete(self):
+        st = core.switch_case_set(core.add_case_set(self.d, core.load_settings(self.d), "EMR", cases=[case("e1")]), "EMR")
+        rec, logd = core.default_paths(self.d, "EMR")
+        os.makedirs(logd)
+        with open(rec, "w") as f:
+            f.write("record\n")
+        st = dict(st, record_csv=rec)
+        st2, kept = core.delete_case_set(self.d, st, "EMR", now=NOW)
+        self.assertEqual((st2["case_sets"], st2["case_set"], st2["case_set_paths"]), ([], "", {"": {"record_csv": "", "log_dir": ""}}))
+        self.assertEqual(kept, os.path.join(self.d, "backup", "20261116143000_deleted_case_set", "EMR.json"))
+        with open(kept, encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["cases"][0]["name"], "e1", "케이스 표는 지우지 않고 backup 으로 옮김")
+        self.assertFalse(os.path.exists(core.cases_path(self.d, "EMR")))
+        self.assertTrue(os.path.isfile(rec), "기록 CSV 는 건드리지 않음")
+        with self.assertRaises(ValueError):
+            core.delete_case_set(self.d, st2, "EMR")
+        st3 = core.add_case_set(self.d, core.add_case_set(self.d, st2, "A"), "B")
+        st4, kept = core.delete_case_set(self.d, core.switch_case_set(st3, "A"), "B", now=NOW)
+        self.assertEqual((st4["case_set"], st4["case_sets"]), ("A", ["A"]), "고르지 않은 종류를 지우면 지금 종류는 그대로")
+
+    def test_load_drops_bad_values(self):
+        with open(os.path.join(self.d, core.SETTINGS_FILE), "w", encoding="utf-8") as f:
+            json.dump({"case_sets": ["SPR", "spr", "bad name", "", None, "기본", "EMR"], "case_set": "GONE",
+                       "case_set_paths": {"SPR": {"record_csv": None, "log_dir": 5}, "EMR": "x", "ZZZ": {"record_csv": "z"}}}, f)
+        st = core.load_settings(self.d)
+        self.assertEqual((st["case_sets"], st["case_set"]), (["SPR", "EMR"], ""))
+        self.assertEqual(st["case_set_paths"], {"": {"record_csv": "", "log_dir": ""}, "SPR": {"record_csv": "", "log_dir": "5"},
+                                                "EMR": {"record_csv": "", "log_dir": ""}})
+        with open(os.path.join(self.d, core.SETTINGS_FILE), "w", encoding="utf-8") as f:
+            json.dump({"case_sets": "SPR", "case_set": 3, "case_set_paths": []}, f)
+        st = core.load_settings(self.d)
+        self.assertEqual((st["case_sets"], st["case_set"]), ([], ""))
+
+    def test_backup_restore_and_move_keep_the_sets(self):
+        st = core.load_settings(self.d)
+        core.save_cases(self.d, [case("d1")])
+        st = core.switch_case_set(core.add_case_set(self.d, st, "EMR", cases=[case("e1")]), "EMR")
+        st = dict(st, record_csv=os.path.join(self.d, "rec", "emr.csv"))
+        self.save(st)
+        st = core.load_settings(self.d)
+        st = core.switch_case_set(st, "")
+        st = dict(st, log_dir=os.path.join(self.d, "logs-default"))
+        self.save(st)
+        parent = tempfile.mkdtemp(prefix="tcgen_sets_bk_")
+        other = tempfile.mkdtemp(prefix="tcgen_sets_new_")
+        try:
+            dest, done = core.backup_to(self.d, parent, now=NOW)
+            self.assertIn("case_sets/EMR.json", done)
+            self.assertTrue(os.path.isfile(os.path.join(dest, "case_sets", "EMR.json")))
+            self.assertIn("case_sets/EMR.json", core.backup_settings(self.d, now=NOW)[1])
+            # 다른 데이터 폴더로 옮기면 종류와 경로가 따라간다
+            shutil.rmtree(other)
+            core.copy_data(self.d, other, dirs=(core.DEFAULT_CASE_DIR,))
+            core._remap_settings_paths(self.d, other)
+            moved = core.load_settings(other)
+            self.assertEqual((moved["case_sets"], moved["case_set"]), (["EMR"], ""))
+            self.assertEqual(moved["log_dir"], os.path.join(other, "logs-default"), "기본 종류의 경로를 새 폴더 기준으로")
+            self.assertEqual(moved["case_set_paths"]["EMR"]["record_csv"], os.path.join(other, "rec", "emr.csv"),
+                             "고르지 않은 종류의 경로도 새 폴더 기준으로")
+            self.assertEqual([c["name"] for c in core.load_cases(other, "EMR")], ["e1"])
+            # 백업 불러오기: 지운 종류가 돌아온다
+            st2, _ = core.delete_case_set(self.d, core.load_settings(self.d), "EMR", now=NOW)
+            self.save(st2)
+            self.assertEqual(core.load_settings(self.d)["case_sets"], [])
+            core.restore_from(dest, self.d, now=NOW)
+            back = core.load_settings(self.d)
+            self.assertEqual(back["case_sets"], ["EMR"])
+            self.assertEqual([c["name"] for c in core.load_cases(self.d, "EMR")], ["e1"])
+            self.assertEqual([c["name"] for c in core.load_cases(self.d)], ["d1"])
+        finally:
+            shutil.rmtree(parent, ignore_errors=True)
+            shutil.rmtree(other, ignore_errors=True)
+
+    def test_generate_uses_the_paths_of_the_active_set(self):
+        st = core.switch_case_set(core.add_case_set(self.d, core.load_settings(self.d), "EMR"), "EMR")
+        st = dict(st, record_csv="/nonexistent/keep-me.csv")
+        paths = core.resolve_paths(self.d, dict(st, record_csv="", log_dir=""))
+        res = core.generate([case("c1")], copy.deepcopy(RUN), copy.deepcopy(MON), paths, now=NOW, write=True, profiles=[])
+        self.assertEqual(res["errors"], [])
+        self.assertEqual(res["record"], os.path.join(self.d, "testcases", "EMR", "test_record.csv"))
+        self.assertTrue(res["log"].startswith(os.path.join(self.d, "testcases", "EMR", "testcaselogging-")))
+        self.assertFalse(os.path.exists(os.path.join(self.d, "testcases", "test_record.csv")), "기본 종류의 기록 파일에는 쓰지 않음")
 
 
 class JumpFileTests(unittest.TestCase):
