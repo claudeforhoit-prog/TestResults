@@ -1,0 +1,6 @@
+# line endings: the jump VM files and the test reference data must stay LF, the Windows batch files CRLF
+*.sh text eol=lf
+jump/*.py text eol=lf
+tcgen_payload.py text eol=lf
+tests/fixtures/*.json text eol=lf
+*.bat text eol=crlf
