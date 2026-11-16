@@ -611,27 +611,28 @@ poll_all() {
     case "$PA_N" in ""|*[!0-9]*) PA_N=unknown ;; esac
     PA_S=$(cat "$W/seen.$PA_VM" 2>/dev/null)
     PA_Z=$(cat "$W/zero.$PA_VM" 2>/dev/null)
-    PA_L=$(cat "$W/last.$PA_VM" 2>/dev/null)
     : "${PA_Z:=0}"
     if [ "$PA_N" = unknown ]; then
       PA_Z=0
-      [ "$PA_L" = unknown ] || log "poll: vm $PA_VM unknown (ssh exit $PA_R: $(first "$W/poll.out")). Not counted as ended."
+      PA_T="unknown (ssh exit $PA_R: $(first "$W/poll.out")). Not counted as ended."
     elif [ "$PA_N" -gt 0 ]; then
+      PA_T="$PA_N process(es) running"
       if [ -z "$PA_S" ]; then
         PA_S=$(now)
         say "$PA_S" > "$W/seen.$PA_VM"
-        log "poll: vm $PA_VM process seen for the first time ($PA_N)"
-      elif [ "$PA_L" != "$PA_N" ]; then
-        log "poll: vm $PA_VM $PA_N process(es)"
+        PA_T="$PA_T (seen for the first time)"
       fi
       PA_Z=0
     elif [ -n "$PA_S" ]; then
       PA_Z=$((PA_Z + 1))
       [ "$PA_Z" = 1 ] && now > "$W/gone.$PA_VM"
-      [ "$PA_Z" -le "$GONE" ] && log "poll: vm $PA_VM no process ($PA_Z of $GONE in a row)"
+      PA_T="no process ($PA_Z of $GONE in a row)"
+    else
+      PA_T="no process yet (not seen since the job start)"
     fi
+    # one line for every login to a VM: the time of the line is when the check of that VM ended (clock of the jump VM)
+    log "check $WJ_K (case $CNAME) vm $PA_VM: $PA_T"
     say "$PA_Z" > "$W/zero.$PA_VM"
-    say "$PA_N" > "$W/last.$PA_VM"
     if [ -z "$PA_S" ]; then ALLSEEN=0; NOTSEEN="$NOTSEEN $PA_VM"; fi
     [ "$PA_Z" -ge "$GONE" ] || ALLGONE=0
     [ "$PA_N" = 0 ] && [ -n "$PA_S" ] || ALLZERO=0
@@ -671,10 +672,9 @@ wait_job() {
   case "$WJ_MAX" in ""|*[!0-9]*) WJ_MAX=0 ;; esac
   [ "$WJ_MAX" -gt 0 ] && WJ_MAX=$((TJOB - MINOFF + WJ_MAX * 60))
   while :; do
+    WJ_K=$((WJ_K + 1))
     poll_all
     WJ_N=$(now)
-    WJ_K=$((WJ_K + 1))
-    log "check $WJ_K: processes:$PSUM"          # one line for every login to the VMs, so that the log shows when they were touched
     if [ "$ALLSEEN" = 1 ] && [ -z "$R_SEEN" ]; then
       R_SEEN=$(stamp)
       log "the process is seen on every VM with a job"
@@ -704,6 +704,7 @@ wait_job() {
     fi
     if [ "$WJ_MAX" -gt 0 ] && [ $((WJ_N + WJ_I)) -gt "$WJ_MAX" ]; then WJ_I=$((WJ_MAX - WJ_N)); fi
     [ "$WJ_I" -lt 1 ] && WJ_I=1
+    log "check $WJ_K (case $CNAME) done. next check $(tstr $((WJ_N + WJ_I)))"
     setstate running "waiting for the job to end. processes:$PSUM. next check $(tstr $((WJ_N + WJ_I)))"
     if ! wait_until $((WJ_N + WJ_I)); then          # waits for that time on the clock, so that the checks do not drift
       hint_stop
@@ -790,7 +791,7 @@ run_case() {
   STEP=begin
   R_DONE=; R_APPLY=none; R_BEGIN=$(stamp); R_VMSON=; R_MON=; R_JOB=; R_SEEN=; R_END=; R_STOP=; R_STATUS=
   TMON=; TJOB=; T_ON=; OFF=0; MINOFF=0; WHY=
-  rm -f "$W"/seen.* "$W"/zero.* "$W"/gone.* "$W"/last.*
+  rm -f "$W"/seen.* "$W"/zero.* "$W"/gone.*
   if ! names_ok; then
     VMS=; REGVMS=; JOBVMS=
     pause "the plan holds a name that tcrun does not accept in case number $SEQ. Generate again in tcgen. Nothing was done."

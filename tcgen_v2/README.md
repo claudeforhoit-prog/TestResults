@@ -14,7 +14,7 @@ v2 는 v1.4 와 따로 설치하고 따로 실행한다. 프로그램 이름, �
 | v2.2 | [리포트용 CSV 저장] 창에서 `비교 기준 (첫 줄)` 칸을 뺐다. 고른 케이스를 탭 4 의 표 순서대로 저장한다. 비교에 쓰는 기준은 성능 리포트 생성기에서 정한다(9.2절). 판 번호가 바뀌었으므로 점프 VM 에 A 블록을 한 번 다시 붙여넣는다 |
 | v2.3 | 테스트 케이스 파일의 [불러오기] 와 [다른 이름으로 저장] 추가(4.1절). 지정한 파일에 자동 저장하고, 파일마다 마지막에 쓰던 테스트 기록 CSV 와 로그 폴더를 기억한다. 하루 두 번 자동 백업 추가(4.2절). 판 번호가 바뀌었으므로 점프 VM 에 A 블록을 한 번 다시 붙여넣는다 |
 | v2.4 | 순서 실행에 케이스별 `시작 시각` 칸과 `케이스 사이 간격`(기본 30분) 추가(5.6절). 시작 시각을 비우면 자동(앞 케이스가 끝난 뒤), 적으면 그 시각에 잡을 시작한다. 점프 VM 의 진행 스크립트가 바뀌었으므로 A 블록을 한 번 다시 붙여넣는다 |
-| v2.5 | 잡 종료 확인 간격의 기본값을 60초에서 30분으로 바꿈. 잡이 실행되는 동안 VM 에 접속하는 횟수를 줄이기 위해서다(5.6절). 잡 시작 뒤 15초마다 확인하던 것을 없애고 잡 시작 1분 뒤 한 번만 확인한다. 설정 영역에 `잡 종료 확인 간격` 칸 추가. 점프 VM 의 진행 스크립트가 바뀌었으므로 A 블록을 한 번 다시 붙여넣는다 |
+| v2.5 | 잡 종료 확인 간격의 기본값을 60초에서 30분으로 바꿈. 잡이 실행되는 동안 VM 에 접속하는 횟수를 줄이기 위해서다(5.6절). 잡 시작 뒤 15초마다 확인하던 것을 없애고 잡 시작 1분 뒤 한 번만 확인한다. 설정 영역에 `잡 종료 확인 간격` 칸 추가. 확인할 때마다 진행 로그에 VM 마다 한 줄(시각, 케이스, VM 이름, 결과)과 다음 확인 시각을 남긴다(5.7절). 점프 VM 의 진행 스크립트가 바뀌었으므로 A 블록을 한 번 다시 붙여넣는다 |
 
 ## 1. v1.4 와 달라진 것
 
@@ -301,7 +301,7 @@ VM 을 다시 켠 뒤의 대기: 설정 적용에서 VM 을 다시 켰으면, �
 
 - 종료를 아는 시점은 실제 종료보다 최대 확인 간격만큼 늦다. 모니터링 중지와 다음 케이스 시작도 그만큼 늦어진다.
 - 확인 간격이 2분을 넘으면 리포트용 CSV 의 `잡 종료 시각` 을 비워 둔다. 비우면 성능 리포트 생성기가 종료 시각을 정한다. 결과 CSV 의 `job_end` 에는 프로세스가 없는 것을 처음 확인한 시각을 적는다.
-- 확인할 때마다 진행 로그에 `check N: processes: <VM>=<수>` 한 줄이 남는다. VM 에 언제 접속했는지 이 줄로 알 수 있다.
+- 확인할 때마다 진행 로그에 VM 마다 한 줄이 남는다. 줄 앞의 시각이 그 VM 을 확인한 시각이다. 예와 보는 방법은 5.7절에 있다.
 - 확인 간격은 설정 영역에서 분 단위로 고친다(예: 60). 1분 안에 끝나는 잡은 첫 확인에서 보이지 않아 멈춘다.
 
 시작 시각과 케이스 사이 간격: 케이스마다 탭 4 의 `시작 시각` 칸으로 잡을 시작할 때를 정한다.
@@ -336,6 +336,36 @@ VM 을 다시 켠 뒤의 대기: 설정 적용에서 VM 을 다시 켰으면, �
 | `tcrun-<실행 ID>-<ESX 호스트>-perfreport_cases.csv` | 성능 리포트 생성기의 케이스 정보 파일. 끝난 케이스만 들어간다 |
 | `tcrun-<실행 ID>-check.log` | 점검 블록의 출력 |
 
+진행 로그는 점프 VM 에만 있다. PC 로는 오지 않는다. 점프 VM 에서 아래 명령으로 본다.
+
+```
+sh ~/.tcgen/tcrun status                                   # 지금 단계, 다음 확인 시각, 로그의 마지막 세 줄
+tail -f ~/tcgen_log/tcrun-<실행 ID>-<ESX 호스트>.log        # 로그를 계속 보기 (Ctrl+C 로 끝냄)
+grep ' check ' ~/tcgen_log/tcrun-<실행 ID>-<ESX 호스트>.log  # 잡 확인 줄만 보기
+```
+
+`~/tcgen_log` 는 설정 영역의 `점프 VM 로그 폴더` 를 비웠을 때의 위치다. 폴더를 적었으면 그 폴더다. S 블록을 붙여넣으면 `started:` 줄에 로그 파일의 전체 경로가 나온다.
+
+잡 확인 줄은 아래처럼 남는다. 확인할 때마다 잡이 있는 VM 마다 한 줄이고, 줄 앞의 시각이 그 VM 을 확인한 시각(점프 VM 의 시계)이다. VM 들을 차례로 확인한 뒤 `done` 줄에 다음 확인 시각이 나온다.
+
+```
+2026-11-20 10:09:10 check 1 (case caseA) vm esx01ev01: 1 process(es) running (seen for the first time)
+2026-11-20 10:09:18 check 1 (case caseA) vm esx01ev02: 1 process(es) running (seen for the first time)
+2026-11-20 10:09:24 check 1 (case caseA) done. next check 2026-11-20 10:39:24
+2026-11-20 10:39:32 check 2 (case caseA) vm esx01ev01: 1 process(es) running
+2026-11-20 10:39:38 check 2 (case caseA) vm esx01ev02: no process (1 of 3 in a row)
+2026-11-20 10:39:42 check 2 (case caseA) done. next check 2026-11-20 11:09:42
+```
+
+| 결과 | 뜻 |
+| :-- | :-- |
+| `N process(es) running` | 프로세스 이름이 들어 있는 프로세스가 N 개 있다. 처음 찾았으면 `(seen for the first time)` 이 붙는다 |
+| `no process (N of 3 in a row)` | 한 번 이상 보였던 프로세스가 없다. 3회 연속이면 그 VM 의 잡이 끝난 것이다 |
+| `no process yet (not seen since the job start)` | 잡 시작 뒤 아직 한 번도 보지 못했다. 시작 대기(10분)가 지나도 그대로면 멈춘다 |
+| `unknown (ssh exit N: ...)` | 그 VM 에 접속하지 못했다. 끝난 것으로 세지 않는다 |
+
+- 줄 앞의 시각은 점프 VM 의 시계다. VM 의 시계와 몇 초 다른지는 같은 케이스의 `clock: vm <이름> is N s ahead of the jump VM` 줄에 있다.
+
 진행 로그에서 찾을 줄은 다음과 같다.
 
 | 줄에 들어 있는 글 | 뜻 |
@@ -350,9 +380,8 @@ VM 을 다시 켠 뒤의 대기: 설정 적용에서 VM 을 다시 켰으면, �
 | `start time: the plan sets the job start ...` | 탭 4 에 적은 시작 시각에 잡을 시작하도록 정했다 |
 | `registered on vm <이름>:` 과 그 아래 줄 | crontab 에 등록한 줄 그대로 |
 | `times: monitoring start ..., job start ...` | 정한 시각 |
-| `poll: vm <이름> process seen for the first time` | 프로세스를 처음 본 시점 |
-| `poll: vm <이름> no process (N of 3 in a row)` | 연속 없음 횟수 |
-| `check N: processes: <VM>=<수>` | VM 에 접속해 프로세스를 확인한 때와 찾은 수. 확인할 때마다 한 줄 |
+| `check N (case <이름>) vm <이름>: ...` | 잡 확인 한 번에 VM 마다 한 줄. 시각, 케이스, VM 이름, 결과(위 표) |
+| `check N (case <이름>) done. next check <시각>` | 그 확인을 마친 때와 다음 확인 시각 |
 | `job ended:` | 종료로 판정한 시각 |
 | `removed the lines of this case` | crontab 줄 삭제 |
 | `==== case <이름> done` | 케이스 끝 |
@@ -816,7 +845,7 @@ Windows 에서는 셸이 필요한 시험을 건너뛴다. 전체 시험은 tcsh
 | ESX 의 `sh`(busybox), `sha256sum`, `/bin/echo` | here-document, `read -r`, `printf` 가 dash 와 같게 동작 | 진행 로그의 `registered on esx` |
 | ESX crond | `cron.update` 에 root 를 쓰면 1분 안에 crontab 을 다시 읽는다 | ESX 모니터링이 등록한 분에 시작하는지 |
 | VM 의 cron | 등록 75초 뒤의 분에 새 줄을 실행한다 | 모니터링과 잡이 등록한 분에 시작하는지 |
-| VM 의 `pgrep -f`, `date -d @<초>` | procps 의 pgrep, GNU date | P 블록의 VM 줄, 진행 로그의 `poll:` 줄 |
+| VM 의 `pgrep -f`, `date -d @<초>` | procps 의 pgrep, GNU date | P 블록의 VM 줄, 진행 로그의 `check` 줄 |
 | 점프 VM 의 `setsid`, `base64 --decode`, `gzip`, `sha256sum` | util-linux, coreutils | A 블록의 `OK` 두 줄, S 블록의 `started:` |
 | 터미널을 닫은 뒤의 진행 | `setsid` 로 시작한 진행은 터미널을 닫아도 계속된다. 점프 VM 이 로그아웃할 때 사용자 프로세스를 모두 끝내게 설정돼 있으면(systemd-logind 의 `KillUserProcesses=yes`) 끝난다 | S 블록을 붙여넣고 터미널을 닫은 뒤 다시 접속해 `sh ~/.tcgen/tcrun status` |
 | 300줄쯤 되는 A 블록 붙여넣기 | 터미널이 글자를 빠뜨리지 않는다. 빠뜨리면 `FAILED` 가 나온다 | A 블록의 `OK` 두 줄 |

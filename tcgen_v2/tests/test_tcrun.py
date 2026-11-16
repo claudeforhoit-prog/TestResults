@@ -441,8 +441,10 @@ class CheckIntervalTests(TcrunBase):
         self.assertEqual(rc, 0, self.ctx(out))
         r = self.results()[0]
         job = epoch(r["job_start"])
-        checks = [(epoch(m.group(1)), int(m.group(2))) for m in
-                  re.finditer(r"(?m)^(\S+ \S+) check \d+: processes: esx01ev01=(\d+)$", log)]
+        checks = []
+        for m in re.finditer(r"(?m)^(\S+ \S+) check (\d+) \(case q1\) vm esx01ev01: (.+)$", log):
+            self.assertEqual(int(m.group(2)), len(checks) + 1, "확인 번호는 1부터 차례로")
+            checks.append((epoch(m.group(1)), int(m.group(3).split()[0]) if m.group(3)[0].isdigit() else 0))
         self.assertEqual([n for _, n in checks], [1, 1, 0, 0, 0], "잡이 실행되는 15분 동안 확인은 두 번, 끝난 뒤 세 번\n" + log)
         t = [x - job for x, _ in checks]
         self.assertTrue(60 <= t[0] < 60 + 40, "첫 확인은 잡 시작 60초 뒤: %s" % t)
@@ -458,6 +460,15 @@ class CheckIntervalTests(TcrunBase):
         head, row = rows
         self.assertEqual((row[head.index("잡 시작 시각")], row[head.index("잡 종료 시각")]), (r["job_start"], ""))
         self.assertIn("first check 60 s after the job start and then every 600 s", log)
+        # 확인마다 VM 이름과 시각이 있는 줄, 그리고 다음 확인 시각
+        self.assertRegex(log, r"(?m)^\S+ \S+ check 1 \(case q1\) vm esx01ev01: 1 process\(es\) running \(seen for the first time\)$")
+        self.assertRegex(log, r"(?m)^\S+ \S+ check 2 \(case q1\) vm esx01ev01: 1 process\(es\) running$")
+        self.assertRegex(log, r"(?m)^\S+ \S+ check 3 \(case q1\) vm esx01ev01: no process \(1 of 3 in a row\)$")
+        done = re.findall(r"(?m)^(\S+ \S+) check (\d) \(case q1\) done\. next check (\S+ \S+)$", log)
+        self.assertEqual([k for _, k, _ in done], ["1", "2", "3", "4"], "마지막 확인 뒤에는 다음 확인이 없음")
+        self.assertTrue(595 <= epoch(done[0][2]) - epoch(done[0][0]) <= 600, "다음 확인 시각 = 확인을 마친 때 + 확인 간격")
+        self.assertTrue(55 <= epoch(done[2][2]) - epoch(done[2][0]) <= 60, "프로세스가 없어진 뒤의 다음 확인은 1분 뒤")
+        self.assertNotIn("poll:", log)
 
     def test_short_interval_keeps_the_end_time_in_the_report_file(self):
         """확인 간격이 2분 이하이면 리포트용 CSV 에 종료로 판정한 시각을 적는다(시각이 정확하므로)."""
@@ -556,8 +567,11 @@ class FailureTests(TcrunBase):
         st = e.state(RID, "esx01")
         self.assertEqual(st["state"], "paused")
         self.assertIn("never seen within 2 min after the job start on: esx01ev01", st["text"])
-        self.assertIn("poll: vm esx01ev02 process seen for the first time", log)
-        self.assertNotIn("poll: vm esx01ev01 process seen", log)
+        self.assertRegex(log, r"(?m)^\S+ \S+ check 1 \(case f1\) vm esx01ev02: 1 process\(es\) running \(seen for the first time\)$")
+        self.assertRegex(log, r"(?m)^\S+ \S+ check 1 \(case f1\) vm esx01ev01: no process yet \(not seen since the job start\)$",
+                         "프로세스를 찾지 못한 VM 도 확인마다 한 줄")
+        self.assertNotRegex(log, r"vm esx01ev01: \d+ process")
+        self.assertRegex(log, r"(?m)^\S+ \S+ check 2 \(case f1\) vm esx01ev01: no process yet")
         r = self.results()[0]
         self.assertGreaterEqual(epoch(r["end"]) - epoch(r["job_start"]), 120)
         self.assertEqual(self.fired(cron, "esx01ev01", "mon.sh stop"), [], "모니터링을 중지하지 않음")
@@ -579,7 +593,8 @@ class FailureTests(TcrunBase):
             f.write("3")
         self.assertEqual(p.wait(timeout=300), 0, self.ctx())
         log = self.log()
-        self.assertIn("poll: vm esx01ev01 unknown (ssh exit 255: ssh: connect to host esx01ev01 port 22: Connection timed out). Not counted as ended.", log)
+        self.assertRegex(log, r"(?m)^\S+ \S+ check \d+ \(case g1\) vm esx01ev01: unknown \(ssh exit 255: ssh: connect to host esx01ev01 "
+                              r"port 22: Connection timed out\)\. Not counted as ended\.$")
         job = e.vm_file("esx01ev01", "job.log")
         r = self.results()[0]
         self.assertEqual(r["status"], "done")
