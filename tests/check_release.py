@@ -218,6 +218,9 @@ def main():
         b = [re.sub(r'^\d+\. ', '', h) for h in heads.get('CASE-B.docx', [])]
         import docx as _docx
         dB = _docx.Document(os.path.join(out, 'CASE-B.docx'))
+        ts = next((t for t in dB.tables if t.rows[0].cells[0].text == '항목' and len(t.rows) >= 4 and t.rows[1].cells[0].text.startswith('TAT')), None)
+        check('요약: TAT 평균 · 최소 · 최대 행', ts is not None and [r.cells[0].text[:2] for r in ts.rows[1:4]] == ['TA', '최소', '최대']
+              and ts.rows[1].cells[1].text == '13,185.00' and len(ts.rows[0].cells) == 3)
         check('Appendix: phase 잡별 self 시간 표', any(t.rows[0].cells[-1].text == '잡 평균' and len(t.rows[0].cells) >= 4 for t in dB.tables))
         check('Appendix: TAT 측정 잡 잡별 elapsed 표', sum(1 for p in dB.paragraphs if p.text.startswith('표. ') and '잡별 elapsed' in p.text and 'bench_sim' in p.text) == 2)
         check('CASE-B: TAT · phase · 동시 실행 잡 절 있음', b[2:5] == ['TAT', 'phase 소요 시간', '동시 실행 잡'], str(b[:6]))

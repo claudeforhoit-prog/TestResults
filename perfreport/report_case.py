@@ -436,6 +436,20 @@ def build_case(path, case, df, chart_dir, date, log=print, roles=None, include_u
 
     # 2. 요약 표: 역할 지정이 있으면 핵심 성능 지표, 없으면 기존 서버별 요약 표 순서
     doc.add_heading('2. 요약', level=1)
+    tmains = (jobs or {}).get('mains') or []
+    if tmains:                                   # TAT 요약: 열 = TAT 측정 VM, 행 = 평균(TAT) · 최소 · 최대 (· 기준선 대비)
+        bv = float(tat_base['value']) if tat_base and tat_base.get('value') else None
+        rows = [['TAT (잡 평균)'] + [f'{m["tat"]:,.2f}' for m in tmains],
+                ['최소 시간 (가장 빨리 끝난 잡)'] + [f'{m["min"]:,.2f}' for m in tmains],
+                ['최대 시간 (가장 늦게 끝난 잡)'] + [f'{m["max"]:,.2f}' for m in tmains],
+                ['잡 수'] + [str(len(m['jobs'])) for m in tmains]]
+        if bv:
+            rows.append(['Degradation (%)'] + [f'{jobs_mod.degradation(m["tat"], bv):+.2f}' for m in tmains])
+        table('TAT 요약 (s)', ['항목'] + [(', '.join(m['hosts']) or m['label']) + (f' · {m["code"]}' if len({x['code'] for x in tmains}) > 1 else '')
+                                        for m in tmains], rows)
+        D._notes(doc, ['TAT: VM 마다 TAT 측정 잡(동시에 시작한 잡 세트)의 elapsed 평균 · 최소 · 최대는 그 세트 안의 잡 elapsed',
+                       (f'Degradation 기준선: {tat_base.get("name") or tat_base.get("note") or "기준선"} {bv:,.2f} s' if bv else ''),
+                       '잡별 값: Appendix 잡 결과 표'])
     core = R.members(roles, R.ROLES[0])
     pick = units_mod.same_metric(present)          # 단위를 GB · Gbps 로 바꿨어도 같은 지표를 찾는다
     summary = list(SUMMARY_PRIORITY)
