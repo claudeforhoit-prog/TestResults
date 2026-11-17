@@ -559,6 +559,57 @@ def main():
     check(snap() == s0 and [c["applied_stop"] for c in app.cases] == ["2030-01-15 12:50:00", "", ""],
           "추가한 케이스를 지우고 적용 체크를 끄면 처음과 같음(고정한 값은 지움) %s" % (snap(),))
     check([c["applied_stop"] for c in core.load_cases(BASE)] == ["2030-01-15 12:50:00", "", ""], "고정한 값이 test_cases.json 에 저장됨")
+    # [기록 대조] (시각 지정): 적용 체크한 케이스의 값을 테스트 기록 CSV 의 마지막 생성 기록과 대조하고, 고른 케이스를 되돌린다
+    # (사용자 2026-11-17 이미 변경된 기록을 대조해 되돌리는 기능 "네 정합성안맞는경유필요 함")
+    import copy as _copy
+    saved_cases = _copy.deepcopy(app.cases)
+    rec0 = core.latest_records(core.read_record_rows(rec), False)["TC-base-a"]
+    app.cases[0]["start"] = "2030-02-01 00:00:00"                 # 예전 판에서 값이 섞인 표처럼 잡 시작을 다르게 만든다
+    app.cases[0]["interval"] = "33:00"
+    n_log = len(LOG)
+    app.compare_records()
+    root.update()
+    top = app.cmp_win
+    rows0 = [(r["name"], r["field"], r["cur"], r["ref"], r["sel"]) for r in app.cmp_rows]
+    check(top.winfo_exists() and ("TC-base-a", "잡 시작", "2030-02-01 00:00:00", rec0["잡 시작(KST)"], True) in rows0
+          and any(r[1] == "간격" and r[2] == "33:00" for r in rows0) and all(r[0] in ("TC-base-a", "") for r in rows0),
+          "[기록 대조] 창: 적용 체크한 케이스에서 기록과 다른 칸을 보임 %s" % (rows0,))
+    labels = [w.cget("text") for w in walk(top) if isinstance(w, ttk.Label)]
+    check(any("기준: 테스트 기록 CSV 의 마지막 생성 기록" in x for x in labels)
+          and any("적용 체크한 케이스 1개: 기준과 다른 케이스 1개, 같은 케이스 0개, 기준에 없는 케이스 0개" in x for x in labels),
+          "[기록 대조] 창에 기준과 케이스 수 표시 %s" % [x for x in labels if "케이스" in x])
+    shot_window(root, "기록 대조", "tcgen_record_compare.png")
+    press(top, "기준 값으로 되돌리기")
+    root.update()
+    keeps = sorted(n for n in os.listdir(os.path.join(BASE, "backup")) if n.endswith("_before_record_restore.json"))
+    check(app.cases[0]["start"] == rec0["잡 시작(KST)"] and app.cases[0]["interval"] != "33:00" and not top.winfo_exists()
+          and any(x[0] == "ask" and "케이스 1개의 값을 기준 값으로 바꾼다" in x[1] for x in LOG[n_log:])
+          and any(x[0] == "info" and "케이스 1개의 값을 기준 값으로 바꿨음" in x[1] for x in LOG[n_log:]) and len(keeps) == 1,
+          "[기준 값으로 되돌리기]: 고른 케이스의 값을 기록의 값으로 바꾸고, 바꾸기 전의 표를 backup 에 남김")
+    kept = core.load_cases(BASE, os.path.join(BASE, "backup", keeps[0]))
+    check(kept[0]["start"] == "2030-02-01 00:00:00" and core.load_cases(BASE)[0]["start"] == rec0["잡 시작(KST)"],
+          "되돌린 값은 저장되고, 남긴 사본에는 바꾸기 전의 값이 있음")
+    ASK_OPEN.append(os.path.join(BASE, "backup", keeps[0]))       # 예전 표 파일로 대조: 방금 남긴 사본을 기준으로
+    app.compare_records()
+    root.update()
+    top = app.cmp_win
+    check(app.cmp_rows == [], "되돌린 뒤 기록과 다시 대조하면 다른 칸이 없음")
+    press(top, "예전 표 파일로 대조")
+    root.update()
+    rows1 = [(r["name"], r["field"], r["cur"], r["ref"]) for r in app.cmp_rows]
+    check(("TC-base-a", "잡 시작", rec0["잡 시작(KST)"], "2030-02-01 00:00:00") in rows1,
+          "[예전 표 파일로 대조]: 고른 표 파일의 같은 이름 케이스와 대조 %s" % (rows1,))
+    press(top, "모두 해제")
+    n_log = len(LOG)
+    press(top, "기준 값으로 되돌리기")
+    check(top.winfo_exists() and any(x[0] == "info" and "되돌릴 케이스를 하나 이상 체크할 것" in x[1] for x in LOG[n_log:]),
+          "체크한 케이스가 없으면 바꾸지 않음")
+    press(top, "닫기")
+    root.update()
+    app.cases[:] = saved_cases                                    # 뒤의 점검을 위해 표를 되돌린다
+    app.calc_schedule()
+    app.mark_cases()
+    t.refresh("c0")
     app.show_help("4. 테스트 케이스", app.case_help)
     root.update()
     helps = [w.cget("text") for w in walk(app.help_win) if isinstance(w, ttk.Label)]
@@ -1031,6 +1082,92 @@ def main():
     for k, jn in enumerate(("job_a", "job_a", "job_b4")):
         app.cases[1]["vms"][k]["job"] = jn
     app.mark_cases()
+
+    # v2.10 설정 영역: 잡 시작 전의 시간 규칙과 스냅샷 때 VM 에서 실행할 명령 (사용자 2026-11-17 "잡 시작 최소 5분전에 config 스냅샷
+    # 부분이 완료되면 좋겠으니 변경 작업 포함해서 시간 조정해줘 변경작업은 30분혹은 그 이상 이전에 수행", Operations 기록 "네")
+    labels = [w.cget("text") for w in walk(root) if isinstance(w, ttk.Label)]
+    check("변경 작업 뒤 잡 시작까지 최소" in labels and "스냅샷 뒤 잡 시작까지 최소" in labels and "스냅샷 때 VM 에서 실행할 명령" in labels
+          and "VM 켠 뒤 잡 시작까지 최소" not in labels, "설정 영역에 변경 작업 뒤, 스냅샷 뒤 잡 시작까지 최소 칸과 스냅샷 때 실행할 명령 칸")
+    check(app.v_snapgap.get() == "5" and app.v_gcmd.get() == "" and core.DEFAULT_SETTINGS["seq_settle_min"] == 30,
+          "기본값: 스냅샷 뒤 5분, 변경 작업 뒤 30분, 명령 없음")
+    app.v_snapgap.set("7")
+    app.v_gcmd.set("  bash /home/tester/perf/guest_config_push.sh   --insecure ")
+    stx = core.load_settings(BASE)
+    check(stx["seq_snap_gap_min"] == 7 and stx["seq_guest_cmd"] == "bash /home/tester/perf/guest_config_push.sh --insecure",
+          "두 칸을 바꾸면 저장 (명령의 앞뒤와 겹친 공백은 정리)")
+    app.v_snapgap.set("x")
+    check(app.current_settings(show_error=False) is None, "스냅샷 뒤 잡 시작까지 최소 칸이 숫자가 아니면 설정을 쓰지 않음")
+    app.v_snapgap.set("5")
+    seq_saved = _copy.deepcopy(app.cases)
+    app.commit_case("c1", "seq_start", "9:05")
+    app.commit_case("c2", "seq_start", "+8")
+    gen(app, root)
+    res = app.result
+    check(res is not None and "\nGCMD bash /home/tester/perf/guest_config_push.sh --insecure\n" in res["plan"]
+          and "SET SNAP_GAP_MIN 5\n" in res["plan"] and "- 스냅샷 뒤 대기: 잡은 구성 스냅샷이 끝나고 5분 뒤부터 시작한다." in res["plan_view"]
+          and "- 변경 작업 뒤 대기: 이번 실행이 그 ESX 호스트에서 변경 작업(설정 적용, VM 끄기, VM 켜기)을 했으면" in res["plan_view"]
+          and "명령: bash /home/tester/perf/guest_config_push.sh --insecure" in res["plan_view"],
+          "스냅샷 뒤 대기와 스냅샷 때 실행할 명령이 plan 과 실행 계획에 들어감")
+    # +간격을 적은 케이스를 적용 체크하면 칸의 값을 날짜 시각으로 고정한다 (사용자 2026-11-17 "네")
+    want = core.fmt_dt([pc for pc in res["cases"] if pc["name"] == app.cases[2]["name"]][0]["start_at"])
+    first = dt.datetime.strptime(app.cases[1]["seq_start"], "%Y-%m-%d %H:%M:%S")
+    check(want == core.fmt_dt(first + dt.timedelta(hours=8)) and app.cases[2]["seq_start"] == "+8:00", "생성한 계획의 잡 시작 = 앞 케이스 + 8시간")
+    app.toggle_applied("c2")
+    t.refresh("c2")
+    check(app.cases[2]["applied"] and app.cases[2]["seq_start"] == want and cell_of(t, "c2", "seq_start") == want
+          and core.load_cases(BASE)[2]["seq_start"] == want, "+간격을 적은 케이스를 적용 체크하면 날짜 시각으로 바꿔 저장 (이 창에서 만든 계획)")
+    check(app.case_kind("c2", {"key": "seq_start"}) == "popup" and app.case_kind("c1", {"key": "seq_start"}) == "entry",
+          "적용 체크한 케이스의 시작 시각 칸은 고치는 칸이 열리지 않음")
+    n_log = len(LOG)
+    app.commit_case("c2", "seq_start", "+9")
+    check(app.cases[2]["seq_start"] == want and any(x[0] == "info" and "적용 체크한 케이스의 시작 시각은 고칠 수 없음" in x[1]
+                                                    for x in LOG[n_log:]), "적용 체크한 케이스의 시작 시각은 고쳐지지 않음")
+    app.toggle_applied("c2")
+    check(not app.cases[2]["applied"] and app.cases[2]["seq_start"] == want, "적용 체크를 끄면 날짜 시각은 그대로 남고 고칠 수 있음")
+    app.commit_case("c2", "seq_start", "+8")
+    app.result = None                                             # 창을 다시 연 때처럼: 테스트 기록 CSV 의 마지막 생성 기록을 쓴다
+    app.cases[1]["seq_start"] = "2031-03-03 03:00:00"             # 생성 뒤에 앞 케이스를 고쳤어도 기록의 값(생성한 계획)을 쓴다
+    app.toggle_applied("c2")
+    check(app.cases[2]["seq_start"] == want, "창을 다시 연 뒤에는 테스트 기록 CSV 의 마지막 생성 기록으로 고정 %s" % app.cases[2]["seq_start"])
+    app.toggle_applied("c2")
+    app.commit_case("c2", "seq_start", "+2")                      # 기록의 간격(+8:00)과 다르면 지금 표로 계산한다
+    app.toggle_applied("c2")
+    check(app.cases[2]["seq_start"] == "2031-03-03 05:00:00", "기록과 맞지 않으면 지금 표로 계산 (앞 케이스 + 간격)")
+    app.toggle_applied("c2")
+    app.commit_case("c1", "seq_start", "자동")
+    app.commit_case("c2", "seq_start", "+2")
+    n_log = len(LOG)
+    app.toggle_applied("c2")
+    check(app.cases[2]["applied"] and app.cases[2]["seq_start"] == "+2:00"
+          and any(x[0] == "info" and "날짜 시각으로 바꾸지 못했음" in x[1] for x in LOG[n_log:]),
+          "앞 케이스가 자동이라 계산할 수 없으면 +간격을 그대로 두고 알림")
+    # [기록 대조] (순서 실행): 적용 체크한 케이스의 시작 시각을 기록의 잡 시작과 대조
+    n_log = len(LOG)
+    app.compare_records()
+    root.update()
+    rows2 = [(r["name"], r["field"], r["cur"], r["ref"]) for r in app.cmp_rows]
+    labels = [w.cget("text") for w in walk(app.cmp_win) if isinstance(w, ttk.Label)]
+    check(rows2 == [(app.cases[2]["name"], "시작 시각", "+2:00", want)]
+          and any("기준과 다른 케이스 1개, 같은 케이스 0개, 기준에 없는 케이스 1개 (TC-base-a)" in x for x in labels),
+          "[기록 대조] (순서 실행): 시작 시각 칸을 기록의 잡 시작과 대조 %s %s" % (rows2, [x for x in labels if "케이스" in x]))
+    shot_window(root, "기록 대조", "tcgen_seq_record_compare.png")
+    press(app.cmp_win, "기준 값으로 되돌리기")
+    root.update()
+    check(app.cases[2]["seq_start"] == want, "기록의 잡 시작으로 되돌림")
+    app.show_help("4. 테스트 케이스", app.case_help)
+    root.update()
+    helps = [w.cget("text") for w in walk(app.help_win) if isinstance(w, ttk.Label)]
+    check(any("잡 시작 전의 시간 규칙" in x and "끝난 시각에서 %s분 이상 지난 뒤에 잡을 시작한다" % app.v_settle.get() in x
+              and "구성 스냅샷이 끝난 시각에서는 5분 이상 지난 뒤에 잡을 시작한다" in x for x in helps)
+          and any("[기록 대조]" in x for x in helps) and any("날짜 시각으로 바꿔 고정한다" in x for x in helps)
+          and any("스냅샷 때 VM 에서 실행할 명령(설정 영역)" in x for x in helps), "순서 실행의 탭 4 도움말에 v2.10 설명")
+    shot_window(root, "도움말", "tcgen_seq_help4_v210.png")
+    app.help_win.destroy()
+    app.cases[:] = seq_saved                                      # 뒤의 점검을 위해 표와 설정을 되돌린다
+    app.v_gcmd.set("")
+    app.mark_cases()
+    t.refresh("c1")
+    shot(root, app, 3, "tcgen_seq_tab4_v210.png")
 
     # 대상을 바꾸면 고른 케이스에서 선택을 해제한다
     n_log = len(LOG)

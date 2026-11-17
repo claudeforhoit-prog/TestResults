@@ -1,5 +1,5 @@
 #!/bin/sh
-# tcrun 2.9 - tcgen sequence runner. Runs on the jump VM (POSIX sh). tcgen block A installs it in the jump VM work folder
+# tcrun 2.10 - tcgen sequence runner. Runs on the jump VM (POSIX sh). tcgen block A installs it in the jump VM work folder
 # (setting of tcgen, ~/.tcgen when empty). tcrun uses the folder it is in as its work folder (D below).
 #
 #   sh <work folder>/tcrun check <plan>       read-only checks: ESX key login, tools, VMs, settings and power, VM login, clocks
@@ -21,15 +21,17 @@
 #
 # One case: wait for the preparation time (cases with a start time: PREP_LEAD_MIN before it), settings, VM power
 # (VMs marked off are shut down, the others are powered on one after another: power on, 1GB page backing complete,
-# ssh login), crontab lines, end of the job, monitoring stop. A job starts SETTLE_MIN or more after the last VM that
-# this case powered on was ready. Every job start on this jump VM is SPACING_MIN or more away from every other one.
+# ssh login), config snapshot, crontab lines, end of the job, monitoring stop.
+# Times before a job: a job starts SETTLE_MIN or more after the last change that this run made on the ESX host
+# (settings applied, a VM shut down, a VM powered on again and ready), and SNAP_GAP_MIN or more after the config
+# snapshot of the case was complete. Every job start on this jump VM is SPACING_MIN or more away from every other one.
 #
 # Checked and not checked: the job of a case is looked for on its VMs (pgrep) only when the next step needs the end of
 # the job: cases without a start time, and cases whose next case has no start time. A case whose start time is set by
 # the plan (NOCHK line) is not checked: no login to its VMs while the job runs. It ends at a time (2 min before the next
 # case is prepared, or when its maximum wait ends) and its monitoring stop is registered together with its start lines.
 
-TCRUN_VERSION=2.9
+TCRUN_VERSION=2.10
 case "$0" in        # the work folder is the folder of this file
   */tcrun) D=$(cd "${0%/tcrun}" 2>/dev/null && pwd) ;;
   tcrun) D=$(pwd) ;;
@@ -107,7 +109,8 @@ load_plan() {
   PON_WAIT=$(sget POWERON_WAIT_MIN 90)
   BOOT_WAIT=$(sget BOOT_WAIT_MIN 30)
   SHUT_WAIT=$(sget SHUTDOWN_WAIT_MIN 10)
-  SETTLE=$(sget SETTLE_MIN 10)
+  SETTLE=$(sget SETTLE_MIN 30)
+  SNAPGAP=$(sget SNAP_GAP_MIN 5)
   GAP=$(sget GAP_MIN 0)
   FIRST=$(sget FIRST_CHECK_SEC 60)
   SPACING=$(sget SPACING_MIN 5)
@@ -334,6 +337,24 @@ if command -v crontab >/dev/null 2>&1; then echo "TCGEN-CRONTAB yes"; else echo 
 echo "TCGEN-NAME `hostname 2>/dev/null`"
 echo "TCGEN-LINES `crontab -l 2>/dev/null | grep -c ' # tcgen '`"
 EOF
+  MP_F=$(gcmd_file)
+  if [ -n "$MP_F" ]; then say "if [ -r '$MP_F' ]; then echo 'TCGEN-GCMD yes'; else echo 'TCGEN-GCMD no'; fi" >> "$1"; fi
+}
+gcmd() {            # the command that the plan wants to run on every VM at the config snapshot (GCMD line; empty: none)
+  grep '^GCMD ' "$PLAN" 2>/dev/null | head -n 1 | cut -d' ' -f2-
+}
+gcmd_file() {       # the first word of that command that is an absolute path (the script it runs), when it is a plain path
+  GF_R=
+  set -f              # the words of the command are not file name patterns of this machine
+  for GF_W in $(gcmd); do
+    case "$GF_W" in
+      /*[!A-Za-z0-9._/+-]*) ;;
+      /*) [ -n "$GF_R" ] || GF_R=$GF_W ;;
+    esac
+  done
+  set +f
+  [ -n "$GF_R" ] && say "$GF_R"
+  return 0
 }
 mk_esxprobe() {
   cat > "$1" << 'EOF'
@@ -477,6 +498,11 @@ wait_until() {      # wait_until <epoch of this machine> [nostop]: 1 = the stop 
 # snapshot is taken well before the job starts. A case without a job (settings only) has no snapshot.
 # Read only. A snapshot that cannot be taken is a warning in the log: the case goes on.
 # The guest OS settings are those at the time of the snapshot. What a job command changes when it starts is not in it.
+# Command at the snapshot (GCMD line of the plan, optional): tcrun runs it on every VM of the case that is powered on,
+# after the guest OS settings were read (one more login). It is meant for the script that records the guest settings
+# in VCF Operations (guest_config_push). Its result is one row of the csv ("snapshot command") and one line of the log.
+# A command that fails is a warning: the case goes on.
+# SNAP_END = when the snapshot was complete. register starts the job SNAP_GAP_MIN or more after it.
 cfgl() {            # cfgl <code> <text when the plan has no such label>
   CL_T=$(grep "^CFGL $1 " "$PLAN" | head -n 1 | cut -d' ' -f3-)
   say "${CL_T:-$2}"
@@ -534,6 +560,10 @@ snapshot() {        # snapshot: write the config snapshot of the VMs of this cas
     fi
   fi
   mk_guestcfg "$W/gcfg.sh"           # guest OS settings: read on each VM that is powered on
+  SN_C=$(gcmd); SN_O=0
+  if [ -n "$SN_C" ]; then
+    { say "( $SN_C ) < /dev/null"; say 'echo "TCGEN-GCMD-RC $?"'; } > "$W/gcmd.sh"
+  fi
   for SN_VM in $ONVMS; do
     vmrun "$(target "$SN_VM")" "$W/gcfg.sh" "$W/gcfg.out" 60
     SN_X=$?
@@ -543,6 +573,21 @@ snapshot() {        # snapshot: write the config snapshot of the VMs of this cas
       SN_G=$((SN_G + 1))
     else
       SN_W="$SN_W guest OS settings of $SN_VM not read (ssh exit $SN_X: $(first "$W/gcfg.out"));"
+    fi
+    [ -n "$SN_C" ] || continue
+    # command at the snapshot (records the guest settings in VCF Operations): its last line goes into the log and the csv
+    vmrun "$(target "$SN_VM")" "$W/gcmd.sh" "$W/gcmd.out" 150
+    SN_X=$?
+    SN_RC=$(tval TCGEN-GCMD-RC "$W/gcmd.out")
+    SN_L=$(grep -v '^TCGEN-GCMD-RC ' "$W/gcmd.out" | grep -v '^ *$' | tail -n 1 | LC_ALL=C tr -cd '\11\40-\176' | tr '\t' ' ' | cut -c1-160)
+    if [ "$SN_RC" = 0 ]; then
+      SN_O=$((SN_O + 1))
+      log "config snapshot: command on vm $SN_VM: ok${SN_L:+ ($SN_L)}"
+      printf '%s\tguest\tsnapshot command\tok%s\n' "$SN_VM" "${SN_L:+: $SN_L}" >> "$W/snap.rows"
+    else
+      case "$SN_RC" in ""|*[!0-9]*) SN_E="ssh exit $SN_X" ;; *) SN_E="exit $SN_RC" ;; esac
+      SN_W="$SN_W command on vm $SN_VM failed ($SN_E${SN_L:+: $SN_L});"
+      printf '%s\tguest\tsnapshot command\tfailed (%s)%s\n' "$SN_VM" "$SN_E" "${SN_L:+: $SN_L}" >> "$W/snap.rows"
     fi
   done
   {
@@ -581,12 +626,13 @@ snapshot() {        # snapshot: write the config snapshot of the VMs of this cas
       }'
   } > "$SN_F.new" 2>> "$LOG"
   if [ -s "$SN_F.new" ] && mv -f "$SN_F.new" "$SN_F"; then
-    log "config snapshot ($SN_WHY): $SN_F  (VM settings of $SN_V VM(s), guest OS settings of $SN_G VM(s))"
+    log "config snapshot ($SN_WHY): $SN_F  (VM settings of $SN_V VM(s), guest OS settings of $SN_G VM(s)${SN_C:+, command at the snapshot ok on $SN_O VM(s)})"
   else
     rm -f "$SN_F.new"
     SN_W="$SN_W the csv could not be written: $SN_F;"
   fi
   [ -n "$SN_W" ] && log "WARN config snapshot of case $CNAME is not complete:$SN_W The case goes on."
+  SNAP_END=$(now)
   return 0
 }
 
@@ -712,6 +758,7 @@ power_on() {        # power_on <vm>: power on through the ESX host when off, wai
   if [ "$PO_NEW" = 1 ]; then
     PO_READY=$(now)
     say "$PO_READY" > "$W/on.$1"
+    say "$PO_READY" > "$W/chg"
     log "vm $1: ssh login works, ready $((PO_READY - PO_S)) s after the power on started (power on, 1GB page backing, ssh login)"
   else
     log "vm $1: ssh login works"
@@ -748,6 +795,7 @@ apply_settings() {  # compare the settings of this case and change those that di
       return 0 ;;
     changed)
       R_APPLY=changed
+      say "$(now)" > "$W/chg"
       log "settings: applied. The VMs of this case are powered off now."
       return 0 ;;
   esac
@@ -788,7 +836,9 @@ power_vms() {       # VM power as the case wants it: VMs marked off are shut dow
     PV_R=$(tval TCGEN-RESULT "$W/poff.out")
     case "$PV_R" in
       alreadyoff*) log "vm $PV_VM: powered off already (the case wants it off)" ;;
-      poweredoff*) logf '    | ' "$W/poff.out"; log "vm $PV_VM: shut down (the case wants it off)"; PV_OFFED="$PV_OFFED $PV_VM" ;;
+      poweredoff*)
+        logf '    | ' "$W/poff.out"; log "vm $PV_VM: shut down (the case wants it off)"; PV_OFFED="$PV_OFFED $PV_VM"
+        say "$(now)" > "$W/chg" ;;
       *)
         logf '    | ' "$W/poff.out"
         LW_FAIL=
@@ -823,6 +873,8 @@ power_vms() {       # VM power as the case wants it: VMs marked off are shut dow
 
 # ---------------------------------------------------------------- step 2 and 3: clocks and crontab lines
 last_on() {         # T_ON = when the VMs of this case were last powered on again by this run (empty: never)
+                    # T_CHG = when this run last changed something on this ESX host: settings applied, a VM shut down,
+                    # a VM powered on again and ready (file chg of the work folder; empty: this run changed nothing)
   T_ON=; R_VMSON=
   for LO_VM in $VMS; do
     LO_T=$(cat "$W/on.$LO_VM" 2>/dev/null)
@@ -830,6 +882,11 @@ last_on() {         # T_ON = when the VMs of this case were last powered on agai
     [ -z "$T_ON" ] || [ "$LO_T" -gt "$T_ON" ] && T_ON=$LO_T
   done
   [ -n "$T_ON" ] && R_VMSON=$(tstr "$T_ON")
+  T_CHG=$(cat "$W/chg" 2>/dev/null)
+  case "$T_CHG" in ""|*[!0-9]*) T_CHG= ;; esac
+  if [ -n "$T_ON" ]; then
+    [ -z "$T_CHG" ] || [ "$T_ON" -gt "$T_CHG" ] && T_CHG=$T_ON
+  fi
   return 0
 }
 probe_clocks() {    # OFF = how far the latest clock is ahead of this machine (>= 0), MINOFF = the smallest lead
@@ -916,14 +973,25 @@ register() {
     RG_T=$(( ($(now) + OFF + RG_AHEAD + 59) / 60 * 60 ))
     RG_L=0
     [ "$HASMON" = 1 ] && RG_L=$((LEAD * 60))
-    if [ -n "$T_ON" ] && [ "$SETTLE" -gt 0 ]; then
-      # VMs of this case were powered on again by this run: the job must not start before T_ON + SETTLE min
-      RG_S=$(( (T_ON + OFF + SETTLE * 60 - RG_L + 59) / 60 * 60 ))
+    if [ -n "$T_CHG" ] && [ "$SETTLE" -gt 0 ]; then
+      # this run changed something on this ESX host (settings applied, a VM shut down, a VM powered on again): the
+      # job must not start before T_CHG + SETTLE min
+      RG_S=$(( (T_CHG + OFF + SETTLE * 60 - RG_L + 59) / 60 * 60 ))
       if [ "$RG_S" -gt "$RG_T" ]; then
-        log "settle: VMs of this case were powered on again (finished $R_VMSON). The job must start $SETTLE min or more after that: first start time moved from $(tstr "$RG_T") to $(tstr "$RG_S")"
+        log "settle: the last change of this run on this ESX host (settings, VM power) finished $(tstr "$T_CHG"). The job must start $SETTLE min or more after that: first start time moved from $(tstr "$RG_T") to $(tstr "$RG_S")"
         RG_T=$RG_S
       elif [ "$RG_TRY" = 1 ]; then
-        log "settle: VMs of this case were powered on again (finished $R_VMSON). The job start is already $SETTLE min or more after that: no extra wait"
+        log "settle: the last change of this run on this ESX host (settings, VM power) finished $(tstr "$T_CHG"). The job start is already $SETTLE min or more after that: no extra wait"
+      fi
+    fi
+    if [ -n "$SNAP_END" ] && [ "$SNAPGAP" -gt 0 ]; then
+      # the config snapshot of this case must be complete SNAPGAP min or more before the job starts
+      RG_N=$(( (SNAP_END + OFF + SNAPGAP * 60 - RG_L + 59) / 60 * 60 ))
+      if [ "$RG_N" -gt "$RG_T" ]; then
+        log "snapshot gap: the config snapshot was complete $(tstr "$SNAP_END"). The job must start $SNAPGAP min or more after that: first start time moved from $(tstr "$RG_T") to $(tstr "$RG_N")"
+        RG_T=$RG_N
+      elif [ "$RG_TRY" = 1 ]; then
+        log "snapshot gap: the config snapshot was complete $(tstr "$SNAP_END"). The job start is already $SNAPGAP min or more after that: no extra wait"
       fi
     fi
     if [ -z "$AT" ] && [ -n "$PREV_END" ] && [ "$GAP" -gt 0 ]; then
@@ -1270,7 +1338,7 @@ run_case() {
   STEP=begin
   R_DONE=; R_APPLY=none; R_BEGIN=$(stamp); R_VMSON=; R_MON=; R_JOB=; R_SEEN=; R_END=; R_STOP=; R_STATUS=
   ME="run $RUNID, esx $CHF, case $CNAME"          # owner of the job start time of this case (claim_start)
-  TMON=; TJOB=; T_ON=; OFF=0; MINOFF=0; WHY=; PV_NEW=; PV_OFFED=
+  TMON=; TJOB=; T_ON=; T_CHG=; SNAP_END=; OFF=0; MINOFF=0; WHY=; PV_NEW=; PV_OFFED=
   rm -f "$W"/seen.* "$W"/zero.* "$W"/gone.*
   if ! names_ok; then
     VMS=; OFFVMS=; ONVMS=; REGVMS=; JOBVMS=
@@ -1439,7 +1507,7 @@ cmd_run() {
     TAKE=$(open_runs done)
     [ -n "$TAKE" ] && log "run(s) $(say $TAKE) left a case open on this ESX host (not checked, no end time). It is closed right before the first case of this run is prepared"
   fi
-  log "settings: job starts $LEAD min after the monitoring start, first check $FIRST s after the job start and then every $POLL s, ended after $GONE checks without the process, start wait $START_WAIT min, power on wait $PON_WAIT min, boot wait $BOOT_WAIT min, shutdown wait $SHUT_WAIT min, job $SETTLE min or more after the last VM that the case powered on was ready, $GAP min or more between the end of a job and the start of the next job (cases without a start time), job starts $SPACING min or more apart on this jump VM, preparation $PREP min before a start time of the plan"
+  log "settings: job starts $LEAD min after the monitoring start, first check $FIRST s after the job start and then every $POLL s, ended after $GONE checks without the process, start wait $START_WAIT min, power on wait $PON_WAIT min, boot wait $BOOT_WAIT min, shutdown wait $SHUT_WAIT min, job $SETTLE min or more after the last change of this run on the ESX host (settings applied, VM shut down, VM powered on and ready), job $SNAPGAP min or more after the config snapshot of the case was complete, $GAP min or more between the end of a job and the start of the next job (cases without a start time), job starts $SPACING min or more apart on this jump VM, preparation $PREP min before a start time of the plan"
   [ -n "$CR_GO" ] && setstate running "started"
   for SEQ in ${CR_GO:+$SEQS}; do
     IDX=$((IDX + 1))
@@ -1941,6 +2009,10 @@ ck_vm() {           # login, clock, pgrep and crontab of one VM (one login per s
     ck_ok "vm $1 ($CV_T): ssh login works, clock $((CV_C - CV_J)) s ahead of the jump VM, tcgen lines in crontab: $(tval TCGEN-LINES "$W/probe.out")"
     say "$((CV_C - CV_J))" >> "$W/clocks"
     [ "$(tval TCGEN-CRONTAB "$W/probe.out")" = yes ] || ck_bad "vm $1: crontab command not found"
+    case "$(tval TCGEN-GCMD "$W/probe.out")" in
+      yes) ck_ok "vm $1: the file of the command at the config snapshot is there ($(gcmd_file))" ;;
+      no) ck_bad "vm $1: the file of the command at the config snapshot is not there or cannot be read: $(gcmd_file). Check the command in the settings area of tcgen" ;;
+    esac
   fi
   [ "$CV_P" = fail ] && return 0
   if vhas JOB "$1" && ! has NOCHK && [ "$CV_P" != yes ]; then       # pgrep is needed only for a case whose job is checked
@@ -1969,6 +2041,12 @@ check_body() {
   ssh_setup
   mk_probe "$W/probe.sh"
   : > "$W/done.vm"; : > "$W/clocks"
+  ck_ok "times before a job: $SETTLE min or more after the last change of the run on the ESX host (settings applied, VM shut down, VM powered on and ready), $SNAPGAP min or more after the config snapshot of the case was complete"
+  if [ -n "$(gcmd)" ]; then
+    ck_ok "command at the config snapshot (run on every VM of a case that is powered on, before the job): $(gcmd)"
+  else
+    ck_ok "command at the config snapshot: none (the guest settings are not recorded in VCF Operations by the run)"
+  fi
   for CH in $(chains); do
     CHF=$(chfile "$CH"); EADDR=$(esxaddr "$CH")
     say ""

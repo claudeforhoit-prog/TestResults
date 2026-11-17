@@ -415,12 +415,13 @@ class PlanTests(unittest.TestCase):
         res = gen(self.two(), st=settings(vm_user="tester", esx_addr="esx01=10.0.0.11;esx09=10.0.0.19", jump_log_dir="/data/log"))
         self.assertEqual(res["errors"], [])
         want = """TCGEN-PLAN 2
-VER 2.9
+VER 2.10
 RUNID 20261116-143000
 LOGDIR /data/log
 GEN 2026-11-16 14:30:00
 SET MON_LEAD_MIN 5
-SET SETTLE_MIN 10
+SET SETTLE_MIN 30
+SET SNAP_GAP_MIN 5
 SET GAP_MIN 30
 SET SPACING_MIN 5
 SET PREP_LEAD_MIN 60
@@ -551,7 +552,11 @@ END 002
                      "진행 확인 sh ~/.tcgen/tcrun status, 멈추기 sh ~/.tcgen/tcrun stop, 취소 sh ~/.tcgen/tcrun cancel",
                      "[공통 규칙]", "[ESX 호스트 esx01] 케이스 1개", "[ESX 호스트 없음] 케이스 1개",
                      "켬인 VM 은 표의 순서대로 하나씩 켠다. VM 마다 켜기 작업, 1GB page backing 완료",
-                     "마지막 VM 의 준비가 끝나고 10분 뒤에 잡을 시작한다", "- 모니터링: 잡 시작 5분 전에 시작한다.",
+                     "- 변경 작업 뒤 대기: 이번 실행이 그 ESX 호스트에서 변경 작업(설정 적용, VM 끄기, VM 켜기)을 했으면 마지막 변경이 "
+                     "끝나고 30분 뒤부터 잡을 시작한다.", "- 스냅샷 뒤 대기: 잡은 구성 스냅샷이 끝나고 5분 뒤부터 시작한다.",
+                     "- 스냅샷 때 실행할 명령: 없음(게스트 구성을 VCF Operations 에 기록하지 않는다. 설정 영역에서 적는다).",
+                     "- 시각을 지킬 수 없을 때: 변경 작업 뒤 대기나 스냅샷 뒤 대기 때문에 적은 시작 시각을 지킬 수 없으면",
+                     "- 모니터링: 잡 시작 5분 전에 시작한다.",
                      "   VM 전원: esx01ev01 켬, esx01ev02 켬, esx01ev03 켬, esx01ev04 켬",
                      "   시작: 자동. 이 ESX 호스트의 첫 잡이라 준비가 끝나는 대로",
                      "     - esx01ev02 job_b4 (프로세스 이름 run_b.sh -n 4): /home/tester/bench/run_b.sh -n 4 -tag x%y",
@@ -562,16 +567,52 @@ END 002
         self.assertEqual(view.count("[공통 규칙]"), 1, "공통 규칙은 한 번만")
         self.assertNotIn("    설정: 없음", view.split("[ESX 호스트 없음]")[1], "ESX 호스트가 없는 케이스는 설정 줄을 뺌")
         view0 = gen(self.two(), st=settings(seq_settle_min=0))["plan_view"]
-        self.assertIn("- 켠 뒤 대기: 없음(설정값 0분).", view0)
+        self.assertIn("- 변경 작업 뒤 대기: 없음(설정값 0분).", view0)
+        self.assertIn("- 스냅샷 뒤 대기: 없음(설정값 0분).", gen(self.two(), st=settings(seq_snap_gap_min=0))["plan_view"])
         viewd = gen(self.two(), st=settings(jump_dir="/data/tcgen/"))["plan_view"]
         self.assertIn("점프 VM 작업 폴더 /data/tcgen,", viewd)
         self.assertIn("취소 sh /data/tcgen/tcrun cancel", viewd)
 
     def test_settle_setting_goes_into_the_plan(self):
-        self.assertIn("SET SETTLE_MIN 10\n", gen(self.two())["plan"])
+        self.assertIn("SET SETTLE_MIN 30\n", gen(self.two())["plan"])
         self.assertIn("SET SETTLE_MIN 0\n", gen(self.two(), st=settings(seq_settle_min=0))["plan"])
         self.assertIn("SET SETTLE_MIN 25\n", gen(self.two(), st=settings(seq_settle_min=25))["plan"])
-        self.assertEqual(core.DEFAULT_SETTINGS["seq_settle_min"], 10)
+        self.assertEqual(core.DEFAULT_SETTINGS["seq_settle_min"], 30, "변경 작업은 잡 시작 30분 이상 전에 (사용자 2026-11-17)")
+
+    def test_snapshot_gap_and_command_go_into_the_plan(self):
+        """잡 시작 전의 시간 규칙과 스냅샷 때 VM 에서 실행할 명령 (사용자 2026-11-17 "잡 시작 최소 5분전에 config 스냅샷 부분이 완료되면
+        좋겠으니 변경 작업 포함해서 시간 조정해줘 변경작업은 30분혹은 그 이상 이전에 수행", Operations 기록 "네")."""
+        self.assertEqual(core.DEFAULT_SETTINGS["seq_snap_gap_min"], 5)
+        plan = gen(self.two())["plan"]
+        self.assertIn("SET SNAP_GAP_MIN 5\n", plan)
+        self.assertNotIn("\nGCMD ", plan, "명령을 적지 않으면 GCMD 줄이 없음")
+        self.assertIn("SET SNAP_GAP_MIN 0\n", gen(self.two(), st=settings(seq_snap_gap_min=0))["plan"])
+        res = gen(self.two(), st=settings(seq_guest_cmd="  bash /home/tester/perf/guest_config_push.sh --insecure "))
+        self.assertEqual(res["errors"], [])
+        self.assertIn("\nGCMD bash /home/tester/perf/guest_config_push.sh --insecure\n", res["plan"])
+        self.assertIn("- 스냅샷 때 실행할 명령: 구성 스냅샷 때 케이스의 켜져 있는 VM 마다 접속해 실행한다(VM 마다 접속 1번 더).", res["plan_view"])
+        self.assertIn("명령: bash /home/tester/perf/guest_config_push.sh --insecure", res["plan_view"])
+        self.assertTrue(all(ord(ch) < 128 for ch in [x for x in res["plan"].split("\n") if x.startswith("GCMD ")][0]))
+        for bad, word in (("bash /home/한글/push.sh", "ASCII 밖의 문자"), ("bash /a/b.sh --vm <vm이름>", "변수 <vm이름>, <실행시각> 은 이 명령에 쓸 수 없음"),
+                          ("bash /a/b.sh !x", "! 문자는 쓸 수 없음"), ("sh /a/b.sh " + "x" * 500, "500자를 넘음"),
+                          ("bash /a/b.sh\techo", "탭 문자가 있음")):
+            errs = gen(self.two(), st=settings(seq_guest_cmd=bad))["errors"]
+            self.assertTrue(any(e.startswith("설정: 스냅샷 때 VM 에서 실행할 명령") and word in e for e in errs), (bad, errs))
+        errs = gen(self.two(), st=settings(seq_snap_gap_min=-1))["errors"]
+        self.assertTrue(any("스냅샷 뒤 잡 시작까지 최소 분" in e for e in errs), errs)
+
+    def test_preparation_shorter_than_the_waits_is_a_warning(self):
+        """'시작 시각 준비' 가 변경 작업 뒤 대기나 스냅샷 뒤 대기보다 넉넉히 길지 않으면 잡 시작이 늦어질 수 있다고 알린다."""
+        cases = [case("w1", seq_start="18:00"), case("w2", seq_start="+8")]
+        self.assertFalse(any("시작 시각 준비" in w for w in gen(cases)["warnings"]), "기본값(준비 60분, 변경 뒤 30분, 스냅샷 뒤 5분)은 알리지 않음")
+        w = gen(cases, st=settings(seq_prep_lead_min=35))["warnings"]
+        self.assertTrue(any(x.startswith("설정: '시작 시각 준비' 35분이 '변경 작업 뒤 잡 시작까지 최소' 30분보다 10분 이상 길지 않음") for x in w), w)
+        w = gen(cases, st=settings(seq_prep_lead_min=8, seq_settle_min=0))["warnings"]
+        self.assertTrue(any(x.startswith("설정: '시작 시각 준비' 8분이 '스냅샷 뒤 잡 시작까지 최소' 5분보다 5분 이상 길지 않음") for x in w), w)
+        self.assertFalse(any("시작 시각 준비" in x for x in gen(cases, st=settings(seq_prep_lead_min=0))["warnings"]),
+                         "준비 0분은 차례가 오는 대로 준비한다는 뜻이라 알리지 않음")
+        self.assertFalse(any("시작 시각 준비" in x for x in gen([case("a1")], st=settings(seq_prep_lead_min=8))["warnings"]),
+                         "시작 시각을 적은 케이스가 없으면 알리지 않음")
 
     def test_records(self):
         d = tempfile.mkdtemp(prefix="tcgen_rec_")
@@ -653,7 +694,7 @@ class SettingsAndDataTests(unittest.TestCase):
         return snap
 
     def test_names_differ_from_v1(self):
-        self.assertEqual(core.VERSION, "2.9")
+        self.assertEqual(core.VERSION, "2.10")
         for k in self.keys:
             os.environ.pop(k, None)
         self.assertEqual(os.path.basename(core.default_data_dir()), "tcgen2_data")
@@ -710,11 +751,22 @@ class SettingsAndDataTests(unittest.TestCase):
         os.makedirs(d)
         s = core.load_settings(d)
         self.assertEqual((s["run_mode"], s["jump_log_dir"], s["esx_addr"], s["seq_settle_min"], s["seq_poll_sec"]),
-                         ("seq", "", "", 10, 1800))
+                         ("seq", "", "", 30, 1800))
+        self.assertEqual((s["seq_snap_gap_min"], s["seq_guest_cmd"], s["settings_rev"]), (5, "", core.SETTINGS_REV))
         with open(os.path.join(d, core.SETTINGS_FILE), "w", encoding="utf-8") as f:
-            json.dump({"run_mode": "fast", "seq_settle_min": "x", "seq_poll_sec": "30", "jump_log_dir": None}, f)
+            json.dump({"run_mode": "fast", "seq_settle_min": "x", "seq_poll_sec": "30", "jump_log_dir": None, "seq_guest_cmd": None}, f)
         s = core.load_settings(d)
-        self.assertEqual((s["run_mode"], s["seq_settle_min"], s["seq_poll_sec"], s["jump_log_dir"]), ("seq", 10, 30, ""))
+        self.assertEqual((s["run_mode"], s["seq_settle_min"], s["seq_poll_sec"], s["jump_log_dir"], s["seq_guest_cmd"]),
+                         ("seq", 30, 30, "", ""))
+        # v2.9 까지의 설정 파일: 예전 기본값 10분이 그대로 있으면 30분으로 올린다(한 번만). 사용자가 고친 값은 그대로 둔다
+        for saved, want in (({"seq_settle_min": 10}, 30), ({"seq_settle_min": 15}, 15), ({"seq_settle_min": 0}, 0),
+                            ({"seq_settle_min": 10, "settings_rev": 1}, 10), ({"seq_settle_min": 45, "settings_rev": 1}, 45)):
+            with open(os.path.join(d, core.SETTINGS_FILE), "w", encoding="utf-8") as f:
+                json.dump(saved, f)
+            s = core.load_settings(d)
+            self.assertEqual((s["seq_settle_min"], s["settings_rev"]), (want, 1), saved)
+        core.save_settings(d, core.resolve_paths(d, dict(s, seq_settle_min=10)))
+        self.assertEqual(core.load_settings(d)["seq_settle_min"], 10, "v2.10 이 저장한 뒤에는 10분도 그대로 둔다")
         s["run_mode"] = "time"
         core.save_settings(d, core.resolve_paths(d, s))
         self.assertEqual(core.load_settings(d)["run_mode"], "time")
@@ -899,8 +951,12 @@ class SeqStartTests(unittest.TestCase):
                      "   잡 확인: 안 함. 끝: 정해지지 않음. 모니터링을 중지하지 않고 실행을 끝낸다."):
             self.assertIn(word, view)
         short = gen(cases[:3], st=settings(seq_prep_lead_min=0, mon_lead_min=5))
-        h0 = int(time.mktime(dt.datetime(2026, 11, 17, 1, 55).timetuple()))     # 준비 0분: 잡 시작 5분 전(다음 케이스에 모니터링 없음)
-        self.assertIn("NOCHK 001 %d 2026-11-17 01:55" % h0, short["plan"].split("\n"))
+        # 준비 0분: 다음 케이스 준비는 '스냅샷 뒤 잡 시작까지 최소'(5분) + 5분 = 잡 시작 10분 전에 시작한다(다음 케이스에 모니터링 없음)
+        h0 = int(time.mktime(dt.datetime(2026, 11, 17, 1, 50).timetuple()))
+        self.assertIn("NOCHK 001 %d 2026-11-17 01:50" % h0, short["plan"].split("\n"))
+        nogap = gen(cases[:3], st=settings(seq_prep_lead_min=0, mon_lead_min=5, seq_snap_gap_min=0))
+        h5 = int(time.mktime(dt.datetime(2026, 11, 17, 1, 55).timetuple()))     # 스냅샷 뒤 대기가 0 이면 잡 시작 5분 전
+        self.assertIn("NOCHK 001 %d 2026-11-17 01:55" % h5, nogap["plan"].split("\n"))
         mon_next = gen([case("m1", seq_start="18:00"), case("m2", seq_start="+2", esx_monitors=["host_mon"])],
                        st=settings(seq_prep_lead_min=0, mon_lead_min=5))
         h3 = int(time.mktime(dt.datetime(2026, 11, 16, 19, 50).timetuple()))    # 다음 케이스에 모니터링이 있으면 모니터링 시작 5분 전

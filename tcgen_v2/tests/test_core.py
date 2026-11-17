@@ -757,6 +757,150 @@ class RecordTests(TmpDir):
             core.generate([case("A", "2026-11-20 00:00:00")], RUN, MON, self.settings, now=NOW)
 
 
+class RecordCompareTests(TmpDir):
+    """적용 체크한 케이스의 기록 대조와 되돌리기, +간격의 날짜 시각 (사용자 2026-11-17: 이미 변경된 기록을 대조해 되돌리는 기능
+    "네 정합성안맞는경유필요 함", +간격을 적용 체크할 때 날짜 시각으로 고정 "네")."""
+
+    def three(self):
+        return [case("A", "2026-11-20 00:00:00", interval=""), case("B", "2026-11-20 12:00:00"), case("C", "2026-11-21 00:00:00")]
+
+    @staticmethod
+    def seqcase(name, seq_start, esx="esx01", job="job_a"):
+        c = core.new_case(esx, "", 0)
+        c.update(name=name, seq_start=seq_start,
+                 vms=[{"name": esx + "ev01", "job": job, "monitors": ["guest_perf"], "profiles": [], "end_ref": False}])
+        return c
+
+    def test_time_mode_cases_are_compared_with_the_last_generation(self):
+        cs = self.three()
+        res = core.generate(copy.deepcopy(cs), RUN, MON, self.settings, now=NOW)
+        self.assertEqual(res["errors"], [])
+        rows = core.read_record_rows(self.settings["record_csv"])
+        self.assertEqual([(r["_name"], r["_seq"], r["잡 시작(KST)"], r["간격"], r["모니터링 중지(KST)"]) for r in rows],
+                         [("A", False, "2026-11-20 00:00:00", "", "2026-11-20 11:50:00"),
+                          ("B", False, "2026-11-20 12:00:00", "12:00", "2026-11-20 23:50:00"),
+                          ("C", False, "2026-11-21 00:00:00", "12:00", "2026-11-21 11:50:00")])
+        self.assertEqual(core.record_diffs(cs, rows, False, 5, 10), ([], [], 0), "적용 체크하지 않은 케이스는 보지 않음")
+        for c in cs:
+            c["applied"] = True
+        core.freeze_applied(cs, 5, 10)
+        self.assertEqual(core.record_diffs(cs, rows, False, 5, 10), ([], [], 3), "생성한 때의 값 그대로면 다른 것이 없음")
+        # v2.7 까지의 순서 바꾸기처럼 값이 섞인 표: A 와 B 의 잡 시작이 서로 바뀌고, C 의 간격이 달라지고, A 의 중지가 없어짐
+        cs[0]["start"], cs[1]["start"] = cs[1]["start"], cs[0]["start"]
+        cs[2]["interval"] = "20:00"
+        cs[0].update(stop_mode="none", applied_stop="")
+        cs[1]["end_time"] = "2026-11-20 23:10:00"            # 잡 종료는 생성 뒤에 적는 값: 기록에 값이 없으므로 대조하지 않는다
+        cs.append(dict(case("N", "2026-11-22 00:00:00"), applied=True))
+        diffs, missing, same = core.record_diffs(cs, rows, False, 5, 10)
+        self.assertEqual((missing, same), (["N"], 0))
+        self.assertEqual([(d["index"], d["name"], d["ref"], d["items"]) for d in diffs], [
+            (0, "A", "2026-11-09 15:30:12", [("잡 시작", "2026-11-20 12:00:00", "2026-11-20 00:00:00"),
+                                             ("모니터링 중지", "중지 없음", "2026-11-20 11:50:00")]),
+            (1, "B", "2026-11-09 15:30:12", [("잡 시작", "2026-11-20 00:00:00", "2026-11-20 12:00:00")]),
+            (2, "C", "2026-11-09 15:30:12", [("간격", "20:00", "12:00")])])
+        self.assertEqual(core.restore_cases(cs, [diffs[0], diffs[2]]), 2, "고른 케이스만 되돌림")
+        self.assertEqual((cs[0]["start"], cs[0]["stop_mode"], cs[0]["applied_stop"], cs[2]["interval"], cs[1]["start"]),
+                         ("2026-11-20 00:00:00", "auto", "2026-11-20 11:50:00", "12:00", "2026-11-20 00:00:00"))
+        diffs, missing, same = core.record_diffs(cs, rows, False, 5, 10)
+        self.assertEqual(([d["name"] for d in diffs], same), (["B"], 2))
+        self.assertEqual(core.restore_cases(cs, diffs), 1)
+        self.assertEqual(core.record_diffs(cs, rows, False, 5, 10)[0], [])
+        self.assertEqual(cs[1]["end_time"], "2026-11-20 23:10:00", "기록에 없는 칸은 그대로 둠")
+        # 같은 케이스를 다시 생성하면 마지막 기록이 기준이다. 순번과 이름이 맞지 않는 항목은 되돌리지 않는다
+        again = [case("A", "2026-11-25 06:00:00")]
+        self.assertEqual(core.generate(again, RUN, MON, self.settings, now=NOW + dt.timedelta(hours=1))["errors"], [])
+        rows = core.read_record_rows(self.settings["record_csv"])
+        d = core.record_diffs(cs, rows, False, 5, 10)[0]
+        self.assertEqual((d[0]["name"], d[0]["ref"], d[0]["items"][0]), ("A", "2026-11-09 16:30:12", ("잡 시작", "2026-11-20 00:00:00", "2026-11-25 06:00:00")))
+        self.assertEqual(core.restore_cases(cs, [dict(d[0], index=1)]), 0)
+
+    def test_sequence_mode_start_times(self):
+        st = dict(self.settings, run_mode="seq")
+        cs = [self.seqcase("s1", "2026-11-20 10:00:00"), self.seqcase("s2", "+8"), self.seqcase("s3", "+8.5"),
+              self.seqcase("t1", "2026-11-20 10:30:00", esx="esx02")]
+        res = core.generate(copy.deepcopy(cs), RUN, MON, st, now=NOW, profiles=[])
+        self.assertEqual(res["errors"], [])
+        rows = core.read_record_rows(st["record_csv"])
+        self.assertEqual([(r["_name"], r["_seq"], r["잡 시작(KST)"], r["간격"]) for r in rows],
+                         [("s1", True, "2026-11-20 10:00:00", ""), ("s2", True, "2026-11-20 18:00:00", "+8:00"),
+                          ("s3", True, "2026-11-21 02:30:00", "+8:30"), ("t1", True, "2026-11-20 10:30:00", "")])
+        # +간격을 적은 케이스의 날짜 시각: 마지막 생성 기록에서 (그때 적은 간격이 지금 칸과 같을 때만)
+        self.assertEqual(core.seq_start_from_record(rows, "s2", "+8:00"), dt.datetime(2026, 11, 20, 18, 0))
+        self.assertEqual(core.seq_start_from_record(rows, "s3", "+8.5"), dt.datetime(2026, 11, 21, 2, 30))
+        self.assertIsNone(core.seq_start_from_record(rows, "s2", "+9:00"), "생성 뒤에 칸을 고쳤으면 기록을 쓰지 않음")
+        self.assertIsNone(core.seq_start_from_record(rows, "s1", "2026-11-20 10:00:00"))
+        self.assertIsNone(core.seq_start_from_record(rows, "none", "+8:00"))
+        self.assertIsNone(core.seq_start_from_record([], "s2", "+8:00"))
+        # 지금 표로 계산: 같은 ESX 호스트의 위 케이스 시작 시각에서 간격만큼 뒤. 위로 올라가며 더한다
+        self.assertEqual([core.seq_start_by_table(cs, i) for i in range(4)],
+                         [None, dt.datetime(2026, 11, 20, 18, 0), dt.datetime(2026, 11, 21, 2, 30), None])
+        odd = [self.seqcase("a", "10:00"), self.seqcase("b", "+1"), self.seqcase("c", "자동"), self.seqcase("d", "+1"),
+               self.seqcase("e", "+1", esx="esx09"), self.seqcase("f", "2026-11-20 10:00:00", job="(없음)"), self.seqcase("g", "+2")]
+        self.assertEqual([core.seq_start_by_table(odd, i) for i in range(7)], [None] * 7,
+                         "날짜가 없는 시각, 자동, 위 케이스 없음, 잡이 없는 위 케이스: 계산하지 않음")
+        # 기록 대조(순서 실행): 적용 체크한 케이스의 시작 시각 칸과 기록의 잡 시작
+        for c in cs:
+            c["applied"] = True
+        cs[0]["seq_start"] = "2026-11-20 11:00:00"
+        diffs, missing, same = core.record_diffs(cs, rows, True)
+        self.assertEqual([(d["name"], d["items"]) for d in diffs], [
+            ("s1", [("시작 시각", "2026-11-20 11:00:00", "2026-11-20 10:00:00")]),
+            ("s2", [("시작 시각", "+8", "2026-11-20 18:00:00")]), ("s3", [("시작 시각", "+8.5", "2026-11-21 02:30:00")])])
+        self.assertEqual((missing, same), ([], 1))
+        self.assertEqual(core.restore_cases(cs, diffs), 3)
+        self.assertEqual([c["seq_start"] for c in cs],
+                         ["2026-11-20 10:00:00", "2026-11-20 18:00:00", "2026-11-21 02:30:00", "2026-11-20 10:30:00"])
+        self.assertEqual(core.record_diffs(cs, rows, True), ([], [], 4))
+        self.assertEqual(core.record_diffs(cs, rows, False, 5, 10)[1], ["s1", "s2", "s3", "t1"], "시각 지정으로 만든 행은 없음")
+
+    def test_compare_with_an_older_table_and_keep_a_copy(self):
+        cs = self.three()
+        for c, e in zip(cs, ("2026-11-20 08:10:00", "2026-11-20 20:20:00", "2026-11-21 08:30:00")):
+            c["applied"], c["end_time"] = True, e
+        core.freeze_applied(cs, 5, 10)
+        old = copy.deepcopy(cs)
+        keep = core.keep_cases_copy(self.base, cs, "before_record_restore", now=NOW)
+        self.assertEqual(os.path.basename(keep), "20261109153012_before_record_restore.json")
+        self.assertEqual(os.path.dirname(keep), os.path.join(self.base, "backup"))
+        self.assertEqual(core.load_cases(self.base, keep), [core._clean_case(c) for c in cs], "남긴 사본은 표 파일로 다시 읽힌다")
+        self.assertEqual(core.table_diffs(cs, old, False), ([], [], 3))
+        for key in ("start", "interval", "end_time"):                      # A 와 B 의 값이 서로 바뀐 표
+            cs[0][key], cs[1][key] = cs[1][key], cs[0][key]
+        cs[2].update(stop_mode="manual", stop_time="2026-11-21 09:00:00")
+        cs.append(dict(case("N", "2026-11-22 00:00:00"), applied=True))
+        cs.append(case("U", "2026-11-23 00:00:00"))
+        diffs, missing, same = core.table_diffs(cs, old, False)
+        self.assertEqual((missing, same), (["N"], 0))
+        self.assertEqual([(d["name"], [x[0] for x in d["items"]]) for d in diffs],
+                         [("A", ["잡 시작", "간격", "잡 종료"]), ("B", ["잡 시작", "간격", "잡 종료"]), ("C", ["모니터링 중지"])])
+        self.assertEqual(diffs[0]["items"][0], ("잡 시작", "2026-11-20 12:00:00", "2026-11-20 00:00:00"))
+        self.assertEqual(diffs[0]["items"][1], ("간격", "12:00", "(비어 있음)"))
+        self.assertEqual(diffs[2]["items"][0], ("모니터링 중지", "직접 입력 2026-11-21 09:00:00", "자동 2026-11-21 11:50:00"))
+        self.assertEqual(core.restore_cases(cs, diffs), 3)
+        self.assertEqual([core._clean_case(c) for c in cs[:3]], [core._clean_case(c) for c in old])
+        self.assertEqual(core.table_diffs(cs, old, False), ([], ["N"], 3))
+        # 순서 실행: 시작 시각 칸
+        sq = [dict(self.seqcase("s1", "2026-11-20 10:00:00"), applied=True), dict(self.seqcase("s2", "+8:00"), applied=True)]
+        sold = copy.deepcopy(sq)
+        sq[1]["seq_start"] = "2026-11-21 18:00:00"
+        diffs = core.table_diffs(sq, sold, True)[0]
+        self.assertEqual([(d["name"], d["items"], d["set"]) for d in diffs],
+                         [("s2", [("시작 시각", "2026-11-21 18:00:00", "+8:00")], {"seq_start": "+8:00"})])
+
+    def test_record_file_that_is_missing_or_odd(self):
+        self.assertEqual(core.read_record_rows(os.path.join(self.base, "none.csv")), [])
+        self.assertEqual(core.read_record_rows(""), [])
+        p = os.path.join(self.base, "odd.csv")
+        with open(p, "wb") as f:
+            f.write("케이스,잡 시작(KST),비고\r\nOLD,2026-11-01 00:00:00,기존 행\r\n,,\r\n".encode("cp949"))
+        rows = core.read_record_rows(p)
+        self.assertEqual([(r["_name"], r["_seq"], r["잡 시작(KST)"]) for r in rows], [("OLD", False, "2026-11-01 00:00:00")],
+                         "첫 열이 케이스 이름이다(머리글 이름과 관계없이). cp949 로 저장한 파일도 읽는다")
+        with open(p, "wb") as f:
+            f.write(b"")
+        self.assertEqual(core.read_record_rows(p), [])
+
+
 class ReportTests(TmpDir):
     """성능 리포트 생성기용 케이스 CSV."""
 

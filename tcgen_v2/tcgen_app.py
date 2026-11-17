@@ -440,13 +440,15 @@ class App(object):
         self.v_poll = tk.StringVar(value=str(poll_minutes(self.settings["seq_poll_sec"])))   # 순서 실행: 잡 종료 확인 간격(분)
         self.v_spacing = tk.StringVar(value=str(self.settings["seq_start_spacing_min"]))   # 순서 실행: 잡 시작 최소 간격(분)
         self.v_prep = tk.StringVar(value=str(self.settings["seq_prep_lead_min"]))          # 순서 실행: 시작 시각 전 준비(분)
+        self.v_snapgap = tk.StringVar(value=str(self.settings["seq_snap_gap_min"]))        # 순서 실행: 스냅샷 뒤 잡 시작까지 최소(분)
+        self.v_gcmd = tk.StringVar(value=self.settings.get("seq_guest_cmd", ""))           # 순서 실행: 스냅샷 때 VM 에서 실행할 명령
         self.v_cfile = tk.StringVar()           # 지금 쓰는 테스트 케이스 파일 (보여 주기만 한다)
         self.v_status = tk.StringVar()
         self.v_esx_host = tk.StringVar()
         self.build()
         self.apply_mode()
         for v in (self.v_record, self.v_log, self.v_user, self.v_mon, self.v_stop, self.v_jlog, self.v_addr, self.v_settle, self.v_gap,
-                  self.v_poll, self.v_spacing, self.v_prep, self.v_jdir):
+                  self.v_poll, self.v_spacing, self.v_prep, self.v_jdir, self.v_snapgap, self.v_gcmd):
             v.trace_add("write", self._settings_changed) if hasattr(v, "trace_add") else v.trace("w", self._settings_changed)
         self.update_status()
         for m in self.start_msgs:
@@ -573,6 +575,8 @@ class App(object):
             self.v_poll.set(str(poll_minutes(self.settings["seq_poll_sec"])))
             self.v_spacing.set(str(self.settings["seq_start_spacing_min"]))
             self.v_prep.set(str(self.settings["seq_prep_lead_min"]))
+            self.v_snapgap.set(str(self.settings["seq_snap_gap_min"]))
+            self.v_gcmd.set(self.settings.get("seq_guest_cmd", ""))
             self.refresh_case_file_box()
         finally:
             self.loading = False
@@ -775,13 +779,14 @@ class App(object):
         ttk.Label(self.f_time, text="분 전 (다음 케이스 잡 시작 기준)").pack(side="left")
         self.f_seq = ttk.Frame(row2)             # 순서 실행에서만 보이는 칸
         ttk.Label(self.f_seq, text="분 뒤 잡 시작").pack(side="left", padx=(0, px(18)))
-        ttk.Label(self.f_seq, text="VM 켠 뒤 잡 시작까지 최소").pack(side="left")
+        ttk.Label(self.f_seq, text="변경 작업 뒤 잡 시작까지 최소").pack(side="left")
         ttk.Spinbox(self.f_seq, from_=0, to=240, width=4, textvariable=self.v_settle).pack(side="left", padx=px(6))
         ttk.Label(self.f_seq, text="분").pack(side="left")
         # 순서 실행에서만 보이는 줄: 잡 시작 최소 간격, 준비, 그리고 시작 시각이 '자동' 인 케이스에만 쓰는 두 값(케이스 사이 간격, 잡 종료
         # 확인 간격). 시작 시각을 적는 것이 기본이므로 자동에만 쓰는 값은 뒤에 두고 이름에 (자동) 을 붙인다
         self.row_seq2 = ttk.Frame(sf)
         for label, var, low, unit in (("잡 시작 최소 간격", self.v_spacing, 1, "분"), ("시작 시각 준비", self.v_prep, 0, "분 전"),
+                                      ("스냅샷 뒤 잡 시작까지 최소", self.v_snapgap, 0, "분"),
                                       ("케이스 사이 간격(자동)", self.v_gap, 0, "분"), ("잡 종료 확인 간격(자동)", self.v_poll, 1, "분")):
             ttk.Label(self.row_seq2, text=label).pack(side="left")
             ttk.Spinbox(self.row_seq2, from_=low, to=1440, width=5, textvariable=var).pack(side="left", padx=px(6))
@@ -802,6 +807,13 @@ class App(object):
         ttk.Label(self.row_seq, text="비우면 ~/.tcgen. 진행 스크립트, ssh 키, VM 비밀번호, 실행 기록을 둔다. 홈 폴더 용량이 작으면 "
                                      "큰 디스크의 폴더를 적고 A 블록을 다시 붙여넣는다(키와 비밀번호는 ~/.tcgen 에서 복사)",
                   style="Hint.TLabel").grid(row=1, column=2, columnspan=4, sticky="w", pady=(px(6), 0))
+        # 구성 스냅샷 때 케이스의 켜져 있는 VM 마다 실행할 명령: 게스트 구성을 VCF Operations 에 기록하는 스크립트를 적는다
+        ttk.Label(self.row_seq, text="스냅샷 때 VM 에서 실행할 명령").grid(row=2, column=0, sticky="w", pady=(px(6), 0))
+        ttk.Entry(self.row_seq, textvariable=self.v_gcmd, width=22).grid(row=2, column=1, columnspan=2, sticky="ew",
+                                                                        padx=(px(6), px(4)), pady=(px(6), 0))
+        ttk.Label(self.row_seq, text="비우면 실행하지 않음. 게스트 구성을 VCF Operations 에 기록하는 스크립트를 VM 안의 경로로 적는다. "
+                                     "예: bash /home/tester/perf/guest_config_push.sh",
+                  style="Hint.TLabel").grid(row=2, column=3, columnspan=3, sticky="w", pady=(px(6), 0))
         self.row_seq.columnconfigure(1, weight=2)
         self.row_seq.columnconfigure(4, weight=3)
         row3 = ttk.Frame(sf)
@@ -941,6 +953,11 @@ class App(object):
         "Guest OS 설정(THP, hugepages 등)을 csv 로 남긴다. 케이스의 준비 때(시작 시각을 적은 케이스는 그 시각에서 '시작 시각 준비' 분 "
         "전) 설정 적용과 VM 전원 맞추기를 마친 뒤에 읽는다. 배치는 config_snapshot 의 VM 표와 같다(구분, 항목, VM 이름 열). 읽기만 "
         "하고, 켜져 있는 VM 마다 접속 한 번이다. 읽지 못해도 케이스는 진행한다.",
+        "잡 시작 전의 대기: 잡은 구성 스냅샷이 끝나고 '스냅샷 뒤 잡 시작까지 최소' 분, 이번 실행의 마지막 변경 작업(설정 적용, VM 끄기, "
+        "VM 켜기)이 끝나고 '변경 작업 뒤 잡 시작까지 최소' 분이 지난 뒤에 시작한다. 진행 로그의 settle: 줄과 snapshot gap: 줄에 "
+        "적용한 내용이 남는다. 이 때문에 적은 시작 시각을 지킬 수 없으면 로그에 WARN the start time 줄이 남는다.",
+        "스냅샷 때 VM 에서 실행할 명령을 적었으면(설정 영역) 구성 스냅샷 때 켜져 있는 VM 마다 그 명령을 실행한다. 결과는 스냅샷 csv 의 "
+        "snapshot command 행과 진행 로그의 config snapshot: command on vm 줄에 남는다.",
         "진행이 중간에 멈추면 로그의 PAUSED 줄에서 이유를 확인하고 고친 뒤, 끝난 케이스를 탭 4 에서 적용 체크하고 다시 생성해 "
         "실행 블록을 붙여넣는다. 남은 줄을 모두 지우고 끝내려면 sh {D}/tcrun cancel 을 실행한다.",
         "D. VM crontab 전체 삭제: 필요할 때만 쓴다. VM 의 crontab 을 모두 지운다(tcgen 이 등록하지 않은 줄 포함. 지우기 전 내용은 "
@@ -1010,9 +1027,17 @@ class App(object):
                 "끈다(게스트 종료, %d분 안에 꺼지지 않으면 전원 끄기). 켬인 VM 은 표의 순서대로 하나씩 확인해 꺼져 있으면 켠다. VM 마다 켜기 "
                 "작업이 끝나고, 1GB page 를 쓰는 VM(sched.mem.lpage.enable1GPage)은 1GB page backing 수가 메모리 GB 수와 같아지고, "
                 "ssh 로그인이 되면 다음 VM 으로 넘어간다. backing 수가 늘지 않으면 진행을 멈춘다." % int(st.get("seq_shutdown_wait_min", 10)),
-                "VM 을 켠 케이스의 잡은 마지막으로 켠 VM 의 준비(1GB page backing 확인, ssh 로그인)가 끝난 시각에서 %d분 이상 지난 뒤에 "
-                "시작한다. 모니터링은 잡 시작 %d분 전에 시작한다. 켜져 있던 VM 만 쓰면 이 대기는 없다. 이 값은 설정 영역의 'VM 켠 뒤 "
-                "잡 시작까지 최소' 칸에서 바꾼다." % (int(st.get("seq_settle_min", 10)), ld[0]),
+                "잡 시작 전의 시간 규칙: 이번 실행이 그 ESX 호스트에서 변경 작업(설정 적용, VM 끄기, VM 켜기)을 했으면 마지막 변경이 "
+                "끝난 시각에서 %d분 이상 지난 뒤에 잡을 시작한다(설정 영역의 '변경 작업 뒤 잡 시작까지 최소'). 변경한 것이 없으면 이 "
+                "대기는 없다. 구성 스냅샷이 끝난 시각에서는 %d분 이상 지난 뒤에 잡을 시작한다('스냅샷 뒤 잡 시작까지 최소'). 모니터링은 "
+                "잡 시작 %d분 전에 시작한다. 시작 시각을 적은 케이스는 준비를 그 시각 %d분 전에 시작하므로 변경 작업이 %d분 안에 끝나면 "
+                "적은 시각에 잡을 시작한다. 두 대기 때문에 적은 시각을 지킬 수 없으면 가능한 가장 이른 시각에 시작하고 진행 로그에 WARN "
+                "을 남긴다." % (int(st.get("seq_settle_min", 30)), int(st.get("seq_snap_gap_min", 5)), ld[0],
+                             int(st.get("seq_prep_lead_min", 60)),
+                             max(0, int(st.get("seq_prep_lead_min", 60)) - int(st.get("seq_settle_min", 30)))),
+                "스냅샷 때 VM 에서 실행할 명령(설정 영역): 적어 두면 구성 스냅샷 때 케이스의 켜져 있는 VM 마다 접속해 그 명령을 실행한다. "
+                "게스트 구성을 VCF Operations 에 기록하는 스크립트(guest_config_push)를 VM 안의 경로로 적는다. 결과는 스냅샷 csv 의 "
+                "snapshot command 행과 진행 로그에 남고, 실패해도 케이스는 진행한다. P 블록(점검)이 VM 에 그 파일이 있는지 확인한다.",
                 "잡 종료 확인(확인하는 케이스): 탭 1 의 프로세스 이름으로 각 VM 에서 프로세스를 찾는다. 잡이 있는 모든 VM 에서 한 번 이상 보인 뒤 "
                 "%d회 연속으로 없으면 종료로 판정한다. 잡 시작 뒤 %d분 안에 한 번도 보이지 않으면 진행을 멈춘다."
                 % (int(st.get("seq_gone_count", 3)), int(st.get("seq_start_wait_min", 10))),
@@ -1028,6 +1053,11 @@ class App(object):
                 "잡 없이 설정만 지정한 케이스는 설정만 적용하고 다음 케이스로 넘어간다. 모니터링만 있고 잡이 없는 케이스는 오류다.",
                 "[명령어 생성] 을 누르면 넣을 케이스를 고르는 창이 열린다. 처음에는 적용 체크하지 않은 케이스가 골라져 있다. "
                 "진행이 중간에 멈추면 끝난 케이스를 적용 체크하고 다시 생성해 나머지를 이어서 실행한다.",
+                "적용 체크한 케이스의 시작 시각은 그 케이스의 잡 시작 기록이다. 시작 시각 칸에 +간격을 적은 케이스를 적용 체크하면 칸의 "
+                "값을 날짜 시각으로 바꿔 고정한다(마지막 [명령어 생성] 때 계획한 시각). 적용 체크한 케이스의 시작 시각은 고칠 수 없다. "
+                "고치려면 적용 체크를 끄고 고친 뒤 다시 체크한다.",
+                "[기록 대조]: 적용 체크한 케이스의 시작 시각을 테스트 기록 CSV 의 마지막 생성 기록이나 예전 표 파일(백업)과 대조한다. "
+                "값이 다른 케이스를 보이고, 고른 케이스의 값을 기준 값으로 되돌린다. 바꾸기 전의 표는 데이터 폴더의 backup 아래에 저장한다.",
                 "칸 고치기: 칸을 두 번 누르거나 행을 고르고 Enter(또는 F2)를 누른다. [+ 케이스 추가] 를 누르면 새 케이스의 이름 칸이 바로 "
                 "열린다. 케이스 이름과 VM 이름은 영문, 숫자, . _ - 만 쓴다(공백, 한글 불가). 한글은 설명 칸에 적는다.",
                 "새 케이스는 VM %d대(ESX 호스트 + %s01, %s02)가 기본이다. [+ VM 추가] 는 선택한 케이스에 다음 번호 VM 을 추가한다. "
@@ -1065,6 +1095,9 @@ class App(object):
             "[리포트용 CSV 저장]: 저장할 케이스를 고르고 저장 위치를 정한다. 고른 케이스는 이 표의 순서대로 저장한다. 성능 리포트 "
             "생성기의 '케이스 정보 파일' 에서 이 파일을 고른다. VM 열에는 잡이나 모니터링을 지정한 VM 이 들어간다. "
             "비교에 쓰는 기준은 여기서 정하지 않는다. 성능 리포트 생성기에서 정한다.",
+            "[기록 대조]: 적용 체크한 케이스의 잡 시작, 간격, 모니터링 중지, 잡 종료 (리포트) 를 테스트 기록 CSV 의 마지막 생성 "
+            "기록이나 예전 표 파일(백업)과 대조한다. 값이 다른 칸을 보이고, 고른 케이스의 값을 기준 값으로 되돌린다. 바꾸기 전의 "
+            "표는 데이터 폴더의 backup 아래에 저장한다.",
             "모니터링 시작 = 잡 시작 %d분 전. 모니터링 중지 = 자동(다음 케이스 잡 시작 %d분 전, 마지막 케이스는 잡 시작 + 간격 - %d분), "
             "직접 입력, 중지 없음 중 하나. 이 시각은 그 케이스의 모든 VM 과 ESX 에 같이 적용된다." % (ld[0], ld[1], ld[1]),
         ]
@@ -1144,7 +1177,7 @@ class App(object):
                 dict(key="mon", title="모니터링", width=180, popup=self.edit_monitors, stretch=True),
                 dict(key="prof", title="설정", width=200, popup=self.edit_profiles),
                 dict(key="max_wait", title="최대 대기", width=80),
-                dict(key="seq_start", title="시작 시각", width=150),
+                dict(key="seq_start", title="시작 시각", width=150, popup=self.locked_notice),
                 dict(key="interval", title="간격", width=50, popup=self.locked_notice),
                 dict(key="start", title="잡 시작 (KST)", width=140, popup=self.locked_notice),
                 dict(key="mon_start", title="모니터링 시작", width=95),
@@ -1163,6 +1196,7 @@ class App(object):
                                                                                     padx=(px(8), 0))
         self.help_button(tb, "4. 테스트 케이스", self.case_help)
         ttk.Button(tb, text="리포트용 CSV 저장", style="Blue.TButton", command=self.export_report).pack(side="right")
+        ttk.Button(tb, text="기록 대조", command=self.compare_records).pack(side="right", padx=(0, px(6)))
         t = EditableTable(f, self, cols, height=10,
                           check=dict(title="적용", width=48, on=self.img_on, off=self.img_off, toggle=self.toggle_applied))
         self.t_case = t
@@ -1451,7 +1485,15 @@ class App(object):
             settle = -1
         if settle < 0:
             if show_error:
-                messagebox.showerror(TITLE, "'VM 켠 뒤 잡 시작까지 최소' 분은 0 이상의 정수로 입력", parent=self.root)
+                messagebox.showerror(TITLE, "'변경 작업 뒤 잡 시작까지 최소' 분은 0 이상의 정수로 입력", parent=self.root)
+            return None
+        try:
+            snapgap = int(self.v_snapgap.get())
+        except ValueError:
+            snapgap = -1
+        if snapgap < 0:
+            if show_error:
+                messagebox.showerror(TITLE, "'스냅샷 뒤 잡 시작까지 최소' 분은 0 이상의 정수로 입력", parent=self.root)
             return None
         try:
             gap = int(self.v_gap.get())
@@ -1491,7 +1533,8 @@ class App(object):
         s.update(record_csv=self.v_record.get().strip(), log_dir=self.v_log.get().strip(), vm_user=self.v_user.get().strip(),
                  mon_lead_min=ld[0], stop_lead_min=ld[1], run_mode=self.mode(), jump_log_dir=self.v_jlog.get().strip(),
                  esx_addr=self.v_addr.get().strip(), seq_settle_min=settle, seq_gap_min=gap, seq_start_spacing_min=spacing,
-                 seq_prep_lead_min=prep, jump_dir=self.v_jdir.get().strip())
+                 seq_prep_lead_min=prep, jump_dir=self.v_jdir.get().strip(), seq_snap_gap_min=snapgap,
+                 seq_guest_cmd=" ".join(self.v_gcmd.get().split()))
         return s
 
     # ------------------------------------------------------------ 테스트 케이스 파일 (불러오기, 다른 이름으로 저장, 자동 백업)
@@ -2051,12 +2094,19 @@ class App(object):
     LOCKED_TEXT = ("적용 체크한 케이스의 간격, 잡 시작, 모니터링 중지는 고칠 수 없음.\n\n이미 등록한 케이스의 기록이라 고정해 둔다. "
                    "다른 케이스를 추가하거나 순서를 바꿔도 이 값은 바뀌지 않는다.\n고치려면 적용 체크를 먼저 끄고, 고친 뒤 다시 체크할 것.")
 
+    LOCKED_TEXT_SEQ = ("적용 체크한 케이스의 시작 시각은 고칠 수 없음.\n\n이미 실행한 케이스의 기록이라 고정해 둔다. "
+                       "고치려면 적용 체크를 먼저 끄고, 고친 뒤 다시 체크할 것.")
+
     def is_locked(self, c):
         """시각 지정에서 적용 체크한 케이스의 시각 칸(간격, 잡 시작, 모니터링 중지)은 고정한다."""
         return bool(c and c.get("applied")) and self.mode() == "time"
 
+    def seq_locked(self, c):
+        """순서 실행에서 적용 체크한 케이스의 시작 시각 칸은 고정한다(그 케이스의 잡 시작 기록이다)."""
+        return bool(c and c.get("applied")) and self.mode() == "seq"
+
     def locked_notice(self, iid=None):
-        messagebox.showinfo(TITLE, self.LOCKED_TEXT, parent=self.root)
+        messagebox.showinfo(TITLE, self.LOCKED_TEXT_SEQ if self.mode() == "seq" else self.LOCKED_TEXT, parent=self.root)
 
     @staticmethod
     def parse_iid(iid):
@@ -2102,6 +2152,8 @@ class App(object):
         if k is None:
             if key in ("interval", "start") and self.is_locked(c):
                 return "popup"              # 고치는 칸 대신 고정 안내(locked_notice)를 보인다
+            if key == "seq_start" and self.seq_locked(c):
+                return "popup"
             return {"name": "entry", "desc": "entry", "esx": "entry", "mon": "popup", "interval": "entry", "start": "entry",
                     "mon_stop": "popup", "group": "entry", "end_time": "entry", "prof": "popup",
                     "max_wait": "entry", "seq_start": "entry"}.get(key, "readonly")
@@ -2217,10 +2269,47 @@ class App(object):
         if c is None or k is not None:
             return
         c["applied"] = not c.get("applied")
+        note = ""
         if not c["applied"]:
             c["applied_stop"] = ""          # 고정해 둔 자동 중지 시각을 지운다. 다시 체크하면 그때의 표로 다시 고정한다
+        elif self.mode() == "seq":
+            note = self.fix_seq_start(i, c)
         self.mark_cases()
         self.t_case.refresh(iid)
+        if note:
+            messagebox.showinfo(TITLE, note, parent=self.root)
+
+    def fix_seq_start(self, i, c):
+        """순서 실행에서 적용 체크할 때: 시작 시각 칸의 +간격을 날짜 시각으로 바꿔 고정한다(사용자 결정 2026-11-17. 적용 체크한 케이스의
+        칸이 +8:00 으로 남으면 표에서 그 케이스의 잡 시작을 알 수 없다). 값은 마지막 [명령어 생성] 의 계획 시각이다: 이 창에서 방금
+        만든 결과, 없으면 테스트 기록 CSV 의 마지막 생성 기록(그때 적은 +간격이 지금 칸과 같을 때), 그것도 없으면 지금 표로 계산한 값.
+        바꾸지 못했으면 알릴 글을 돌려준다(바꿨거나 +간격이 아니면 빈 글)."""
+        raw = (c.get("seq_start") or "").strip()
+        try:
+            off = core.parse_seq_offset(raw)
+        except ValueError:
+            off = None
+        if off is None:
+            return ""
+        name = (c.get("name") or "").strip()
+        at = None
+        res = self.result
+        if res and res.get("mode") == "seq":
+            for pc in res.get("cases") or []:
+                if pc.get("name") == name and pc.get("start_at") and (pc["case"].get("seq_start") or "").strip() == raw:
+                    at = pc["start_at"]
+        if at is None:
+            st = self.current_settings(show_error=False) or self.settings
+            rows = core.read_record_rows(core.resolve_paths(self.base, st)["record_csv"])
+            at = core.seq_start_from_record(rows, name, raw)
+        if at is None:
+            at = core.seq_start_by_table(self.cases, i)
+        if at is None:
+            return ("케이스 %s 의 시작 시각 %s 을(를) 날짜 시각으로 바꾸지 못했음.\n\n같은 ESX 호스트의 앞 케이스 시작 시각을 알 수 없음"
+                    "(앞 케이스가 없거나, 자동이거나, 날짜가 없음).\n적용 체크를 끄고 시작 시각 칸에 날짜 시각을 직접 적은 뒤 다시 체크할 것."
+                    % (name or "(이름 없음)", raw))
+        c["seq_start"] = core.fmt_dt(at)
+        return ""
 
     def toggle_end_ref(self, iid):
         """VM 행의 종료 기준 VM 칸: 누를 때마다 지정, 해제."""
@@ -2238,6 +2327,9 @@ class App(object):
             return
         t = text.strip()
         if k is None and key in ("interval", "start") and self.is_locked(c):
+            self.locked_notice()
+            return
+        if k is None and key == "seq_start" and self.seq_locked(c):
             self.locked_notice()
             return
         if k is None:
@@ -2710,6 +2802,132 @@ class App(object):
         ttk.Button(bf, text="취소", command=top.destroy).pack(side="right")
         ttk.Button(bf, text="저장", style="Blue.TButton", command=save).pack(side="right", padx=(0, px(6)))
         update()
+        top.bind("<Escape>", lambda e: top.destroy())
+        self._center(top)
+        top.grab_set()
+        table.tree.focus_set()
+
+    # ------------------------------------------------------------ 기록 대조
+    def compare_records(self):
+        """[기록 대조]: 적용 체크한 케이스의 시각 값을 기준(테스트 기록 CSV 의 마지막 생성 기록, 또는 예전 표 파일)과 대조해 다른 값을
+        보이고, 고른 케이스의 값을 기준 값으로 되돌린다 (사용자 2026-11-17 "정합성안맞는경유필요 함")."""
+        self.finish_all_edits()
+        st = self.current_settings()
+        if st is None:
+            return
+        if not any(c.get("applied") for c in self.cases):
+            messagebox.showinfo(TITLE, "적용 체크한 케이스가 없음. 기록 대조는 적용 체크한 케이스의 값을 본다.", parent=self.root)
+            return
+        seq = self.mode() == "seq"
+        paths = core.resolve_paths(self.base, st)
+        C, px = COLORS, self.px
+        top = tk.Toplevel(self.root, bg=C["card"])
+        top.title("기록 대조: 적용 체크한 케이스")
+        top.transient(self.root)
+        self.cmp_win = top
+        fr = ttk.Frame(top, padding=(px(14), px(10), px(14), px(12)))
+        fr.pack(fill="both", expand=True)
+        ttk.Label(fr, text="적용 체크한 케이스의 시각 값을 기준과 대조한다.", style="Bold.TLabel").pack(anchor="w")
+        ttk.Label(fr, text="기준과 값이 다른 칸만 보인다. 되돌릴 케이스를 체크하고 [기준 값으로 되돌리기] 를 누르면 그 케이스의 값을 기준 "
+                           "값으로 바꾼다. 바꾸기 전의 표는 데이터 폴더의 backup 아래에 저장한다. "
+                           + ("대조하는 칸: 시작 시각." if seq else "대조하는 칸: 잡 시작, 간격, 모니터링 중지, 잡 종료 (리포트)."),
+                  style="Hint.TLabel", wraplength=px(900), justify="left").pack(anchor="w", pady=(px(2), px(6)))
+        v_ref, v_sum = tk.StringVar(), tk.StringVar()
+        ttk.Label(fr, textvariable=v_ref).pack(anchor="w")
+        ttk.Label(fr, textvariable=v_sum).pack(anchor="w", pady=(px(2), px(8)))
+        rows, state = [], {"diffs": []}
+        cols = [dict(key="name", title="케이스", width=200, kind="readonly"),
+                dict(key="field", title="칸", width=110, kind="readonly"),
+                dict(key="cur", title="지금 값", width=230, kind="readonly"),
+                dict(key="ref", title="기준 값", width=230, kind="readonly", stretch=True),
+                dict(key="gen", title="기준 기록의 생성 시각", width=160, kind="readonly")]
+
+        def toggle(iid):
+            r = rows[int(iid)]
+            how = not r["sel"]
+            for x in rows:
+                if x["d"] == r["d"]:
+                    x["sel"] = how
+            table.refresh(iid)
+
+        def set_all(how):
+            for x in rows:
+                x["sel"] = how
+            table.refresh()
+
+        table = EditableTable(fr, self, cols, height=12,
+                              check=dict(title="되돌림", width=56, on=self.img_on, off=self.img_off, toggle=toggle, key="sel"))
+        table.rows = rows
+        table.row_tags = lambda iid: ("pick",) if rows[int(iid)]["sel"] else (("odd",) if int(iid) % 2 else ())
+        table.tree.tag_configure("pick", background=C["case"])
+        table.pack(fill="both", expand=True)
+        self.cmp_table = table
+
+        def load(kind, path=""):
+            if kind == "record":
+                rec = core.read_record_rows(paths["record_csv"])
+                diffs, missing, same = core.record_diffs(self.cases, rec, seq, st["mon_lead_min"], st["stop_lead_min"])
+                v_ref.set("기준: 테스트 기록 CSV 의 마지막 생성 기록 (%s)" % paths["record_csv"])
+            else:
+                try:
+                    old = core.load_cases(self.base, path)
+                except (OSError, ValueError) as e:
+                    messagebox.showerror(TITLE, "표 파일을 읽지 못함\n%s\n%s" % (path, e), parent=top)
+                    return
+                diffs, missing, same = core.table_diffs(self.cases, old, seq)
+                v_ref.set("기준: 예전 표 파일 (%s)" % path)
+            state["diffs"] = diffs
+            del rows[:]
+            for n, d in enumerate(diffs):
+                for m, (label, cur, ref) in enumerate(d["items"]):
+                    rows.append({"sel": True, "d": n, "name": d["name"] if m == 0 else "", "field": label, "cur": cur, "ref": ref,
+                                 "gen": d.get("ref", "") if m == 0 else ""})
+            table.refresh(0 if rows else None)
+            text = "적용 체크한 케이스 %d개: 기준과 다른 케이스 %d개, 같은 케이스 %d개, 기준에 없는 케이스 %d개" % (
+                len(diffs) + same + len(missing), len(diffs), same, len(missing))
+            if missing:
+                text += " (%s%s)" % (", ".join(missing[:6]), " ..." if len(missing) > 6 else "")
+            v_sum.set(text)
+
+        def pick_file():
+            start = os.path.join(self.base, "backup")
+            path = filedialog.askopenfilename(parent=top, title="기준으로 쓸 예전 표 파일", filetypes=self.CASE_FILE_TYPES,
+                                              initialdir=start if os.path.isdir(start) else self.base)
+            if path:
+                load("table", path)
+
+        def go():
+            picked = sorted(set(x["d"] for x in rows if x["sel"]))
+            if not picked:
+                messagebox.showinfo(TITLE, "되돌릴 케이스를 하나 이상 체크할 것", parent=top)
+                return
+            if not messagebox.askyesno(TITLE, "케이스 %d개의 값을 기준 값으로 바꾼다.\n바꾸기 전의 표는 데이터 폴더의 backup 아래에 "
+                                              "저장한다.\n\n계속할까요?" % len(picked), parent=top):
+                return
+            try:
+                keep = core.keep_cases_copy(self.base, self.cases, "before_record_restore")
+            except OSError as e:
+                messagebox.showerror(TITLE, "바꾸기 전의 표를 저장하지 못해 값을 바꾸지 않았음\n%s" % e, parent=top)
+                return
+            n = core.restore_cases(self.cases, [state["diffs"][k] for k in picked])
+            self.calc_schedule()
+            self.mark_cases()
+            self.t_case.refresh()
+            top.destroy()
+            messagebox.showinfo(TITLE, "케이스 %d개의 값을 기준 값으로 바꿨음.\n바꾸기 전의 표: %s" % (n, keep), parent=self.root)
+
+        opt = ttk.Frame(fr)
+        opt.pack(fill="x", pady=(px(8), 0))
+        ttk.Button(opt, text="테스트 기록 CSV 로 대조", command=lambda: load("record")).pack(side="left")
+        ttk.Button(opt, text="예전 표 파일로 대조", command=pick_file).pack(side="left", padx=(px(6), px(16)))
+        ttk.Button(opt, text="모두 선택", command=lambda: set_all(True)).pack(side="left")
+        ttk.Button(opt, text="모두 해제", command=lambda: set_all(False)).pack(side="left", padx=(px(6), 0))
+        bf = ttk.Frame(fr)
+        bf.pack(fill="x", pady=(px(12), 0))
+        ttk.Button(bf, text="닫기", command=top.destroy).pack(side="right")
+        ttk.Button(bf, text="기준 값으로 되돌리기", style="Red.TButton", command=go).pack(side="right", padx=(0, px(6)))
+        self.cmp_load, self.cmp_go, self.cmp_rows = load, go, rows
+        load("record")
         top.bind("<Escape>", lambda e: top.destroy())
         self._center(top)
         top.grab_set()

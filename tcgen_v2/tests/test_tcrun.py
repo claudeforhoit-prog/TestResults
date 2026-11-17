@@ -148,7 +148,7 @@ class FullFlowTests(TcrunBase):
             "settings: applied. The VMs of this case are powered off now.",
             "esx01ev01: powered on", "vm esx01ev01: 1GB pages are not set for this VM", "vm esx01ev01: ssh login works, ready",
             "esx01ev02: powered on", "vm esx01ev02: ssh login works, ready",
-            "VM power: done. Powered on by this case: esx01ev01 esx01ev02", "settle: VMs of this case were powered on again",
+            "VM power: done. Powered on by this case: esx01ev01 esx01ev02", "settle: the last change of this run on this ESX host (settings, VM power) finished",
             "registered on vm esx01ev01:",
             "registered on vm esx01ev02:", "registered on esx esx01 (UTC):", "times: monitoring start",
             "the process is seen on every VM with a job", "job ended:", "monitoring stop registered on vm esx01ev01:",
@@ -792,7 +792,7 @@ class PowerTests(TcrunBase):
             "vm esx01ev01: 1GB page backing complete (16 of 16 1GB pages, failed attempts 0)", "vm esx01ev01: ssh login works, ready",
             "esx01ev02: powered on", "vm esx01ev02: 1GB page backing complete (16 of 16 1GB pages, failed attempts 0)",
             "vm esx01ev02: ssh login works, ready", "VM power: done. Powered on by this case: esx01ev01 esx01ev02. The last one was ready at",
-            "settle: VMs of this case were powered on again", "times: job start", "==== case p1 done"])
+            "settle: the last change of this run on this ESX host (settings, VM power) finished", "times: job start", "==== case p1 done"])
         vms = e.esx_vms("esx01")
         self.assertEqual((vms["esx01ev01"]["state"], vms["esx01ev02"]["state"]), ("on", "on"), "잡이 없는 VM 도 켬")
         self.assertGreaterEqual(vms["esx01ev02"]["on_at"] - vms["esx01ev01"]["on_at"], 160,
@@ -803,7 +803,8 @@ class PowerTests(TcrunBase):
         self.assertIn("vsish -e get /memory/lpage/vmLpage/100011", e.esx_calls("esx01"))
 
     def test_vm_marked_off_is_shut_down(self):
-        """전원 끔인 VM 은 켜져 있으면 끈다. 그 VM 에는 접속하지 않는다. 켜져 있던 VM 만 쓰면 켠 뒤 대기가 없다."""
+        """전원 끔인 VM 은 켜져 있으면 끈다. 그 VM 에는 접속하지 않는다. VM 을 끈 것도 변경 작업이므로 잡은 그 뒤 '변경 작업 뒤 잡
+        시작까지 최소'(여기서는 10분) 이상 지나서 시작한다(v2.10. v2.9 까지는 VM 을 켠 경우만 기다렸다)."""
         e = self.e
         self.two_vms()
         res, plan = self.gen([case("o1", [vm("esx01ev01", "job_a"), vm("esx01ev02", power="off")])], seq_settle_min=10)
@@ -826,7 +827,11 @@ class PowerTests(TcrunBase):
             self.assertNotIn("vm esx01ev02", f.read().splitlines(), "끔인 VM 에는 접속하지 않음")
         r = self.results()[0]
         self.assertEqual((r["status"], r["vms_on"]), ("done", ""))
-        self.assertNotIn("settle:", log, "켜져 있던 VM 만 썼으므로 켠 뒤 대기가 없음")
+        off = epoch(re.search(r"^(\S+ \S+) vm esx01ev02: shut down", log, re.M).group(1))
+        self.assertEqual(len(re.findall(r"settle: the last change of this run on this ESX host \(settings, VM power\) finished "
+                                        r".*first start time moved", log)), 1, "VM 을 끈 것도 변경 작업")
+        self.assertGreaterEqual(epoch(r["job_start"]) - off, 600, "잡은 VM 을 끈 뒤 10분 이상 지나서 시작")
+        self.assertLess(epoch(r["job_start"]) - off, 600 + 240)
         self.assertEqual(len(self.fired(cron, "esx01ev01", "job.sh")), 1)
 
     def test_backing_that_stops_pauses_and_keeps_the_settings(self):
@@ -1628,6 +1633,136 @@ class StopDuringPowerTests(TcrunBase):
         self.assertIn("stop requested while vm esx01ev01 was being powered on. Its power-on task goes on to its end on the ESX host", st["text"])
 
 
+class PrepTimeTests(TcrunBase):
+    """잡 시작 전의 시간 규칙 (사용자 2026-11-17 "잡 시작 최소 5분전에 config 스냅샷 부분이 완료되면 좋겠으니 변경 작업 포함해서 시간
+    조정해줘 변경작업은 30분혹은 그 이상 이전에 수행"): 잡은 구성 스냅샷이 끝나고 SNAP_GAP_MIN 분, 이번 실행이 그 ESX 호스트에서 한
+    마지막 변경 작업(설정 적용, VM 끄기, VM 켜기)이 끝나고 SETTLE_MIN 분 뒤부터 시작한다. 그리고 스냅샷 때 VM 에서 실행하는 명령
+    (게스트 구성을 VCF Operations 에 기록: 사용자 2026-11-17 "네")."""
+
+    GAP_LINE = r"snapshot gap: the config snapshot was complete (\S+ \S+)\. The job"
+
+    def test_job_starts_five_minutes_after_the_snapshot(self):
+        """시작 시각이 자동인 케이스: 구성 스냅샷이 끝나고 5분이 지난 뒤의 첫 분에 잡을 시작한다. 모니터링 시작은 그 전이어도 된다."""
+        e = self.e
+        self.two_vms()
+        c1 = case("g1", [vm("esx01ev01", "job_a")])
+        c2 = case("g2", [vm("esx01ev01", "job_a", ["gmon"])])
+        res, plan = self.gen([c1, c2], seq_snap_gap_min=5, mon_lead_min=2)
+        self.assertIn("SET SNAP_GAP_MIN 5\n", res["plan"])
+        rc, out = e.tcrun("check", plan)
+        self.assertIn("[ok] times before a job: 0 min or more after the last change of the run on the ESX host (settings applied, VM shut "
+                      "down, VM powered on and ready), 5 min or more after the config snapshot of the case was complete", out)
+        self.assertIn("[ok] command at the config snapshot: none", out)
+        cron = e.start_cron()
+        rc, out = e.tcrun("run", plan, "esx01", timeout=900)
+        log = self.log()
+        self.assertEqual(rc, 0, self.ctx(out))
+        a, b = self.results()
+        part1, part2 = log.split("==== case g2 (2 of 2) begin")
+        for r, part in ((a, part1), (b, part2)):
+            end = epoch(re.search(self.GAP_LINE, part).group(1))
+            gap = epoch(r["job_start"]) - end
+            self.assertGreaterEqual(gap, 300, "잡 시작은 스냅샷이 끝나고 5분 이상 뒤")
+            self.assertLess(gap, 300 + 60 + 150, "필요한 만큼만 기다림(분 올림과 시계 여유)")
+        self.assertRegex(part1, self.GAP_LINE + r" must start 5 min or more after that: first start time moved from ")
+        self.assertEqual(epoch(b["job_start"]) - epoch(b["monitor_start"]), 120, "모니터링은 잡 시작 2분 전에 시작")
+        self.assertIn("job 5 min or more after the config snapshot of the case was complete", log)
+        self.assertNotIn("WARN", log)
+        self.assertEqual(len(self.fired(cron, "esx01ev01", "job.sh")), 2)
+
+    def test_start_time_is_late_when_the_change_work_ends_too_late(self):
+        """시작 시각을 적은 케이스: 준비 때 설정을 변경했는데 '변경 작업 뒤 잡 시작까지 최소' 를 지킬 수 없으면, 잡을 변경 작업이 끝나고
+        그 시간만큼 지난 때로 늦추고 WARN 을 남긴다. [명령어 생성] 도 준비 시간이 짧다고 미리 알린다."""
+        e = self.e
+        self.two_vms()
+        c1 = case("p1", [vm("esx01ev01", "job_a", profiles=["pin"])], seq_start="10:12", max_wait="0:04")
+        res, plan = self.gen([c1], seq_prep_lead_min=6, seq_settle_min=10)
+        self.assertTrue(any(w.startswith("설정: '시작 시각 준비' 6분이 '변경 작업 뒤 잡 시작까지 최소' 10분보다 10분 이상 길지 않음")
+                            for w in res["warnings"]), res["warnings"])
+        e.start_cron()
+        rc, out = e.tcrun("run", plan, "esx01", timeout=900)
+        log = self.log()
+        self.assertEqual(rc, 0, self.ctx(out))
+        r = self.results()[0]
+        self.assert_order(log, [
+            "start time 2026-11-20 10:12: the preparation (settings, VM power) starts 6 min before it, at 2026-11-20 10:06:00",
+            "settings: applied. The VMs of this case are powered off now.", "VM power: done. Powered on by this case: esx01ev01",
+            "config snapshot (before the job of this case. Settings changed by this case. Powered on by this case: esx01ev01): ",
+            "settle: the last change of this run on this ESX host (settings, VM power) finished ",
+            "WARN the start time 2026-11-20 10:12 of the plan cannot be met any more", "times: job start "])
+        self.assertGreaterEqual(epoch(r["job_start"]) - epoch(r["vms_on"]), 600, "잡은 마지막 변경(VM 켜기)이 끝나고 10분 이상 뒤")
+        self.assertLess(epoch(r["job_start"]) - epoch(r["vms_on"]), 600 + 240)
+        self.assertGreater(epoch(r["job_start"]), epoch("2026-11-20 10:12:00"))
+
+    def test_start_time_is_kept_when_the_change_work_ends_in_time(self):
+        """준비를 넉넉히 앞에서 시작하면(여기서는 20분 전, 변경 작업 뒤 최소 10분) 설정을 변경해도 적은 시각에 잡을 시작한다."""
+        e = self.e
+        self.two_vms()
+        c1 = case("k1", [vm("esx01ev01", "job_a", profiles=["pin"])], seq_start="10:25", max_wait="0:04")
+        res, plan = self.gen([c1], seq_prep_lead_min=20, seq_settle_min=10, seq_snap_gap_min=5)
+        self.assertFalse(any("시작 시각 준비" in w for w in res["warnings"]), res["warnings"])
+        cron = e.start_cron()
+        rc, out = e.tcrun("run", plan, "esx01", timeout=900)
+        log = self.log()
+        self.assertEqual(rc, 0, self.ctx(out))
+        r = self.results()[0]
+        self.assertEqual(r["job_start"], "2026-11-20 10:25:00")
+        self.assertIn("settings: applied. The VMs of this case are powered off now.", log)
+        self.assertIn("start time: the plan sets the job start of this case to 2026-11-20 10:25", log)
+        self.assertNotIn("WARN", log)
+        self.assertGreaterEqual(epoch(r["job_start"]) - epoch(r["vms_on"]), 600)
+        self.assertGreaterEqual(epoch(r["job_start"]) - epoch(re.search(self.GAP_LINE, log).group(1)), 300)
+        self.assertEqual(self.fired(cron, "esx01ev01", "job.sh"), [epoch("2026-11-20 10:25:00")])
+
+    def test_command_at_the_snapshot(self):
+        """스냅샷 때 VM 에서 실행할 명령: 케이스의 켜져 있는 VM 마다 한 번 실행한다. 결과는 진행 로그와 스냅샷 csv 의 snapshot command
+        행에 남는다. 실패한 VM 이 있어도 케이스는 진행한다(WARN). 점검(P)은 VM 에 그 파일이 있는지 본다."""
+        e = self.e
+        self.two_vms()
+        open(os.path.join(e.vms, "esx01ev02", "gpush_fail"), "w").close()
+        c1 = case("q1", [vm("esx01ev01", "job_a"), vm("esx01ev02", "job_a")])
+        c2 = case("q2", [vm("esx01ev01", "job_a"), vm("esx01ev02", power="off")])
+        res, plan = self.gen([c1, c2], seq_guest_cmd=e.gpush_cmd())
+        self.assertIn("GCMD %s\n" % e.gpush_cmd(), res["plan"])
+        rc, out = e.tcrun("check", plan)
+        self.assertIn("[ok] command at the config snapshot (run on every VM of a case that is powered on, before the job): %s"
+                      % e.gpush_cmd(), out)
+        for name in ("esx01ev01", "esx01ev02"):
+            self.assertIn("[ok] vm %s: the file of the command at the config snapshot is there (%s/gpush.sh)" % (name, e.bin), out)
+        self.assertIn("CHECK RESULT: OK", out)
+        self.assertEqual((e.gpush_runs("esx01ev01"), e.gpush_runs("esx01ev02")), (0, 0), "점검은 그 명령을 실행하지 않음")
+        e.start_cron()
+        rc, out = e.tcrun("run", plan, "esx01", timeout=900)
+        log = self.log()
+        self.assertEqual(rc, 0, self.ctx(out))
+        self.assertEqual([r["status"] for r in self.results()], ["done", "done"], "명령이 실패한 VM 이 있어도 케이스는 진행")
+        self.assertEqual((e.gpush_runs("esx01ev01"), e.gpush_runs("esx01ev02")), (2, 0), "케이스마다, 켜져 있는 VM 마다 한 번")
+        self.assert_order(log, [
+            "==== case q1 (1 of 2) begin", "config snapshot: command on vm esx01ev01: ok ([OPS] esx01ev01 Guest properties 10 recorded ",
+            "-config-001-q1.csv  (VM settings of 2 VM(s), guest OS settings of 2 VM(s), command at the snapshot ok on 1 VM(s))",
+            "WARN config snapshot of case q1 is not complete: command on vm esx01ev02 failed (exit 1: [ERROR] property write failed "
+            "HTTP 500:  internal error); The case goes on.", "registered on vm esx01ev01:", "==== case q1 done",
+            "==== case q2 (2 of 2) begin", "config snapshot: command on vm esx01ev01: ok (",
+            "-config-002-q2.csv  (VM settings of 2 VM(s), guest OS settings of 1 VM(s), command at the snapshot ok on 1 VM(s))",
+            "==== case q2 done"])
+        self.assertEqual(log.count("WARN config snapshot"), 1, "전원 끔인 VM 에서는 실행하지 않으므로 두 번째 케이스에는 실패가 없음")
+        self.assertTrue(all(ord(ch) < 128 for ch in log), "명령의 출력에 한글이 있어도 로그는 ASCII")
+        rows = list(csv.reader(io.StringIO(e.log_text(RID, "esx01", "-config-001-q1.csv").lstrip("\ufeff"))))
+        row = [r for r in rows if r[1] == "snapshot command"][0]
+        self.assertRegex(row[2], r"^ok: \[OPS\] esx01ev01 Guest properties 10 recorded 2026-11-20 10:0\d:\d\d KST$")
+        self.assertEqual(row[3], "failed (exit 1): [ERROR] property write failed HTTP 500:  internal error")
+        self.assertEqual(rows.index(row), [r[1] for r in rows].index("kernel") + 1, "Guest OS 구간의 마지막 행")
+        rows2 = list(csv.reader(io.StringIO(e.log_text(RID, "esx01", "-config-002-q2.csv").lstrip("\ufeff"))))
+        row2 = [r for r in rows2 if r[1] == "snapshot command"][0]
+        self.assertTrue(row2[2].startswith("ok: [OPS] esx01ev01") and row2[3] == "(없음)", row2)
+        # 경로가 틀린 명령: 점검이 알린다. 명령을 적지 않은 plan: 스냅샷 때 접속이 늘지 않는다
+        res, bad = self.gen([case("q3", [vm("esx01ev01", "job_a")])], seq_guest_cmd="sh /nonexistent/dir/gpush.sh --insecure")
+        rc, out = e.tcrun("check", bad)
+        self.assertIn("[PROBLEM] vm esx01ev01: the file of the command at the config snapshot is not there or cannot be read: "
+                      "/nonexistent/dir/gpush.sh. Check the command in the settings area of tcgen", out)
+        self.assertIn("CHECK RESULT: 1 problem(s)", out)
+
+
 class SnapshotTests(TcrunBase):
     """구성 스냅샷(config snapshot): 잡이 있는 케이스마다 잡 시작 전에 그 케이스 VM 의 VM 설정과 Guest OS 설정을 로그 폴더의 csv 로 남긴다
     (사용자 요청 2026-11-17 "상태 변경 시에는 우리 만들었던 config snapshot 동작하도록 하고싶어 vm 설정, guest os 설정 둘다 기록하고싶음",
@@ -1781,7 +1916,7 @@ class SnapshotTests(TcrunBase):
         self.assert_order(log, ["VM power: done. Powered on by this case: esx01ev02. The last one was ready at ",
                                 "config snapshot: taken at ", "60 s after the last VM was ready",
                                 "config snapshot (before the job of this case. Powered on by this case: esx01ev02): ",
-                                "settle: VMs of this case were powered on again",
+                                "settle: the last change of this run on this ESX host (settings, VM power) finished",
                                 "registered on vm esx01ev01:", "==== case w1 done"])
         ready = re.search(r"The last one was ready at (\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)", log).group(1)
         raw, rows, t = self.snap("001", "w1")
