@@ -219,7 +219,25 @@ def classify(case, jobs):
     conc.sort(key=lambda g: (g['code'], g['host']))
     if not mains and not conc:
         return None
-    return {'mains': mains, 'main': mains[0] if mains else None, 'conc': conc, 'window': [_iso(w0), _iso(w1)], 'by_main': bool(mains)}
+    # TAT 로그 전체 기록: 이 케이스에 연결된 잡 전부와 분류 (Appendix 'TAT 로그 전체 기록' 표)
+    allrows = []
+    for (code, host), sets in by.items():
+        for i, st in enumerate(sets):
+            if picked.get((code, host)) == i:
+                cls = 'TAT 측정 잡'
+            elif code in main_codes:
+                cls = 'TAT 계산에서 제외 (같은 잡의 다른 실행)'
+            else:
+                cls = '동시 실행 잡'
+            for j in sorted(st, key=lambda j: (j['start'], j['info'])):
+                allrows.append([j['host'], j['code'], j['info'] or j['code'], _iso(j['start']), _iso(j['end']), round(j['elapsed'], 2), cls])
+    allrows.sort(key=lambda r: (_natural_key(r[0]), r[3], r[2]))
+    return {'mains': mains, 'main': mains[0] if mains else None, 'conc': conc, 'window': [_iso(w0), _iso(w1)], 'by_main': bool(mains),
+            'all': allrows}
+
+
+def _natural_key(t):
+    return [int(x) if x.isdigit() else x for x in re.split(r'(\d+)', str(t))]
 
 
 def assign(cases, jobs, log=print):

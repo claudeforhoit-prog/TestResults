@@ -531,7 +531,7 @@ def build_case(path, case, df, chart_dir, date, log=print, roles=None, include_u
                            (f'비교 기준 케이스: {ref["name"]} ({ref["note"]})' if ref.get('note') else '')])
 
         def tat_tables():
-            D._sub(doc, 'TAT 측정 잡', 2)
+            D._sub(doc, 'TAT 측정 잡 (TAT 로그 기준)', 2)
             for m in mains:
                 nj = len(m['jobs'])
                 sp = m['max'] - m['min']
@@ -571,7 +571,7 @@ def build_case(path, case, df, chart_dir, date, log=print, roles=None, include_u
                  + (', 주황 점선은 Load · Compute 경계)' if phase.get('load') else ')')])
 
         def phase_tables():
-            D._sub(doc, 'phase 소요 시간', 2)
+            D._sub(doc, 'phase 소요 시간 (phase 로그 기준)', 2)
             table('phase별 소요 시간 (잡 평균)', ['단계 (phase)', '시작 (s)', '종료 (s)', 'self 시간 (s)', '비율 (%)'],
                   [[n, f'{a:,.0f}', f'{z:,.0f}', f'{v:,.0f}', f'{r:.1f}' if r is not None else '']
                    for n, a, z, v, r in phase_mod.table_rows(phase)])
@@ -581,7 +581,7 @@ def build_case(path, case, df, chart_dir, date, log=print, roles=None, include_u
                 table('phase 잡별 self 시간 (s)', ['단계 (phase)'] + [j['name'] for j in pj] + ['잡 평균'],
                       [[st_] + [f'{j["self"][st_]:,.0f}' if j['self'].get(st_) is not None else '' for j in pj] + [f'{avg:,.0f}']
                        for st_, avg in phase['stages']]
-                      + [['전체'] + [f'{j["total"]:,.0f}' for j in pj] + [f'{phase["total"]:,.0f}']])
+                      + [['단계 합계 (phase 로그)'] + [f'{j["total"]:,.0f}' for j in pj] + [f'{phase["total"]:,.0f}']])
                 D._notes(doc, ['잡 시작 시각: ' + ' · '.join(f'{j["name"]} {j["start"]}' for j in pj if j.get('start'))])
         appx.append(phase_tables)
 
@@ -606,7 +606,7 @@ def build_case(path, case, df, chart_dir, date, log=print, roles=None, include_u
                      '가로축: 기준 구간 시작부터 세트 시작까지의 경과 시간' + (' · 배경: phase 구간' if phase else '')])
 
         def conc_tables():
-            D._sub(doc, '동시 실행 잡', 2)
+            D._sub(doc, '동시 실행 잡 (TAT 로그 기준)', 2)
             for g in conc:
                 D._sub(doc, f'{g["label"]} 잡 요약', 3)
                 table(f'{g["label"]} 잡 요약', ['항목', '값'], [
@@ -652,7 +652,20 @@ def build_case(path, case, df, chart_dir, date, log=print, roles=None, include_u
                 metric_block(m, 3)
             stats_block(f'{cat} 지표', ms, 3)
 
-    if appx:                                 # 잡 결과 표: TAT · phase 소요 시간 · 동시 실행 잡 (본문 순서)
+    allrec = (jobs or {}).get('all') or []
+    if allrec:                               # TAT 로그 전체 기록: 이 케이스에 연결된 잡 전부를 한 표에 (VM · 시작 시각 순서)
+        def all_table():
+            D._sub(doc, 'TAT 로그 전체 기록', 2)
+            kinds = {}
+            for r in allrec:
+                kinds[r[6]] = kinds.get(r[6], 0) + 1
+            D._notes(doc, ['기록: 이 케이스의 VM · 실행 구간에 연결된 TAT 로그의 잡 전부 (' + ' · '.join(f'{k} {v}건' for k, v in kinds.items()) + ')',
+                           '분류: TAT 측정 잡 = TAT 계산에 쓴 세트, 동시 실행 잡 = 다른 잡 종류, TAT 계산에서 제외 = TAT 측정 잡과 같은 잡 종류의 다른 실행'])
+            table('TAT 로그 전체 기록', ['VM', '잡 종류', '잡', '시작', '종료', 'elapsed (s)', '분류'],
+                  [[h, code, info, a, z, f'{e:,.2f}', cls] for h, code, info, a, z, e, cls in allrec])
+        appx.append(all_table)
+
+    if appx:                                 # 잡 결과 표: TAT · phase 소요 시간 · 동시 실행 잡 · TAT 로그 전체 기록 (본문 순서)
         doc.add_heading(f'Appendix {next(letters)}. 잡 결과 표', level=1)
         for fn in appx:
             fn()
