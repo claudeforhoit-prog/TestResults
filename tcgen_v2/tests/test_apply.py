@@ -426,6 +426,62 @@ class ApplyTests(unittest.TestCase):
         self.assertEqual(self.apply(["lpagewait", "esx01ev01", "600"])[0], "lpage poweredoff")
         self.assertEqual(self.changing_calls(), [], "lpagewait 는 읽기만 함")
 
+    def test_snapshot_reads_the_vm_settings_and_changes_nothing(self):
+        """구성 스냅샷(config snapshot)의 VM 설정: vmx 의 값을 TCGEN-CFG <vm>|<구간>|<항목>|<값> 줄로 낸다. 항목 이름은 config_snapshot 의
+        VM 표와 같다. 읽기만 한다(전원, vmx, 호스트 옵션을 바꾸지 않는다)."""
+        vmx2 = (fakeenv.VMX_TEMPLATE % {"name": "esx01ev02"}).replace('numvcpus = "8"', 'numvcpus = "16"\ncpuid.coresPerSocket = "8"')
+        vmx2 = vmx2.replace('memSize = "16384"', 'memSize = "25088"') + (
+            'sched.mem.min = "16384"\nsched.mem.pin = "TRUE"\nsched.cpu.shares = "10000"\nsched.mem.shares = "normal"\n'
+            'sched.cpu.latencySensitivity = "high"\nsched.vcpu10.affinity = "20"\nsched.vcpu2.affinity = "4"\n'
+            'sched.node1.affinity = "24-47"\nMonitor_Control.Halt_In_Monitor = "TRUE"\nmy.own.key = "a|b c"\n')
+        self.write_vmx("esx01ev02", vmx2.encode("latin-1"))
+        self.set_vm("esx01ev02", state="off")
+        before = [self.read_vmx("esx01ev01"), self.read_vmx("esx01ev02")]
+        res, lines = self.apply(["snapshot"], "vm esx01ev01\nvm esx01ev02\nvm nosuch\n"
+                                "key my.own.key\nkey NUMVCPUS\nkey sched.mem.pin\nkey sched.vcpu2.affinity\nkey My.Own.Key\n")
+        self.assertEqual(res, "snapshot 2 of 3 VM(s) read")
+        cfg, order = {}, []
+        for ln in lines:
+            if ln.startswith("TCGEN-CFG "):
+                name, group, item, value = ln[len("TCGEN-CFG "):].split("|", 3)
+                cfg[(name, group, item)] = value
+                order.append((name, group, item))
+        self.assertEqual(len(order), len(set(order)), "항목은 VM 마다 한 번씩")
+
+        def items(name, group):
+            return [(i, cfg[(n, g, i)]) for n, g, i in order if n == name and g == group]
+
+        self.assertEqual(items("esx01ev01", "basic"),
+                         [("power state", "on"), ("cpu", "8"), ("cores per socket / sockets", "1 / 8"), ("memory (GB)", "16"),
+                          ("memory reservation", ""), ("cpu shares", ""), ("mem shares", ""), ("latency sensitivity", "")])
+        self.assertEqual(items("esx01ev02", "basic"),
+                         [("power state", "off"), ("cpu", "16"), ("cores per socket / sockets", "8 / 2"), ("memory (GB)", "24.5"),
+                          ("memory reservation", "16384 MB"), ("cpu shares", "10000"), ("mem shares", "normal"),
+                          ("latency sensitivity", "high")])
+        adv = items("esx01ev02", "adv")
+        self.assertEqual([i for i, _ in adv][:12], list(["sched.mem.lpage.enable1GPage", "sched.mem.pin", "sched.mem.prealloc",
+                         "sched.mem.prealloc.pinnedMainMem", "sched.swap.vmxSwapEnabled", "numa.vcpu.preferHT",
+                         "numa.vcpu.maxPerVirtualNode", "monitor_control.halt_in_monitor", "monitor.idleLoopSpinBeforeHalt",
+                         "monitor.idleLoopMinSpinUS", "monitor_control.disable_pause_loop_exiting", "vpmc.enable"]),
+                         "config_snapshot 의 vm advanced config 항목과 같은 순서")
+        self.assertEqual([i for i, _ in adv][12:], ["my.own.key"], "key 줄로 준 키를 덧붙인다(기본 정보, affinity 구간에 있는 키와 반복은 빼고)")
+        self.assertEqual(dict(adv)["sched.mem.pin"], "TRUE")
+        self.assertEqual(dict(adv)["monitor_control.halt_in_monitor"], "TRUE", "키의 대소문자는 가리지 않는다")
+        self.assertEqual(dict(adv)["my.own.key"], "a|b c", "값의 | 는 그대로")
+        self.assertEqual(dict(adv)["vpmc.enable"], "", "vmx 에 없는 키는 빈 값")
+        self.assertEqual(items("esx01ev02", "aff"), [("sched.cpu.affinity", "all"), ("sched.vcpu2.affinity", "4"),
+                                                      ("sched.vcpu10.affinity", "20"), ("sched.node1.affinity", "24-47"),
+                                                      ("numa.nodeAffinity", "0")], "vcpu 는 번호 순서, 그 뒤에 node, 마지막에 numa.nodeAffinity")
+        self.assertEqual(items("esx01ev01", "aff"), [("sched.cpu.affinity", "all"), ("numa.nodeAffinity", "0")])
+        self.assertEqual(items("nosuch", "basic"), [("power state", "not read")])
+        self.assertTrue(any(ln.startswith("vm nosuch: settings not read: VM 'nosuch' is not registered") for ln in lines))
+        self.assertEqual(self.changing_calls(), [])
+        self.assertEqual([self.read_vmx("esx01ev01"), self.read_vmx("esx01ev02")], before)
+        res, _ = self.apply(["snapshot"], "set esx01ev01 a=b\n")
+        self.assertTrue(res.startswith("error snapshot spec: unknown line"), res)
+        res, _ = self.apply(["snapshot"], "key numvcpus\n")
+        self.assertEqual(res, "error snapshot spec: no vm line")
+
     def test_check_shows_power(self):
         """check 는 VM 마다 지금 전원과 케이스가 원하는 전원을 보인다(off 줄이 있는 VM 은 끔)."""
         self.set_vm("esx01ev02", state="off")

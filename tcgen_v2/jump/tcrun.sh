@@ -1,5 +1,5 @@
 #!/bin/sh
-# tcrun 2.8 - tcgen sequence runner. Runs on the jump VM (POSIX sh). tcgen block A installs it in the jump VM work folder
+# tcrun 2.9 - tcgen sequence runner. Runs on the jump VM (POSIX sh). tcgen block A installs it in the jump VM work folder
 # (setting of tcgen, ~/.tcgen when empty). tcrun uses the folder it is in as its work folder (D below).
 #
 #   sh <work folder>/tcrun check <plan>       read-only checks: ESX key login, tools, VMs, settings and power, VM login, clocks
@@ -29,7 +29,7 @@
 # the plan (NOCHK line) is not checked: no login to its VMs while the job runs. It ends at a time (2 min before the next
 # case is prepared, or when its maximum wait ends) and its monitoring stop is registered together with its start lines.
 
-TCRUN_VERSION=2.8
+TCRUN_VERSION=2.9
 case "$0" in        # the work folder is the folder of this file
   */tcrun) D=$(cd "${0%/tcrun}" 2>/dev/null && pwd) ;;
   tcrun) D=$(pwd) ;;
@@ -433,9 +433,9 @@ mk_apply() {        # mk_apply <out> <tcgen_apply.py arguments>: upload tcgen_ap
     say 'mv -f "$T/tcgen_apply.py.new" "$T/tcgen_apply.py"'
     say 'PY=python3; command -v python3 >/dev/null 2>&1 || PY=python'
     case "$1" in
-      check|prepare)
+      check|prepare|snapshot)
         say "\$PY \"\$T/tcgen_apply.py\" $* << 'TCGEN_EOF_SPEC'"
-        cat "$W/spec"
+        cat "${MA_SPEC:-$W/spec}"
         say 'TCGEN_EOF_SPEC'
         ;;
       *)
@@ -464,6 +464,130 @@ wait_until() {      # wait_until <epoch of this machine> [nostop]: 1 = the stop 
     [ "$WU_L" -gt 5 ] && WU_L=5
     sleep "$WU_L"
   done
+}
+
+# ---------------------------------------------------------------- configuration snapshot (config snapshot)
+# Before the job of every case tcrun records the configuration of the VMs of the case: the VM settings (.vmx values,
+# read on the ESX host by "tcgen_apply.py snapshot") and the guest OS settings (read on each VM of the case that is
+# powered on; the items of guest_config_push). One csv per case in the log folder, laid out like the VM table of
+# config_snapshot: columns group, item, one column per VM. The labels of the csv come from the plan (CFGL lines;
+# tcrun itself is ASCII only).
+# When: in the preparation of the case, after the settings and the VM power and before the crontab lines are
+# registered. A case with a start time is prepared PREP_LEAD_MIN minutes before that time (60 by default), so the
+# snapshot is taken well before the job starts. A case without a job (settings only) has no snapshot.
+# Read only. A snapshot that cannot be taken is a warning in the log: the case goes on.
+# The guest OS settings are those at the time of the snapshot. What a job command changes when it starts is not in it.
+cfgl() {            # cfgl <code> <text when the plan has no such label>
+  CL_T=$(grep "^CFGL $1 " "$PLAN" | head -n 1 | cut -d' ' -f3-)
+  say "${CL_T:-$2}"
+}
+mk_guestcfg() {     # mk_guestcfg <out>: script that prints the guest OS settings of a VM as "TCGEN-G <item>|<value>"
+  cat > "$1" << 'TCRUN_EOF_GUESTCFG'
+R=${TCGEN_SYSROOT:-}
+T=$R/sys/kernel/mm/transparent_hugepage
+br() { sed -n 's/.*\[\([^]]*\)\].*/\1/p' "$1" 2>/dev/null | head -n 1; }
+rd() { [ -r "$1" ] && tr -d '\n' < "$1" 2>/dev/null; }
+echo "TCGEN-G THP enabled|`br $T/enabled`"
+echo "TCGEN-G THP defrag|`br $T/defrag`"
+echo "TCGEN-G khugepaged scan_sleep_millisecs|`rd $T/khugepaged/scan_sleep_millisecs`"
+echo "TCGEN-G khugepaged pages_to_scan|`rd $T/khugepaged/pages_to_scan`"
+echo "TCGEN-G kernel.numa_balancing|`rd $R/proc/sys/kernel/numa_balancing`"
+echo "TCGEN-G hugepages 2MB nr_hugepages|`rd $R/sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages`"
+echo "TCGEN-G hugepages 1GB nr_hugepages|`rd $R/sys/kernel/mm/hugepages/hugepages-1048576kB/nr_hugepages`"
+echo "TCGEN-G default_hugepagesz (cmdline)|`sed -n 's/.*default_hugepagesz=\([^ ]*\).*/\1/p' $R/proc/cmdline 2>/dev/null | head -n 1`"
+echo "TCGEN-G kernel|`uname -r 2>/dev/null`"
+echo "TCGEN-G Collected At|`date '+%Y-%m-%d %H:%M:%S %Z'`"
+echo "TCGEN-G-END ok"
+TCRUN_EOF_GUESTCFG
+}
+snapshot() {        # snapshot: write the config snapshot of the VMs of this case ($SN_WHY says why it is taken)
+  STEP=snapshot; setstate running "recording the configuration of the VMs (config snapshot)"
+  # VMs that this run has just powered on: read 60 s after the last one was ready, so that the guest has applied the
+  # settings of its boot (tuned, rc scripts). Only when there is a settle time: then the job is not delayed by this wait
+  if [ -n "$T_ON" ] && [ "$SETTLE" -gt 0 ] && [ "$(now)" -lt $((T_ON + 60)) ]; then
+    log "config snapshot: taken at $(tstr $((T_ON + 60))), 60 s after the last VM was ready (the guest applies the settings of its boot)"
+    wait_until $((T_ON + 60)) || return 0
+  fi
+  SN_F=$LOGDIR/tcrun-$RUNID-$CHF-config-$SEQ-$CNAME.csv
+  SN_T=$(stamp); SN_W=; SN_V=0; SN_G=0
+  : > "$W/snap.rows"
+  if [ "$CH" != "-" ]; then          # VM settings: read on the ESX host
+    {
+      for SN_VM in $VMS; do say "vm $SN_VM"; done
+      grep '^AV [0-9]* ' "$PLAN" | cut -d' ' -f4- | sed 's/=.*//' | sort -u | sed 's/^/key /'
+    } > "$W/snap.spec"
+    MA_SPEC=$W/snap.spec
+    mk_apply "$W/snap.sh" snapshot
+    MA_SPEC=
+    esxrun "$W/snap.sh" "$W/snap.out" 180
+    SN_X=$?
+    if [ "$(tval TCGEN-RESULT "$W/snap.out" | cut -d' ' -f1)" = snapshot ]; then
+      grep '^TCGEN-CFG ' "$W/snap.out" | cut -d' ' -f2- |
+        awk -F'|' '{ v = $4; for (i = 5; i <= NF; i++) v = v "|" $i; print $1 "\t" $2 "\t" $3 "\t" v }' >> "$W/snap.rows"
+      SN_V=$(grep -c '^TCGEN-CFG [^|]*|basic|cpu|' "$W/snap.out")
+      for SN_VM in $VMS; do
+        grep -q "^TCGEN-CFG $(bre "$SN_VM")|basic|cpu|" "$W/snap.out" || SN_W="$SN_W VM settings of $SN_VM not read ($(grep "^vm $(bre "$SN_VM"): " "$W/snap.out" | head -n 1 | cut -c1-160));"
+      done
+    else
+      SN_R=$(tval TCGEN-RESULT "$W/snap.out")
+      SN_W="$SN_W VM settings not read on the ESX host (${SN_R:-ssh exit $SN_X: $(first "$W/snap.out")});"
+    fi
+  fi
+  mk_guestcfg "$W/gcfg.sh"           # guest OS settings: read on each VM that is powered on
+  for SN_VM in $ONVMS; do
+    vmrun "$(target "$SN_VM")" "$W/gcfg.sh" "$W/gcfg.out" 60
+    SN_X=$?
+    if grep -q '^TCGEN-G-END ' "$W/gcfg.out"; then
+      grep '^TCGEN-G ' "$W/gcfg.out" | cut -d' ' -f2- |
+        awk -F'|' -v vm="$SN_VM" '{ v = $2; for (i = 3; i <= NF; i++) v = v "|" $i; print vm "\tguest\t" $1 "\t" v }' >> "$W/snap.rows"
+      SN_G=$((SN_G + 1))
+    else
+      SN_W="$SN_W guest OS settings of $SN_VM not read (ssh exit $SN_X: $(first "$W/gcfg.out"));"
+    fi
+  done
+  {
+    printf '\357\273\277'
+    tr -d '\r' < "$W/snap.rows" | awk -F'\t' -v vms="$(say $VMS)" -v now="$SN_T" -v h1="$(cfgl h1 group)" -v h2="$(cfgl h2 item)" \
+      -v ltime="$(cfgl time 'collected at')" -v lbasic="$(cfgl basic 'VM basic information')" -v ladv="$(cfgl adv 'vm advanced config')" \
+      -v lguest="$(cfgl guest 'Guest OS')" -v laff="$(cfgl aff 'CPU affinity')" -v resx="$(cfgl ref_esx 'time of the values (ESX host)')" \
+      -v rguest="$(cfgl ref_guest 'time of the values (guest)')" -v none="$(cfgl none '(none)')" '
+      function q(s) { gsub(/"/, "\"\"", s); return "\"" s "\"" }
+      BEGIN { n = split(vms, vm, " "); ng = split("basic adv guest aff", g, " ")
+              lab["basic"] = lbasic; lab["adv"] = ladv; lab["guest"] = lguest; lab["aff"] = laff }
+      NF >= 3 {
+        if ($2 == "guest" && $3 == "Collected At") { gt[$1] = $4; next }
+        k = $2 SUBSEP $3
+        if (!(k in seen)) { seen[k] = 1; cnt[$2]++; item[$2, cnt[$2]] = $3 }
+        val[$1, $2, $3] = $4; got[$1, $2] = 1
+      }
+      END {
+        line = q(h1) "," q(h2); for (i = 1; i <= n; i++) line = line "," q(vm[i]); printf "%s\r\n", line
+        line = q(ltime) "," q(""); for (i = 1; i <= n; i++) line = line "," q(now); printf "%s\r\n", line
+        for (x = 1; x <= ng; x++) {
+          G = g[x]; if (!cnt[G]) continue
+          line = q(lab[G]) "," q(G == "guest" ? rguest : resx)
+          for (i = 1; i <= n; i++) {
+            if (G == "guest") t = ((vm[i] in gt) && gt[vm[i]] != "") ? gt[vm[i]] : none
+            else t = ((vm[i], G) in got) ? now : none
+            line = line "," q(t)
+          }
+          printf "%s\r\n", line
+          for (y = 1; y <= cnt[G]; y++) {
+            it = item[G, y]; line = q("") "," q(it)
+            for (i = 1; i <= n; i++) { v = ((vm[i], G, it) in val) ? val[vm[i], G, it] : ""; line = line "," q(v == "" ? none : v) }
+            printf "%s\r\n", line
+          }
+        }
+      }'
+  } > "$SN_F.new" 2>> "$LOG"
+  if [ -s "$SN_F.new" ] && mv -f "$SN_F.new" "$SN_F"; then
+    log "config snapshot ($SN_WHY): $SN_F  (VM settings of $SN_V VM(s), guest OS settings of $SN_G VM(s))"
+  else
+    rm -f "$SN_F.new"
+    SN_W="$SN_W the csv could not be written: $SN_F;"
+  fi
+  [ -n "$SN_W" ] && log "WARN config snapshot of case $CNAME is not complete:$SN_W The case goes on."
+  return 0
 }
 
 # ---------------------------------------------------------------- results
@@ -655,7 +779,7 @@ power_stopped() {   # power_stopped <where>: a stop request came while the VMs o
 }
 power_vms() {       # VM power as the case wants it: VMs marked off are shut down first, then the other VMs are powered on
                     # one after another in table order (each one: power on, 1GB page backing complete, ssh login)
-  PV_NEW=; PO_STOP=
+  PV_NEW=; PV_OFFED=; PO_STOP=
   for PV_VM in $OFFVMS; do
     STEP=poweroff; setstate running "powering off vm $PV_VM (the case wants it off)"
     mk_apply "$W/poff.sh" poweroff "$PV_VM" $((SHUT_WAIT * 60))
@@ -664,7 +788,7 @@ power_vms() {       # VM power as the case wants it: VMs marked off are shut dow
     PV_R=$(tval TCGEN-RESULT "$W/poff.out")
     case "$PV_R" in
       alreadyoff*) log "vm $PV_VM: powered off already (the case wants it off)" ;;
-      poweredoff*) logf '    | ' "$W/poff.out"; log "vm $PV_VM: shut down (the case wants it off)" ;;
+      poweredoff*) logf '    | ' "$W/poff.out"; log "vm $PV_VM: shut down (the case wants it off)"; PV_OFFED="$PV_OFFED $PV_VM" ;;
       *)
         logf '    | ' "$W/poff.out"
         LW_FAIL=
@@ -1146,7 +1270,7 @@ run_case() {
   STEP=begin
   R_DONE=; R_APPLY=none; R_BEGIN=$(stamp); R_VMSON=; R_MON=; R_JOB=; R_SEEN=; R_END=; R_STOP=; R_STATUS=
   ME="run $RUNID, esx $CHF, case $CNAME"          # owner of the job start time of this case (claim_start)
-  TMON=; TJOB=; T_ON=; OFF=0; MINOFF=0; WHY=
+  TMON=; TJOB=; T_ON=; OFF=0; MINOFF=0; WHY=; PV_NEW=; PV_OFFED=
   rm -f "$W"/seen.* "$W"/zero.* "$W"/gone.*
   if ! names_ok; then
     VMS=; OFFVMS=; ONVMS=; REGVMS=; JOBVMS=
@@ -1216,6 +1340,19 @@ run_case() {
   if [ -f "$STOPF" ]; then
     stopped "before the lines of case $CNAME were registered"
     return 1
+  fi
+  # config snapshot: before the job of every case (user request 2026-11-17: before every job start, not only after a
+  # change of the settings or of the VM power)
+  if [ -n "$JOBVMS" ] && [ -n "$VMS" ]; then
+    SN_WHY="before the job of this case"
+    [ "$R_APPLY" = changed ] && SN_WHY="$SN_WHY. Settings changed by this case"
+    [ -n "$PV_NEW" ] && SN_WHY="$SN_WHY. Powered on by this case:$PV_NEW"
+    [ -n "$PV_OFFED" ] && SN_WHY="$SN_WHY. Powered off by this case:$PV_OFFED"
+    snapshot
+    if [ -f "$STOPF" ]; then
+      stopped "before the lines of case $CNAME were registered"
+      return 1
+    fi
   fi
   if [ -z "$JOBVMS" ]; then
     R_STATUS="done (settings only)"; write_result
@@ -1505,7 +1642,7 @@ cmd_start() {
     fi
   done
   say "status: sh $D/tcrun status       stop: sh $D/tcrun stop       cancel: sh $D/tcrun cancel"
-  say "files in $LOGDIR : tcrun-$RUNID-<esx>.log, -result.csv, -perfreport_cases.csv"
+  say "files in $LOGDIR : tcrun-$RUNID-<esx>.log, -result.csv, -perfreport_cases.csv, -config-<case number>-<case>.csv (config snapshot)"
 }
 cmd_status() {
   CT_ALL=0

@@ -415,7 +415,7 @@ class PlanTests(unittest.TestCase):
         res = gen(self.two(), st=settings(vm_user="tester", esx_addr="esx01=10.0.0.11;esx09=10.0.0.19", jump_log_dir="/data/log"))
         self.assertEqual(res["errors"], [])
         want = """TCGEN-PLAN 2
-VER 2.8
+VER 2.9
 RUNID 20261116-143000
 LOGDIR /data/log
 GEN 2026-11-16 14:30:00
@@ -435,6 +435,16 @@ ADDR esx01 10.0.0.11
 CHAIN esx01
 CHAIN -
 RPTH 테스트 그룹,케이스명,설명,호스트 이름,잡 시작 시각,잡 종료 시각,VM,종료 기준 VM
+CFGL h1 구분
+CFGL h2 항목
+CFGL time 수집 시각
+CFGL basic VM 기본 정보
+CFGL adv vm advanced config
+CFGL guest Guest OS
+CFGL aff CPU affinity
+CFGL ref_esx 기준 시각 (ESX 호스트 조회)
+CFGL ref_guest 기준 시각 (게스트 조회)
+CFGL none (없음)
 CASE 001 esx01 caseA
 MAXWAIT 001 720
 RPTA 001 g1,caseA,"설명, ""따옴표"" 둘째 줄",esx01
@@ -643,7 +653,7 @@ class SettingsAndDataTests(unittest.TestCase):
         return snap
 
     def test_names_differ_from_v1(self):
-        self.assertEqual(core.VERSION, "2.8")
+        self.assertEqual(core.VERSION, "2.9")
         for k in self.keys:
             os.environ.pop(k, None)
         self.assertEqual(os.path.basename(core.default_data_dir()), "tcgen2_data")
@@ -915,6 +925,55 @@ class SeqStartTests(unittest.TestCase):
         res = core.generate([c1, c2], run, MON, settings(), now=NOW, write=False, profiles=PROF)
         self.assertEqual(len([e for e in res["errors"] if "프로세스 이름이 비어 있음" in e]), 1,
                          "n1 은 다음 케이스 n2 가 자동이라 확인하는 케이스가 된다. 같은 잡의 오류는 한 번만")
+
+    def test_records_of_cases_with_a_start_time_hold_the_planned_times(self):
+        """테스트 기록 CSV(순서 실행): 시작 시각을 적은 케이스는 계획한 잡 시작, 모니터링 시작, 그리고 잡을 확인하지 않는 케이스는
+        모니터링 중지를 적는다. 시작 시각이 자동인 케이스는 시각 칸을 비운다."""
+        def mon_vm(esx):
+            return [vm(esx + "ev01", "job_a", ["guest_perf"])]
+        cases = [case("a1", seq_start="18:00", esx_monitors=["host_mon"], vms=mon_vm("esx01")),
+                 case("a2", seq_start="+8"),
+                 case("a3", seq_start="+8", max_wait="7:00", vms=mon_vm("esx01")),
+                 case("b1", esx="esx02", seq_start="18:05", vms=mon_vm("esx02")),
+                 case("b2", esx="esx02", vms=mon_vm("esx02"))]
+        d = tempfile.mkdtemp(prefix="tcgen_rec_")
+        try:
+            st = settings(record_csv=os.path.join(d, "rec.csv"), log_dir=d)
+            res = core.generate(cases, RUN, MON, st, now=NOW, write=True, profiles=PROF, backup_dir=os.path.join(d, "bk"))
+            self.assertEqual(res["errors"], [])
+            with open(st["record_csv"], encoding="utf-8-sig", newline="") as f:
+                rows = list(csv.reader(f))
+            got = {}
+            for r in rows[1:]:
+                row = dict(zip(rows[0], r))
+                got[row["테스트 케이스 이름"]] = (row["잡 시작(KST)"], row["모니터링 시작(KST)"], row["모니터링 중지(KST)"])
+            self.assertEqual(got["a1"], ("2026-11-16 18:00:00", "2026-11-16 17:55:00", "2026-11-17 00:58:00"),
+                             "모니터링 중지 = 다음 케이스 a2(02:00)의 준비 시작 01:00 의 2분 전")
+            self.assertEqual(got["a2"], ("2026-11-17 02:00:00", "", ""), "모니터링이 없는 케이스는 잡 시작만")
+            self.assertEqual(got["a3"], ("2026-11-17 10:00:00", "2026-11-17 09:55:00", "2026-11-17 17:00:00"),
+                             "마지막 케이스: 모니터링 중지 = 잡 시작 + 최대 대기 7:00")
+            self.assertEqual(got["b1"], ("2026-11-16 18:05:00", "2026-11-16 18:00:00", ""),
+                             "다음 케이스가 자동이라 잡을 확인하는 케이스: 중지 시각은 잡이 끝나야 정해진다")
+            self.assertEqual(got["b2"], ("", "", ""), "자동 케이스: 생성할 때 시각을 알 수 없다")
+            with open(res["log"], encoding="utf-8-sig", newline="") as f:
+                log = list(csv.reader(f))
+            when = {}
+            for r in log[1:]:
+                e = dict(zip(log[0], r))
+                when.setdefault((e["테스트 케이스 이름"], e["구분"]), set()).add(e["실행 시각(KST)"])
+            self.assertEqual(when[("a1", "잡")], {"2026-11-16 18:00:00"})
+            self.assertEqual(when[("a1", "모니터링 시작")], {"2026-11-16 17:55:00"})
+            self.assertEqual(when[("a1", "모니터링 중지")], {"2026-11-17 00:58:00"})
+            self.assertEqual(when[("b1", "모니터링 중지")], {""})
+            self.assertEqual(when[("b2", "잡")], {""})
+            self.assertEqual(when[("b2", "모니터링 시작")], {""})
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+        pc = {"start_at": dt.datetime(2026, 11, 16, 18, 0), "max_wait": 120, "handover": dt.datetime(2026, 11, 16, 19, 0)}
+        self.assertEqual(core.nocheck_end(pc), dt.datetime(2026, 11, 16, 18, 58), "준비 2분 전과 최대 대기 가운데 이른 쪽")
+        pc["max_wait"] = 30
+        self.assertEqual(core.nocheck_end(pc), dt.datetime(2026, 11, 16, 18, 30))
+        self.assertIsNone(core.nocheck_end({"start_at": dt.datetime(2026, 11, 16, 18, 0), "max_wait": 0, "handover": None}))
 
     def test_time_mode_ignores_the_start_time_of_sequence_mode(self):
         c = case("t1", seq_start="soon")

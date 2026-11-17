@@ -646,7 +646,9 @@ def main():
     app.show_help("4. 테스트 케이스", app.case_help)
     helps = [w.cget("text") for w in walk(last_toplevel(root)) if isinstance(w, ttk.Label)]
     check(any("표의 순서대로 진행한다" in x for x in helps) and any("최대 대기" in x for x in helps)
-          and any("시작 시각: 비우면 '자동'" in x and "케이스 사이 간격" in x for x in helps), "탭 4 도움말이 순서 실행 내용으로 바뀜(시작 시각 설명 포함)")
+          and any("시작 시각: 잡을 시작할 시각을 적는다" in x and "입력 필요" in x for x in helps)
+          and any("'자동' 이라고 적으면 프로세스 확인 방식" in x and "케이스 사이 간격" in x for x in helps),
+          "탭 4 도움말이 순서 실행 내용으로 바뀜(시작 시각을 적는 것이 기본, 자동은 따로 적을 때만)")
     shot_window(root, "도움말", "tcgen_seq_help4.png")
     last_toplevel(root).destroy()
 
@@ -843,19 +845,54 @@ def main():
         c["start"], c["interval"] = st0, iv0
     app.mark_cases()
     t.refresh("c1")
-    # 시작 시각 칸(비우면 자동)과 케이스 사이 간격
-    check(cell_of(t, "c1", "seq_start") == "자동" and app.cases[1]["seq_start"] == "", "시작 시각 칸은 처음에 자동")
+    # 시작 시각 칸: 직접 적는 것이 기본이다. 적지 않은 칸은 '입력 필요' 로 보이고, 프로세스 확인 방식은 '자동' 이라고 적을 때만 쓴다
+    # (사용자 2026-11-17 "프로세스 체크해서 다음 작업 실행하는 기능은 부하때문에 주로 안쓸꺼같아 ... 기본 UI 에 반영")
+    check(cell_of(t, "c1", "seq_start") == "입력 필요" and app.cases[1]["seq_start"] == "", "적지 않은 시작 시각 칸은 '입력 필요' 로 보임")
+    check(re.fullmatch(r"\d{4}-\d\d-\d\d \d\d:00:00", app.cases[0]["seq_start"]) and cell_of(t, "c0", "seq_start") == app.cases[0]["seq_start"],
+          "새 표의 첫 케이스에는 시작 시각에 다음 정시가 들어 있음 %r" % app.cases[0]["seq_start"])
+    jv, nv = [{"name": "v1", "job": "job_a"}], [{"name": "v1", "job": "(없음)", "profiles": ["pin"]}]
+    check(app.seq_start_text({"applied": True, "seq_start": "", "vms": jv}) == ""
+          and app.seq_start_text({"applied": False, "seq_start": "", "vms": jv}) == "입력 필요"
+          and app.seq_start_text({"seq_start": "+8:00", "vms": jv}) == "+8:00", "적용 체크한 케이스의 빈 시작 시각 칸은 비워 보임")
+    check(app.seq_start_text({"seq_start": "", "vms": nv}) == "" and app.seq_start_text({"seq_start": "자동", "vms": nv}) == "자동"
+          and app.seq_start_text({"seq_start": "자동", "vms": jv}) == "자동 (잡 확인)",
+          "잡이 없는 케이스(설정과 VM 전원만 맞춤)는 시작 시각을 쓰지 않으므로 빈 칸을 '입력 필요' 로 보이지 않음")
+    pick4 = [{"name": "j", "seq_start": "", "vms": jv}, {"name": "s", "seq_start": "", "vms": nv},
+             {"name": "a", "seq_start": "자동", "vms": jv}, {"name": "sa", "seq_start": "자동", "vms": nv}, {"name": "t", "seq_start": "10:00", "vms": jv}]
+    check(app.seq_unset_names(pick4, {0, 1, 2, 3, 4}) == ["j"] and app.seq_unset_names(pick4, {1, 2, 3, 4}) == []
+          and app.seq_auto_names(pick4, {0, 1, 2, 3, 4}) == ["a"],
+          "생성을 막는 것은 잡이 있는데 시작 시각이 빈 케이스뿐. 자동 경고도 잡이 있는 케이스만")
+    n_log = len(LOG)
+    app.generate_picked([1, 2])
+    root.update()
+    check(app.result is None and any(x[0] == "error" and "시작 시각이 비어 있는 케이스 2개: TC-base-b4, TC-base-a-r3" in x[1]
+                                     and "'자동' 이라고 적는다" in x[1] for x in LOG[n_log:]),
+          "시작 시각이 빈 케이스가 있으면 만들지 않고 알림(빈 칸을 자동으로 넘기지 않음)")
+    app.nb.select(3)
     app.commit_case("c1", "seq_start", "9:05")
     t.refresh("c1")
-    check(app.cases[1]["seq_start"] == "09:05" and cell_of(t, "c1", "seq_start") == "09:05", "시작 시각에 시:분을 적음")
+    at = dt.datetime.strptime(app.cases[1]["seq_start"], "%Y-%m-%d %H:%M:%S")
+    check((at.hour, at.minute) == (9, 5) and dt.timedelta(0) < at - dt.datetime.now() <= dt.timedelta(days=1)
+          and cell_of(t, "c1", "seq_start") == app.cases[1]["seq_start"],
+          "시:분만 적으면 지금부터 처음 오는 그 시각으로 날짜를 붙여 저장 %s" % app.cases[1]["seq_start"])
+    typed = app.cases[1]["seq_start"]
     n_log = len(LOG)
     app.commit_case("c1", "seq_start", "soon")
-    check(app.cases[1]["seq_start"] == "09:05" and any(x[0] == "error" and "시작 시각" in x[1] for x in LOG[n_log:]), "형식이 맞지 않는 시작 시각은 거부")
+    check(app.cases[1]["seq_start"] == typed and any(x[0] == "error" and "시작 시각" in x[1] and "'자동' 이라고 적는다" in x[1]
+                                                     for x in LOG[n_log:]), "형식이 맞지 않는 시작 시각은 거부")
     app.commit_case("c2", "seq_start", "2031/01/02 03:04")
     check(app.cases[2]["seq_start"] == "2031-01-02 03:04:00", "날짜까지 적은 시작 시각")
     app.commit_case("c2", "seq_start", "자동")
-    check(app.cases[2]["seq_start"] == "", "'자동' 을 적으면 비움")
-    check(core.load_cases(BASE)[1]["seq_start"] == "09:05", "시작 시각도 자동 저장")
+    t.refresh("c2")
+    check(app.cases[2]["seq_start"] == "자동" and cell_of(t, "c2", "seq_start") == "자동 (잡 확인)",
+          "'자동' 이라고 적으면 프로세스 확인 방식: '자동 (잡 확인)' 으로 보임")
+    app.commit_case("c2", "seq_start", "")
+    t.refresh("c2")
+    check(app.cases[2]["seq_start"] == "" and cell_of(t, "c2", "seq_start") == "입력 필요", "지우면 다시 '입력 필요'")
+    app.commit_case("c2", "seq_start", "자동 (잡 확인)")
+    check(app.cases[2]["seq_start"] == "자동", "칸에 보이는 글 그대로 적어도 자동")
+    check(core.load_cases(BASE)[1]["seq_start"] == typed and core.load_cases(BASE)[2]["seq_start"] == "자동", "시작 시각도 자동 저장")
+    t.refresh("c1")
     check(app.v_gap.get() == "30" and app.row_seq2.winfo_manager() == "pack", "설정 영역의 케이스 사이 간격 기본값은 30분")
     app.v_gap.set("45")
     check(core.load_settings(BASE)["seq_gap_min"] == 45, "케이스 사이 간격을 바꾸면 저장")
@@ -897,6 +934,7 @@ def main():
     shot(root, app, 3, "tcgen_seq_tab4.png")
 
     # 생성: 블록 A, P, S, D 와 실행 계획
+    n_gen = len(LOG)
     gen(app, root)
     res = app.result
     check(res is not None and res["mode"] == "seq" and not res["errors"], "순서 실행으로 명령어 생성 성공")
@@ -936,7 +974,12 @@ def main():
           "케이스 사이 간격과 지정한 시작 시각이 plan 에 들어감. 시각을 비운 케이스에는 START 줄이 없음")
     check(re.search(r"   시작: 지정 \d{4}-\d\d-\d\d 09:05\. 준비\(설정, VM 전원\)는 \d{4}-\d\d-\d\d 08:05 부터", res["plan_view"])
           and "   시작: 자동. 앞 케이스의 잡이 끝나고 30분 뒤" in res["plan_view"], "실행 계획에 시작 시각, 준비 시각, 간격 설명")
-    app.commit_case("c1", "seq_start", "")
+    check("- 구성 스냅샷: 잡이 있는 케이스마다 잡 시작 전에" in res["plan_view"] and "시작 시각을 적은 케이스는 그 시각 60분 전" in res["plan_view"]
+          and "-config-<케이스 번호>-<케이스>.csv 에 기록한다" in res["plan_view"] and "\nCFGL h1 구분\n" in res["plan"]
+          and any("구성 스냅샷(config snapshot)" in x for x in app.RESULT_HELP_SEQ), "실행 계획과 도움말에 구성 스냅샷 설명, plan 에 csv 머리글")
+    check(any(x[0] == "ask" and "시작 시각이 자동인 케이스 1개(TC-base-a-r3)" in x[1] and "VM 에 접속함" in x[1] for x in LOG[n_gen:]),
+          "자동인 케이스가 있으면 생성할 때 경고(잡 실행 중 VM 접속)")
+    app.commit_case("c1", "seq_start", "자동")
     text5 = app.res_text.get("1.0", "end")
     check("순서 실행. 실행 ID %s" % res["run_id"] in text5 and "VM 을 자동으로 종료하고 다시 켠다" in text5, "결과 글에 실행 ID 와 VM 자동 종료 안내")
     app.copy_block("setup")
@@ -957,8 +1000,11 @@ def main():
         rrows = list(csv.reader(f))
     last = dict(zip(rrows[0], rrows[-2]))
     check(rrows[0][-3:] == ["진행 방식", "설정", "실행 ID"] and last["진행 방식"] == "순서 실행" and last["실행 ID"] == res["run_id"]
-          and last["설정"] == "esx01:numa0, esx01ev01:pin+aff" and last["잡 시작(KST)"] == "",
-          "테스트 기록 CSV 에 진행 방식, 설정, 실행 ID 열 추가 (시각 칸은 비움)")
+          and last["설정"] == "esx01:numa0, esx01ev01:pin+aff" and re.fullmatch(r"\d{4}-\d\d-\d\d 09:05:00", last["잡 시작(KST)"])
+          and re.fullmatch(r"\d{4}-\d\d-\d\d 09:00:00", last["모니터링 시작(KST)"]) and last["모니터링 중지(KST)"] == ""
+          and dict(zip(rrows[0], rrows[-1]))["잡 시작(KST)"] == "",
+          "테스트 기록 CSV 에 진행 방식, 설정, 실행 ID 열 추가. 시작 시각을 적은 케이스는 잡 시작과 모니터링 시작 시각을 적고, "
+          "자동인 케이스는 비움 %s" % (last,))
     shot(root, app, 4, "tcgen_seq_tab5.png")
     app.show_help("5. 생성 결과", app.RESULT_HELP_SEQ)
     shot_window(root, "도움말", "tcgen_seq_help5.png")

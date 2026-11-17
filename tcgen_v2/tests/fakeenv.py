@@ -90,10 +90,23 @@ fi
 if [ -f "$d/deny" ]; then echo "deny $t" >> "$FAKE_ROOT/ssh_calls.txt"; echo "$t: Permission denied (publickey,password)." >&2; exit 255; fi
 echo "vm $t" >> "$FAKE_ROOT/ssh_calls.txt"
 HOME=$d; FAKE_CRONTAB=$d/crontab.txt; FAKE_HOST=$h; FAKE_CLOCK_OFFSET=`cat "$d/clock_offset" 2>/dev/null`
-export HOME FAKE_CRONTAB FAKE_HOST FAKE_CLOCK_OFFSET
+TCGEN_SYSROOT=$d/root
+export HOME FAKE_CRONTAB FAKE_HOST FAKE_CLOCK_OFFSET TCGEN_SYSROOT
 cd "$d" || exit 1
 exec "$@"
 """
+
+# 게스트 OS 의 설정 파일(구성 스냅샷이 읽는 /sys, /proc 의 파일). VM 폴더의 root/ 아래에 둔다(TCGEN_SYSROOT)
+GUEST_FILES = {
+    "sys/kernel/mm/transparent_hugepage/enabled": "always [madvise] never\n",
+    "sys/kernel/mm/transparent_hugepage/defrag": "always defer defer+madvise [madvise] never\n",
+    "sys/kernel/mm/transparent_hugepage/khugepaged/scan_sleep_millisecs": "10000\n",
+    "sys/kernel/mm/transparent_hugepage/khugepaged/pages_to_scan": "4096\n",
+    "proc/sys/kernel/numa_balancing": "0\n",
+    "sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages": "0\n",
+    "sys/kernel/mm/hugepages/hugepages-1048576kB/nr_hugepages": "16\n",
+    "proc/cmdline": "BOOT_IMAGE=(hd0,gpt2)/vmlinuz root=/dev/mapper/rhel-root ro default_hugepagesz=1G hugepagesz=1G hugepages=16\n",
+}
 
 FAKE_SETSID = r"""#!%s
 use POSIX ();
@@ -509,7 +522,20 @@ class FakeEnv(object):
         if clock_offset:
             with open(os.path.join(d, "clock_offset"), "w") as f:
                 f.write(str(clock_offset))
+        for rel, text in GUEST_FILES.items():
+            self.guest_set(name, rel, text)
         return d
+
+    def guest_set(self, name, rel, text):
+        """게스트 OS 의 설정 파일 내용을 정한다(rel: 'sys/kernel/mm/transparent_hugepage/enabled' 처럼 / 없는 경로). None 이면 없앤다."""
+        p = os.path.join(self.vms, name, "root", rel)
+        if text is None:
+            if os.path.exists(p):
+                os.remove(p)
+            return
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w") as f:
+            f.write(text)
 
     def vm_dir(self, name):
         return os.path.join(self.vms, name)

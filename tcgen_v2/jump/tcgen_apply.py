@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-tcgen_apply.py 2.8 - apply ESXi host advanced options and VM configuration (.vmx) keys for one test case.
+tcgen_apply.py 2.9 - apply ESXi host advanced options and VM configuration (.vmx) keys for one test case.
 
 Runs ON THE ESXi HOST with the python3 that ships with ESXi. Standard library only, Python 3.5 syntax.
 The tcgen sequence runner (tcrun, on the jump VM) uploads this file to /tmp/tcgen on the host and runs it over ssh.
@@ -18,6 +18,11 @@ Usage (the settings come on standard input, see "spec" below):
   python3 tcgen_apply.py lpagewait <vm> [secs] wait until the 1GB page backing of a powered-on VM is complete (default 5400).
                                                Complete when the number of 1GB page
                                                backings reaches memSize / 1024; no increase in 6 readings (15 s apart) = stopped.
+  python3 tcgen_apply.py snapshot              read only: the settings of VMs for the configuration snapshot (config snapshot).
+                                               Standard input: "vm <name>" lines, and "key <.vmx key>" lines for more keys.
+                                               Prints "TCGEN-CFG <vm>|<group>|<item>|<value>": group basic (power state, cpu,
+                                               memory, shares), adv (advanced keys of the .vmx), aff (CPU affinity keys).
+                                               An empty value: the .vmx has no such key.
 
 spec (one item per line, ASCII):
   opt shutdown_wait <seconds>      how long to wait for the guest shutdown before a hard power off (default 600)
@@ -45,7 +50,7 @@ import subprocess
 import sys
 import time
 
-VERSION = "2.8"
+VERSION = "2.9"
 VMFS_ROOT = os.environ.get("TCGEN_VMFS_ROOT", "/vmfs/volumes")
 TMP = os.environ.get("TCGEN_TMP", "/tmp/tcgen")
 POLL = float(os.environ.get("TCGEN_POLL_SEC", "5"))
@@ -631,6 +636,107 @@ def cmd_lpage(name):
     result("lpage", text)
 
 
+# ---------------------------------------------------------------- configuration snapshot (read only)
+# The items and their names are those of the VM table of config_snapshot (VM basic information, vm advanced config,
+# CPU affinity). Here they are read from the .vmx file: that is the place where the settings of tcgen (set lines) go.
+SNAP_ADV_KEYS = ("sched.mem.lpage.enable1GPage", "sched.mem.pin", "sched.mem.prealloc", "sched.mem.prealloc.pinnedMainMem",
+                 "sched.swap.vmxSwapEnabled", "numa.vcpu.preferHT", "numa.vcpu.maxPerVirtualNode",
+                 "monitor_control.halt_in_monitor", "monitor.idleLoopSpinBeforeHalt", "monitor.idleLoopMinSpinUS",
+                 "monitor_control.disable_pause_loop_exiting", "vpmc.enable")
+SNAP_BASIC_KEYS = ("numvcpus", "cpuid.corespersocket", "memsize", "sched.mem.min", "sched.cpu.shares", "sched.mem.shares",
+                   "sched.cpu.latencysensitivity")
+SNAP_AFF_FIXED = ("sched.cpu.affinity", "numa.nodeAffinity")
+SNAP_AFF_RE = re.compile(r"^sched\.(vcpu|node)(\d+)\.affinity$")
+
+
+def read_snap_spec(data):
+    vms, keys = [], []
+    for raw in data.decode("ascii", "replace").split("\n"):
+        line = raw.rstrip("\r").strip()
+        if not line or line.startswith("#"):
+            continue
+        word, _, rest = line.partition(" ")
+        rest = rest.strip()
+        if word == "vm" and rest:
+            if rest not in vms:
+                vms.append(rest)
+        elif word == "key" and rest:
+            if rest.lower() not in [k.lower() for k in keys]:
+                keys.append(rest)
+        else:
+            raise Fail("snapshot spec: unknown line: %r" % line)
+    if not vms:
+        raise Fail("snapshot spec: no vm line")
+    return vms, keys
+
+
+def snap_number(values):
+    try:
+        return int(values[0]) if len(values) == 1 else None
+    except ValueError:
+        return None
+
+
+def snap_vm(name, lines, state, keys):
+    """The snapshot rows of one VM: a list of (group, item, value). An empty value: the .vmx has no such key."""
+    def one(key):
+        return " | ".join(values_of(lines, key))
+
+    rows = [("basic", "power state", state)]
+    cpu = snap_number(values_of(lines, "numvcpus")) or 1            # no numvcpus line: 1 vCPU
+    cps = snap_number(values_of(lines, "cpuid.coresPerSocket")) or 1
+    rows.append(("basic", "cpu", str(cpu)))
+    rows.append(("basic", "cores per socket / sockets", "%d / %s" % (cps, (cpu // cps) if cpu % cps == 0 else "?")))
+    mem = snap_number(values_of(lines, "memSize"))
+    if mem is None:
+        rows.append(("basic", "memory (GB)", one("memSize")))
+    else:
+        rows.append(("basic", "memory (GB)", str(mem // 1024) if mem % 1024 == 0 else "%.1f" % (mem / 1024.0)))
+    res = one("sched.mem.min")
+    rows.append(("basic", "memory reservation", (res + " MB") if res else ""))
+    rows.append(("basic", "cpu shares", one("sched.cpu.shares")))
+    rows.append(("basic", "mem shares", one("sched.mem.shares")))
+    rows.append(("basic", "latency sensitivity", one("sched.cpu.latencySensitivity")))
+    skip = set(SNAP_BASIC_KEYS) | set(k.lower() for k in SNAP_AFF_FIXED)
+    done = set()
+    for key in list(SNAP_ADV_KEYS) + list(keys):
+        low = key.lower()
+        if low in skip or low in done or SNAP_AFF_RE.match(low):
+            continue
+        done.add(low)
+        rows.append(("adv", key, one(key)))
+    found = {}
+    for raw in lines:
+        k, v = key_of(raw)
+        m = SNAP_AFF_RE.match(k) if k else None
+        if m:
+            found[(0 if m.group(1) == "vcpu" else 1, int(m.group(2)))] = k
+    rows.append(("aff", SNAP_AFF_FIXED[0], one(SNAP_AFF_FIXED[0])))
+    for _, k in sorted(found.items()):
+        rows.append(("aff", k, one(k)))
+    rows.append(("aff", SNAP_AFF_FIXED[1], one(SNAP_AFF_FIXED[1])))
+    return rows
+
+
+def cmd_snapshot(vms, keys):
+    """Read only: the settings of each VM as lines TCGEN-CFG <vm>|<group>|<item>|<value>."""
+    table = all_vms()
+    n = 0
+    for name in vms:
+        try:
+            row = find_vm(table, name)
+            lines = read_vmx(vmx_path(row))
+            state = power_state(row["id"])
+        except Fail as e:
+            out("vm %s: settings not read: %s" % (name, e))
+            out("TCGEN-CFG %s|basic|power state|not read" % name)
+            continue
+        for group, item, value in snap_vm(name, lines, state, keys):
+            out("TCGEN-CFG %s|%s|%s|%s" % (name, group, item, value.replace("\t", " ")))
+        n += 1
+    result("snapshot", "%d of %d VM(s) read" % (n, len(vms)))
+
+
 def cmd_lpagewait(name, seconds):
     """Wait until the 1GB page backing of a powered-on VM is complete. Result "lpage <state> [current target failed]":
     complete, off (1GB pages not set: nothing to wait for), nonode, stalled (no increase, no failed attempts),
@@ -732,9 +838,11 @@ def main(argv):
             cmd_lpage(argv[2])
         elif len(argv) in (3, 4) and argv[1] == "lpagewait":
             cmd_lpagewait(argv[2], int(argv[3]) if len(argv) == 4 else POWERON_WAIT)
+        elif len(argv) == 2 and argv[1] == "snapshot":
+            cmd_snapshot(*read_snap_spec(sys.stdin.buffer.read()))
         else:
             out("usage: tcgen_apply.py check | prepare <tag> | poweron <vm> [seconds] | poweroff <vm> [seconds] | lpage <vm> | "
-                "lpagewait <vm> [seconds] | rollback <tag>   (spec on stdin)")
+                "lpagewait <vm> [seconds] | rollback <tag> | snapshot   (spec on stdin)")
             result("error", "bad arguments")
             return 1
     except Fail as e:

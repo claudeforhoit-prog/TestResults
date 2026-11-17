@@ -778,9 +778,11 @@ class App(object):
         ttk.Label(self.f_seq, text="VM 켠 뒤 잡 시작까지 최소").pack(side="left")
         ttk.Spinbox(self.f_seq, from_=0, to=240, width=4, textvariable=self.v_settle).pack(side="left", padx=px(6))
         ttk.Label(self.f_seq, text="분").pack(side="left")
-        self.row_seq2 = ttk.Frame(sf)            # 순서 실행에서만 보이는 줄: 케이스 사이 간격, 잡 시작 최소 간격, 준비, 잡 종료 확인 간격
-        for label, var, low, unit in (("케이스 사이 간격", self.v_gap, 0, "분"), ("잡 시작 최소 간격", self.v_spacing, 1, "분"),
-                                      ("시작 시각 준비", self.v_prep, 0, "분 전"), ("잡 종료 확인 간격", self.v_poll, 1, "분")):
+        # 순서 실행에서만 보이는 줄: 잡 시작 최소 간격, 준비, 그리고 시작 시각이 '자동' 인 케이스에만 쓰는 두 값(케이스 사이 간격, 잡 종료
+        # 확인 간격). 시작 시각을 적는 것이 기본이므로 자동에만 쓰는 값은 뒤에 두고 이름에 (자동) 을 붙인다
+        self.row_seq2 = ttk.Frame(sf)
+        for label, var, low, unit in (("잡 시작 최소 간격", self.v_spacing, 1, "분"), ("시작 시각 준비", self.v_prep, 0, "분 전"),
+                                      ("케이스 사이 간격(자동)", self.v_gap, 0, "분"), ("잡 종료 확인 간격(자동)", self.v_poll, 1, "분")):
             ttk.Label(self.row_seq2, text=label).pack(side="left")
             ttk.Spinbox(self.row_seq2, from_=low, to=1440, width=5, textvariable=var).pack(side="left", padx=px(6))
             ttk.Label(self.row_seq2, text=unit).pack(side="left", padx=(0, px(18)))
@@ -933,13 +935,19 @@ class App(object):
         "실행을 바로 끝내고 등록한 crontab 줄을 지운다. 시작된 모니터링은 중지 명령을 실행한다. 실행 중인 잡은 끝내지 않고 목록만 "
         "보인다. 적용한 설정은 그대로 둔다. 끝난 실행이 남긴 줄과 모니터링도 정리한다).",
         "점프 VM 로그 폴더에 남는 파일: tcrun-<실행 ID>-<ESX 호스트>.log (단계와 시각), -result.csv (케이스별 결과), "
-        "-perfreport_cases.csv (성능 리포트 생성기의 케이스 정보 파일. 잡 시작과 종료는 실제 시각).",
+        "-perfreport_cases.csv (성능 리포트 생성기의 케이스 정보 파일. 잡 시작과 종료는 실제 시각), "
+        "-config-<케이스 번호>-<케이스>.csv (구성 스냅샷).",
+        "구성 스냅샷(config snapshot): 잡이 있는 케이스마다 잡 시작 전에 그 케이스 VM 의 VM 설정(ESX 호스트에서 읽은 vmx 값)과 "
+        "Guest OS 설정(THP, hugepages 등)을 csv 로 남긴다. 케이스의 준비 때(시작 시각을 적은 케이스는 그 시각에서 '시작 시각 준비' 분 "
+        "전) 설정 적용과 VM 전원 맞추기를 마친 뒤에 읽는다. 배치는 config_snapshot 의 VM 표와 같다(구분, 항목, VM 이름 열). 읽기만 "
+        "하고, 켜져 있는 VM 마다 접속 한 번이다. 읽지 못해도 케이스는 진행한다.",
         "진행이 중간에 멈추면 로그의 PAUSED 줄에서 이유를 확인하고 고친 뒤, 끝난 케이스를 탭 4 에서 적용 체크하고 다시 생성해 "
         "실행 블록을 붙여넣는다. 남은 줄을 모두 지우고 끝내려면 sh {D}/tcrun cancel 을 실행한다.",
         "D. VM crontab 전체 삭제: 필요할 때만 쓴다. VM 의 crontab 을 모두 지운다(tcgen 이 등록하지 않은 줄 포함. 지우기 전 내용은 "
         "각 VM 홈 폴더의 tcgen_crontab_backup-<시각>.txt 에 저장). 진행 중에 붙여넣으면 등록된 줄이 지워져 잡이 시작되지 않는다.",
         "[복사] 를 누르면 그 블록 전체가 클립보드에 들어간다. 점프 VM 터미널에서는 마우스 오른쪽 또는 Shift+Insert 로 붙여넣는다.",
-        "생성할 때마다 테스트 기록 CSV 에 케이스 행이 추가되고(시각 칸은 비움), 로그 폴더에 생성 로그가 남는다.",
+        "생성할 때마다 테스트 기록 CSV 에 케이스 행이 추가되고, 로그 폴더에 생성 로그가 남는다. 시작 시각을 적은 케이스는 잡 시작, "
+        "모니터링 시작 시각(잡을 확인하지 않는 케이스는 모니터링 중지 시각도)이 적힌다. 자동인 케이스는 시각 칸이 비어 있다.",
     ]
     RESULT_HELP = [
         "A. 점프 VM 최초 1회 설정: 점프 VM 에서 처음 한 번만 붙여넣는다. VM password: 가 나오면 VM 비밀번호를 입력한다(화면에 보이지 않음). "
@@ -969,9 +977,14 @@ class App(object):
                 "호스트마다 따로 진행하고 서로 기다리지 않는다.",
                 "케이스 행(옅은 파란 바탕, 굵은 글씨): 적용 체크, 케이스 이름, 설명, ESX 호스트, ESX 모니터링, 설정(대상이 ESX 호스트인 "
                 "프로파일), 최대 대기, 시작 시각, 테스트 그룹",
-                "시작 시각: 비우면 '자동' 이다. 자동인 케이스는 앞 케이스의 잡이 끝난 시각에서 %d분(설정 영역의 '케이스 사이 간격') 이상 지난 "
-                "뒤에 잡을 시작한다. 시각을 적으면 그 시각에 잡을 시작한다. '10:00' 처럼 시:분만 적으면 [명령어 생성] 을 누른 뒤 처음 오는 "
-                "그 시각이고, '2026-11-20 10:00:00' 처럼 날짜까지 적을 수도 있다." % int(st.get("seq_gap_min", 30)),
+                "시작 시각: 잡을 시작할 시각을 적는다. 표에 적은 값이 그 케이스의 잡 시작 기록으로 남는다. '2026-11-20 10:00:00' 처럼 "
+                "날짜까지 적거나, '10:00' 처럼 시:분만 적는다(지금부터 처음 오는 그 시각으로 날짜를 붙여 저장한다). 새 표의 첫 케이스에는 "
+                "다음 정시가 들어가 있고, 케이스를 복사하면 시각은 비워져 '입력 필요' 로 보인다. 잡이 있는 케이스의 시작 시각이 비어 "
+                "있으면 [명령어 생성] 이 블록을 만들지 않고 알린다. 잡이 없는 케이스(설정과 VM 전원만 맞춤)는 시작 시각을 쓰지 않으므로 "
+                "비워 둔다.",
+                "시작 시각에 '자동' 이라고 적으면 프로세스 확인 방식이다: 앞 케이스의 잡이 끝난 것을 확인하고 %d분(설정 영역의 '케이스 "
+                "사이 간격') 이상 지난 뒤에 잡을 시작한다. 확인하러 잡이 실행되는 동안 VM 에 접속하므로 측정에 부하가 될 수 있다. 칸에는 "
+                "'자동 (잡 확인)' 으로 보이고, 생성할 때 경고로 알린다." % int(st.get("seq_gap_min", 30)),
                 "시작 시각에 +간격: '+8:00', '+8', '+8.5' 처럼 + 로 시작하면 같은 ESX 호스트의 바로 앞 케이스 시작 시각에서 그만큼 뒤다"
                 "(8시간, 8시간, 8시간 30분). 예: 첫 케이스에 10:00, 다음 케이스들에 +8:00 을 적으면 10:00, 18:00, 다음 날 02:00 에 시작한다. "
                 "그 호스트의 첫 케이스(이번 생성에 넣는 케이스 가운데)에는 시각을 직접 적는다. +간격을 적은 케이스를 [+ 케이스 추가] 로 "
@@ -980,7 +993,7 @@ class App(object):
                 "케이스 사이 간격은 적용하지 않는다. VM 을 켠 뒤의 대기가 남았으면 가능한 가장 이른 시각에 시작하고 로그에 WARN 을 "
                 "남긴다." % int(st.get("seq_prep_lead_min", 60)),
                 "잡 확인 안 함: 시작 시각을 적은 케이스는 정해진 시각에 진행하므로 잡 프로세스를 확인하지 않는다. 잡이 실행되는 동안 VM 에 "
-                "접속하지 않는다(VM 접속은 준비 때 VM 마다 2~3번, 케이스가 끝난 뒤 1번). 그 케이스는 다음 케이스 준비 2분 전에 모니터링을 "
+                "접속하지 않는다(VM 접속은 준비 때 VM 마다 3~4번, 그 가운데 1번이 구성 스냅샷. 케이스가 끝난 뒤 1번). 그 케이스는 다음 케이스 준비 2분 전에 모니터링을 "
                 "중지하고 끝낸다. 최대 대기를 적었으면 잡 시작 + 최대 대기가 더 이를 때 그 시각에 끝낸다. 마지막 케이스에 최대 대기가 없으면 "
                 "모니터링을 중지하지 않고 실행을 끝낸다(같은 ESX 호스트의 다음 실행이 준비를 시작할 때나 tcrun cancel 로 중지).",
                 "잡 확인 함: 시작 시각이 자동인 케이스와, 시각을 적었어도 바로 다음 케이스가 자동인 케이스는 잡 종료를 알아야 하므로 확인한다. "
@@ -1174,9 +1187,10 @@ class App(object):
                 "[명령어 생성] 을 누르면 넣을 케이스를 고르는 창이 열린다. 테스트 그룹, 잡 종료 (리포트), 종료 기준 VM 은 "
                 "리포트용 CSV 에만 들어간다. 적용 체크한 케이스의 간격, 잡 시작, 모니터링 중지는 고정된다(순서를 바꿔도 케이스와 함께 "
                 "움직인다). 자세한 설명은 [도움말].",
-        "seq": "순서 실행: 점프 VM 이 케이스를 표의 순서대로 진행하고, 잡의 프로세스가 끝난 것을 확인한 뒤 다음 케이스로 넘어간다. "
-               "시작 시각 칸을 비우면 자동(앞 케이스의 잡이 끝나고 '케이스 사이 간격' 뒤), 시각(10:00)이나 +간격(+8:00 = 앞 케이스 시작 "
-               "8시간 뒤)을 적으면 그 시각에 잡을 시작하고 잡을 확인하지 않는다. "
+        "seq": "순서 실행: 점프 VM 이 케이스를 표의 순서대로 준비하고(설정 적용, VM 전원, 구성 스냅샷) 시작 시각 칸에 적은 시각에 잡을 "
+               "시작한다. 시작 시각은 날짜 시각(2026-11-20 10:00:00), 시:분(10:00), +간격(+8:00 = 앞 케이스 시작 8시간 뒤)으로 적는다. "
+               "이렇게 적은 케이스는 잡이 실행되는 동안 VM 에 접속하지 않는다. '자동' 이라고 적으면 앞 케이스의 잡 프로세스가 끝난 것을 "
+               "확인한 뒤 이어서 시작한다(확인하러 VM 에 접속한다). "
                "케이스 행의 설정 칸은 ESX 호스트 설정, VM 행의 설정 칸은 VM 설정(탭 3 의 프로파일)이다. "
                "칸을 두 번 누르거나 행을 고르고 Enter 를 누르면 고친다. [명령어 생성] 을 누르면 넣을 케이스를 고르는 창이 열린다. "
                "자세한 설명은 [도움말].",
@@ -2135,7 +2149,7 @@ class App(object):
         if key == "max_wait":
             return c.get("max_wait") or "제한 없음"
         if key == "seq_start":
-            return c.get("seq_start") or "자동"
+            return self.seq_start_text(c)
         s = self.sched[i] if i < len(self.sched) else {}
         has_mon = core.case_has_monitors(c)
         if key in ("job", "end_ref"):
@@ -2157,6 +2171,41 @@ class App(object):
                 return "확인 필요"
             return core.fmt_short(s["mon_stop"]) + (" (직접)" if mode == "manual" else " (자동)")
         return None
+
+    SEQ_UNSET = "입력 필요"
+    SEQ_AUTO = "자동 (잡 확인)"
+
+    @staticmethod
+    def seq_is_auto(c):
+        return (c.get("seq_start") or "").strip().lower() in ("자동", "auto")
+
+    @staticmethod
+    def case_has_job(c):
+        """잡이 있는 케이스인가. 잡이 없는 케이스(설정과 VM 전원만 맞춤)는 순서 실행에서 시작 시각을 쓰지 않는다."""
+        return any(core._has_job(v) for v in (c.get("vms") or []))
+
+    def seq_start_text(self, c):
+        """순서 실행의 시작 시각 칸에 보이는 글. 시작 시각을 직접 적는 것이 기본이다(사용자 2026-11-17 "프로세스 체크해서 다음 작업 실행하는
+        기능은 부하때문에 주로 안쓸꺼같아 ... 기존 처럼 내가 잡 시작을 테스트케이스 기록에 남길께"). 빈 칸은 아직 적지 않은 것이고,
+        프로세스를 확인하며 이어서 실행하는 방식은 '자동' 이라고 적었을 때만 쓴다. 적용 체크한 케이스와 잡이 없는 케이스(시작 시각을
+        쓰지 않는다)의 빈 칸은 그대로 비워 보인다."""
+        v = (c.get("seq_start") or "").strip()
+        if not v:
+            return "" if (c.get("applied") or not self.case_has_job(c)) else self.SEQ_UNSET
+        if self.seq_is_auto(c):
+            return self.SEQ_AUTO if self.case_has_job(c) else "자동"
+        return v
+
+    def seq_unset_names(self, cases, picked):
+        """고른 케이스(picked: 순번의 집합) 가운데 잡이 있는데 시작 시각이 비어 있는 케이스의 이름. 이런 케이스가 있으면 [명령어 생성] 이
+        만들지 않는다. 잡이 없는 케이스(설정과 VM 전원만 맞춤)는 시작 시각을 쓰지 않으므로 넣지 않는다."""
+        return [c.get("name") or "%d번째 케이스" % (i + 1) for i, c in enumerate(cases)
+                if i in picked and self.case_has_job(c) and not (c.get("seq_start") or "").strip()]
+
+    def seq_auto_names(self, cases, picked):
+        """고른 케이스 가운데 잡이 있고 시작 시각이 '자동' 인 케이스의 이름(생성할 때 잡 실행 중 VM 접속을 경고로 알린다)."""
+        return [c.get("name") or "%d번째 케이스" % (i + 1) for i, c in enumerate(cases)
+                if i in picked and self.case_has_job(c) and self.seq_is_auto(c)]
 
     def mark_cases(self):
         """탭 4 이 바뀔 때마다 test_cases.json 에 저장한다(적용 체크 포함)."""
@@ -2233,10 +2282,19 @@ class App(object):
                 c["max_wait"] = core.fmt_interval(mw) if mw else ""
             elif key == "seq_start":
                 try:
-                    c["seq_start"] = core.fmt_seq_start(t)
+                    if t.lower() in ("자동", "auto") or t == self.SEQ_AUTO:
+                        c["seq_start"] = "자동"         # 프로세스를 확인하며 앞 케이스가 끝난 뒤 이어서 실행(잡 실행 중 VM 접속)
+                    elif t in ("", "-", self.SEQ_UNSET):
+                        c["seq_start"] = ""             # 아직 적지 않음: [명령어 생성] 이 알린다
+                    elif core.SEQ_START_RE.match(t):
+                        # 시:분만 적으면 지금부터 처음 오는 그 시각으로 날짜를 붙여 저장한다(표에 날짜가 남게)
+                        c["seq_start"] = core.fmt_dt(core.parse_seq_start(t))
+                    else:
+                        c["seq_start"] = core.fmt_seq_start(t)
                 except ValueError as ex:
-                    messagebox.showerror(TITLE, "시작 시각 칸. %s\n\n비우면 자동(앞 케이스가 끝난 뒤 시작)이다. 시각은 10:00 또는 "
-                                         "2026-11-20 10:00:00, 앞 케이스 시작 시각 기준의 간격은 +8:00 처럼 적는다." % ex, parent=self.root)
+                    messagebox.showerror(TITLE, "시작 시각 칸. %s\n\n잡을 시작할 시각을 적는다: 2026-11-20 10:00:00 또는 10:00(지금부터 처음 "
+                                         "오는 그 시각), 앞 케이스 시작 시각 기준의 간격은 +8:00.\n프로세스를 확인하며 앞 케이스가 끝난 뒤 "
+                                         "이어서 실행하려면 '자동' 이라고 적는다(잡이 실행되는 동안 VM 에 접속한다)." % ex, parent=self.root)
                     return
             elif key in ("desc", "group"):
                 c[key] = " ".join(t.split())          # 줄바꿈, 탭은 빈칸 하나로
@@ -2276,6 +2334,7 @@ class App(object):
         i, k, c, v = self._selected_case()
         if not self.cases:
             row = core.new_case("", next_hour(), count=int(self.settings.get("default_vms", 2)), prefix=self.vm_prefix())
+            row["seq_start"] = row["start"]      # 순서 실행의 시작 시각도 다음 정시로 넣어 둔다(고쳐 쓴다)
             self.cases.append(row)
             new = 0
         else:
@@ -2287,8 +2346,10 @@ class App(object):
             row["applied"] = False          # 새로 만든 케이스는 아직 등록 전
             row["applied_stop"] = ""
             row["end_time"] = ""            # 잡 종료는 케이스마다 다르므로 복사하지 않음 (자동)
-            # 시각은 복사하지 않는다(자동: 앞 케이스가 끝난 뒤 시작). +간격은 복사한다(앞 케이스 시작 시각 기준이라 그대로 뜻이 맞음)
-            row["seq_start"] = src.get("seq_start", "") if (src.get("seq_start") or "").startswith("+") else ""
+            # 시각은 복사하지 않고 비워 둔다(같은 시각에 두 케이스를 시작할 수 없다. 빈 칸은 '입력 필요' 로 보인다).
+            # +간격과 자동은 복사한다(앞 케이스 기준이라 그대로 뜻이 맞음)
+            ss = (src.get("seq_start") or "").strip()
+            row["seq_start"] = ss if (ss.startswith("+") or self.seq_is_auto(src)) else ""
             if row.get("stop_mode") == "manual":
                 row["stop_mode"], row["stop_time"] = "auto", ""
             self.cases.insert(new, row)
@@ -2688,7 +2749,7 @@ class App(object):
         for i, c in enumerate(self.cases):
             sc = self.sched[i] if i < len(self.sched) else {}
             if seq:
-                when = c.get("seq_start") or "자동"
+                when = self.seq_start_text(c)
             else:
                 when = core.fmt_dt(sc["job"]) if sc.get("job") else "확인 필요"
             rows.append({"sel": not c.get("applied"), "i": i, "name": c.get("name") or "(이름 없음)", "desc": c.get("desc", ""),
@@ -2764,8 +2825,27 @@ class App(object):
         paths = core.resolve_paths(self.base, s)
         seq = core.run_mode(paths) == "seq"
         if seq:
+            # 잡이 있는데 시작 시각을 적지 않은 케이스가 있으면 만들지 않는다. 빈 칸을 자동(프로세스 확인)으로 넘기지 않기 위해서다
+            unset = self.seq_unset_names(cases, picked)
+            if unset:
+                msg = ("시작 시각이 비어 있는 케이스 %d개: %s\n\n탭 4 의 시작 시각 칸에 잡을 시작할 시각을 적을 것 "
+                       "(예: 2026-11-20 10:00:00, 10:00, 앞 케이스 기준 +8:00).\n프로세스를 확인하며 앞 케이스가 끝난 뒤 이어서 "
+                       "실행하려면 '자동' 이라고 적는다. 자동은 잡이 실행되는 동안 VM 에 접속한다."
+                       % (len(unset), ", ".join(unset[:12]) + (" ..." if len(unset) > 12 else "")))
+                self.show_messages("오류 1건. 블록과 기록을 만들지 않았음. 고친 뒤 다시 생성할 것.", [msg.replace("\n\n", " ").replace("\n", " ")], [])
+                self.nb.select(4)
+                messagebox.showerror(TITLE, msg, parent=self.root)
+                return
             plan, errors, warnings, _ = core.build_seq(cases, self.run_cmds, self.mon_cmds, self.profiles, paths)
             empty = not plan
+            auto = self.seq_auto_names(cases, picked)
+            if auto and not errors:
+                poll = int(paths.get("seq_poll_sec", 1800))
+                warnings = warnings + [
+                    "시작 시각이 자동인 케이스 %d개(%s): 잡이 실행되는 동안 프로세스를 확인하러 VM 에 접속함(잡 시작 %d초 뒤 한 번, 그 뒤 "
+                    "%s마다). 접속을 없애려면 시작 시각을 적을 것" % (
+                        len(auto), ", ".join(auto[:8]) + (" ..." if len(auto) > 8 else ""), int(paths.get("seq_first_check_sec", 60)),
+                        ("%d분" % (poll // 60)) if poll % 60 == 0 else ("%d초" % poll))]
         else:
             entries, errors, warnings, _ = core.build_entries(cases, self.run_cmds, self.mon_cmds, paths)
             warnings = warnings + core.profile_warnings_time(cases)
