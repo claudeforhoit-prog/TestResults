@@ -8,7 +8,7 @@ tests/test_seq.py 가 이 파일과 원본이 같은지 확인한다.
 
 TCRUN_SH = "".join([
     '#!/bin/sh\n',
-    '# tcrun 2.7 - tcgen sequence runner. Runs on the jump VM (POSIX sh). tcgen block A installs it in the jump VM work folder\n',
+    '# tcrun 2.8 - tcgen sequence runner. Runs on the jump VM (POSIX sh). tcgen block A installs it in the jump VM work folder\n',
     '# (setting of tcgen, ~/.tcgen when empty). tcrun uses the folder it is in as its work folder (D below).\n',
     '#\n',
     '#   sh <work folder>/tcrun check <plan>       read-only checks: ESX key login, tools, VMs, settings and power, VM login, clocks\n',
@@ -38,7 +38,7 @@ TCRUN_SH = "".join([
     '# the plan (NOCHK line) is not checked: no login to its VMs while the job runs. It ends at a time (2 min before the next\n',
     '# case is prepared, or when its maximum wait ends) and its monitoring stop is registered together with its start lines.\n',
     '\n',
-    'TCRUN_VERSION=2.7\n',
+    'TCRUN_VERSION=2.8\n',
     'case "$0" in        # the work folder is the folder of this file\n',
     '  */tcrun) D=$(cd "${0%/tcrun}" 2>/dev/null && pwd) ;;\n',
     '  tcrun) D=$(pwd) ;;\n',
@@ -2019,7 +2019,7 @@ TCRUN_SH = "".join([
 APPLY_PY = "".join([
     '# -*- coding: utf-8 -*-\n',
     '"""\n',
-    'tcgen_apply.py 2.7 - apply ESXi host advanced options and VM configuration (.vmx) keys for one test case.\n',
+    'tcgen_apply.py 2.8 - apply ESXi host advanced options and VM configuration (.vmx) keys for one test case.\n',
     '\n',
     'Runs ON THE ESXi HOST with the python3 that ships with ESXi. Standard library only, Python 3.5 syntax.\n',
     'The tcgen sequence runner (tcrun, on the jump VM) uploads this file to /tmp/tcgen on the host and runs it over ssh.\n',
@@ -2064,7 +2064,7 @@ APPLY_PY = "".join([
     'import sys\n',
     'import time\n',
     '\n',
-    'VERSION = "2.7"\n',
+    'VERSION = "2.8"\n',
     'VMFS_ROOT = os.environ.get("TCGEN_VMFS_ROOT", "/vmfs/volumes")\n',
     'TMP = os.environ.get("TCGEN_TMP", "/tmp/tcgen")\n',
     'POLL = float(os.environ.get("TCGEN_POLL_SEC", "5"))\n',

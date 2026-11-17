@@ -110,6 +110,217 @@ class TimeTests(unittest.TestCase):
         self.assertIn("마지막 케이스", core.case_schedule(cs, 5, 10)[2]["stop_error"])
 
 
+class AppliedRecordTests(unittest.TestCase):
+    """적용 체크한 케이스는 이미 등록한 기록이다 (사용자 요청 2026-11-17 "테스트 명령 실행기에서 적용완료된거 순서를 바꾸거나 하면 잡 시작
+    시간 다 꼬이면서 기록이 엉키는거같아 이미 적용한 테스트 기록은 시작 시간 안바뀌게할수있어?"). 다른 케이스를 추가하거나 고치거나 순서를
+    바꿔도 그 케이스의 잡 시작, 간격, 모니터링 중지, 잡 종료 (리포트) 는 바뀌지 않는다."""
+
+    ENDS = ("2026-11-10 16:10:00", "2026-11-11 00:20:00", "2026-11-11 08:30:00")
+
+    def applied3(self):
+        cs = [case("A", "2026-11-10 10:00:00", interval=""), case("B", "", interval="8:00"), case("C", "", interval="8:00")]
+        core.recalc_starts(cs)
+        for c, e in zip(cs, self.ENDS):
+            c["applied"], c["end_time"] = True, e
+        return cs
+
+    @staticmethod
+    def rec(cs, name):
+        c = [x for x in cs if x["name"] == name][0]
+        return c["interval"], c["start"], c["stop_mode"], c["end_time"]
+
+    def stops(self, cs):
+        return dict((c["name"], s["mon_stop"]) for c, s in zip(cs, core.case_schedule(cs, 5, 10)))
+
+    def test_recalc_does_not_change_applied_cases(self):
+        cs = self.applied3()
+        want = dict((n, self.rec(cs, n)) for n in "ABC")
+        self.assertEqual([c["start"] for c in cs], ["2026-11-10 10:00:00", "2026-11-10 18:00:00", "2026-11-11 02:00:00"])
+        # A 아래에 새 케이스를 넣고 잡 시작을 입력한다 (화면의 [+ 케이스 추가], 잡 시작 입력과 같은 순서)
+        new = case("NEW", "2026-11-10 10:00:00", interval="")
+        cs.insert(1, new)
+        core.recalc_starts(cs, 1)
+        new["start"] = "2026-11-18 10:00:00"
+        core.interval_from_starts(cs, 1)
+        core.recalc_starts(cs, 2)
+        self.assertEqual(new["interval"], "192:00")
+        self.assertEqual(dict((n, self.rec(cs, n)) for n in "ABC"), want, "아래에 있는 적용 케이스의 잡 시작이 다시 계산되지 않음")
+        # 적용 케이스 바로 아래에 추가한 행: 추가한 때(from_index 행)에는 윗줄 + 간격으로 계산한다
+        cs.append(case("D", "", interval="8:00"))
+        core.recalc_starts(cs, len(cs) - 1)
+        self.assertEqual(cs[-1]["start"], "2026-11-11 10:00:00")
+        # 그 뒤로는 다시 계산하지 않는다(윗줄인 적용 케이스가 바뀌지 않으므로). 잡 시작을 직접 적은 값이 남는다
+        cs[-1]["start"] = "2026-11-18 20:00:00"
+        core.recalc_starts(cs, 1)
+        self.assertEqual(cs[-1]["start"], "2026-11-18 20:00:00", "윗줄이 적용 케이스인 행은 다른 행을 고칠 때 다시 계산하지 않음")
+        # 그 아래의 적용 체크하지 않은 행은 지금처럼 윗줄 + 간격
+        cs.append(case("E", "", interval="8:00"))
+        core.recalc_starts(cs, 1)
+        self.assertEqual(cs[-1]["start"], "2026-11-19 04:00:00")
+        self.assertEqual(dict((n, self.rec(cs, n)) for n in "ABC"), want)
+        # 적용 케이스의 간격 글자가 바뀌어도(파일을 직접 고친 경우) 잡 시작은 다시 계산하지 않는다
+        cs[2]["interval"] = "9:00"
+        core.recalc_starts(cs)
+        self.assertEqual(cs[2]["start"], "2026-11-10 18:00:00")
+        # 윗줄을 지웠을 때의 간격 맞추기도 적용 케이스와 그 바로 아래 행은 건드리지 않는다
+        del cs[1]
+        core.interval_from_starts(cs, 1)
+        core.fit_interval(cs, 1)
+        self.assertEqual(cs[1]["interval"], "9:00")
+        core.fit_interval(cs, 3)
+        self.assertEqual((cs[3]["name"], cs[3]["interval"]), ("D", "8:00"), "윗줄이 적용 케이스인 행의 간격은 그대로")
+        core.fit_interval(cs, 4)
+        self.assertEqual((cs[4]["name"], cs[4]["interval"]), ("E", "8:00"), "둘 다 적용 체크하지 않은 케이스이면 윗줄과의 차이")
+        core.interval_from_starts(cs, 99)           # 표 밖의 순번은 무시
+        core.fit_interval(cs, 99)
+
+    def test_swap_keeps_the_values_of_applied_cases(self):
+        cs = self.applied3()
+        want = dict((n, self.rec(cs, n)) for n in "ABC")
+        core.swap_cases(cs, 2, 1, True)             # C 를 위로
+        self.assertEqual([c["name"] for c in cs], ["A", "C", "B"])
+        self.assertEqual(dict((n, self.rec(cs, n)) for n in "ABC"), want, "적용 케이스끼리 바꿔도 값은 케이스를 따라감")
+        core.swap_cases(cs, 0, 1, True)
+        core.swap_cases(cs, 1, 2, True)
+        self.assertEqual([c["name"] for c in cs], ["C", "B", "A"])
+        self.assertEqual(dict((n, self.rec(cs, n)) for n in "ABC"), want)
+
+    def test_swap_of_an_applied_and_a_new_case(self):
+        cs = self.applied3()
+        want = dict((n, self.rec(cs, n)) for n in "ABC")
+        cs += [case("X", "2026-11-18 10:00:00", interval=""), case("Y", "", interval="8:00")]
+        core.interval_from_starts(cs, 3)            # 잡 시작을 직접 적은 행: 간격은 윗줄(적용 케이스 C)과의 차이
+        core.recalc_starts(cs, 4)
+        self.assertEqual((cs[3]["interval"], cs[4]["start"]), ("176:00", "2026-11-18 18:00:00"))
+        y_stop = core.case_schedule(cs, 5, 10)[4]["mon_stop"]
+        self.assertEqual(y_stop, dt.datetime(2026, 11, 19, 1, 50))      # 마지막 케이스: 잡 시작 + 간격 8:00 - 10분
+
+        def new_cases():
+            return [(c["name"], c["interval"], c["start"]) for c in cs if c["name"] in "XY"]
+
+        core.swap_cases(cs, 3, 2, True)             # 새 케이스 X 를 적용 케이스 C 위로
+        self.assertEqual([c["name"] for c in cs], ["A", "B", "X", "C", "Y"])
+        self.assertEqual(dict((n, self.rec(cs, n)) for n in "ABC"), want)
+        self.assertEqual(new_cases(), [("X", "176:00", "2026-11-18 10:00:00"), ("Y", "8:00", "2026-11-18 18:00:00")],
+                         "새 케이스의 잡 시작도 그대로. 윗줄이 적용 케이스가 된 행은 간격도 그대로")
+        self.assertEqual(core.case_schedule(cs, 5, 10)[4]["mon_stop"], y_stop, "마지막 케이스의 자동 중지 시각이 며칠 뒤로 바뀌지 않음")
+        core.recalc_starts(cs)
+        self.assertEqual(new_cases(), [("X", "176:00", "2026-11-18 10:00:00"), ("Y", "8:00", "2026-11-18 18:00:00")],
+                         "다시 계산해도 같음(윗줄이 적용 케이스인 행은 계산하지 않음)")
+        core.swap_cases(cs, 2, 3, True)             # 되돌리기: Y 의 윗줄이 다시 X
+        self.assertEqual([c["name"] for c in cs], ["A", "B", "C", "X", "Y"])
+        self.assertEqual(new_cases(), [("X", "176:00", "2026-11-18 10:00:00"), ("Y", "8:00", "2026-11-18 18:00:00")])
+        for a, b in ((3, 2), (2, 1), (1, 0)):       # X 를 맨 위로
+            core.swap_cases(cs, a, b, True)
+        self.assertEqual([c["name"] for c in cs], ["X", "A", "B", "C", "Y"])
+        self.assertEqual(dict((n, self.rec(cs, n)) for n in "ABC"), want)
+        self.assertEqual(new_cases(), [("X", "176:00", "2026-11-18 10:00:00"), ("Y", "8:00", "2026-11-18 18:00:00")])
+        self.assertEqual(core.case_schedule(cs, 5, 10)[4]["mon_stop"], y_stop)
+        # 옮긴 뒤 윗줄이 적용 체크하지 않은 케이스가 된 행: 잡 시작은 그대로 두고 간격을 그 윗줄과의 차이로 맞춘다
+        p = case("P", "2026-11-10 10:00:00", interval="")
+        p["applied"] = True
+        cs2 = [case("X", "2026-11-18 10:00:00", interval=""), p, case("Z", "2026-11-18 18:00:00", interval="200:00")]
+        core.swap_cases(cs2, 0, 1, True)
+        self.assertEqual([(c["name"], c["interval"], c["start"]) for c in cs2],
+                         [("P", "", "2026-11-10 10:00:00"), ("X", "", "2026-11-18 10:00:00"), ("Z", "8:00", "2026-11-18 18:00:00")])
+        cs2[1]["start"] = "2026-11-18 11:00:00"     # 윗줄 X 를 고치면 Z 가 같은 폭으로 따라간다
+        core.recalc_starts(cs2, 2)
+        self.assertEqual(cs2[2]["start"], "2026-11-18 19:00:00")
+        # 윗줄이 더 늦은 시각이면 간격을 비운다(그 행은 자기 잡 시작을 쓴다)
+        cs3 = [case("X", "2026-11-18 10:00:00", interval=""), copy.deepcopy(p), case("W", "2026-11-17 09:00:00", interval="167:00")]
+        core.swap_cases(cs3, 0, 1, True)
+        self.assertEqual([(c["name"], c["interval"], c["start"]) for c in cs3][2], ("W", "", "2026-11-17 09:00:00"))
+
+    def test_swap_of_two_new_cases_keeps_the_times_in_place(self):
+        cs = [case("A", "2026-11-20 00:00:00"), case("B", "", interval="8:00"), case("C", "", interval="6:00")]
+        core.recalc_starts(cs)
+        cs[1]["end_time"] = "2026-11-20 15:00:00"
+        times = [(c["interval"], c["start"], c["end_time"]) for c in cs]
+        core.swap_cases(cs, 1, 2, True)
+        self.assertEqual([c["name"] for c in cs], ["A", "C", "B"])
+        self.assertEqual([(c["interval"], c["start"], c["end_time"]) for c in cs], times, "시각 지정: 적용 체크하지 않은 케이스끼리는 시각이 자리에 남음")
+        core.swap_cases(cs, 1, 2, False)            # 순서 실행: 값이 모두 케이스를 따라간다
+        self.assertEqual([(c["name"], c["start"]) for c in cs], [("A", times[0][1]), ("B", times[2][1]), ("C", times[1][1])])
+
+    def test_auto_monitoring_stop_of_applied_cases_is_fixed(self):
+        cs = self.applied3()
+        for c in cs:
+            c["applied"] = False
+        self.assertFalse(core.freeze_applied(cs, 5, 10), "적용 체크하지 않은 케이스는 고정하지 않음")
+        first = self.stops(cs)
+        self.assertEqual(first["A"], dt.datetime(2026, 11, 10, 17, 50))
+        self.assertEqual(first["C"], dt.datetime(2026, 11, 11, 9, 50))
+        for c in cs:
+            c["applied"] = True
+        self.assertTrue(core.freeze_applied(cs, 5, 10))
+        self.assertEqual([c["applied_stop"] for c in cs], ["2026-11-10 17:50:00", "2026-11-11 01:50:00", "2026-11-11 09:50:00"])
+        self.assertFalse(core.freeze_applied(cs, 5, 10), "이미 고정한 값은 다시 계산하지 않음")
+        # 다음 케이스가 달라져도(추가, 순서 바꾸기, 중지 N분 설정 변경) 고정한 값을 쓴다
+        cs.insert(1, case("NEW", "2026-11-18 10:00:00", interval=""))
+        core.swap_cases(cs, 3, 2, True)
+        self.assertEqual([c["name"] for c in cs], ["A", "NEW", "C", "B"])
+        got = dict((c["name"], s["mon_stop"]) for c, s in zip(cs, core.case_schedule(cs, 5, 30)))
+        self.assertEqual(dict((n, got[n]) for n in "ABC"), first)
+        # 직접 입력, 중지 없음은 고정할 값이 없다. 자동인데 예전에 적어 둔 직접 입력 시각(stop_time)이 남아 있어도 쓰지 않는다
+        cs2 = self.applied3()
+        cs2[0]["stop_mode"], cs2[0]["stop_time"] = "manual", "2026-11-10 12:00:00"
+        cs2[1]["stop_mode"] = "none"
+        cs2[2]["stop_time"] = "2026-11-09 00:00:00"
+        self.assertTrue(core.freeze_applied(cs2, 5, 10))
+        self.assertEqual([c["applied_stop"] for c in cs2], ["", "", "2026-11-11 09:50:00"])
+        self.assertEqual(self.stops(cs2), {"A": dt.datetime(2026, 11, 10, 12, 0), "B": None, "C": dt.datetime(2026, 11, 11, 9, 50)})
+        # 계산할 수 없는 케이스(마지막 케이스에 간격 없음)는 고정하지 않는다
+        cs3 = self.applied3()
+        cs3[2]["interval"] = ""
+        core.freeze_applied(cs3, 5, 10)
+        self.assertEqual(cs3[2]["applied_stop"], "")
+        self.assertIn("마지막 케이스", core.case_schedule(cs3, 5, 10)[2]["stop_error"])
+        # 적용 체크를 끄면 고정한 값을 지우고 다시 계산한다. 저장할 때도 적용 체크하지 않은 케이스에는 남기지 않는다
+        cs[0]["applied"] = False
+        self.assertEqual(core._clean_case(cs[0])["applied_stop"], "")
+        self.assertTrue(core.freeze_applied(cs, 5, 10))
+        self.assertEqual(cs[0]["applied_stop"], "")
+        self.assertEqual(core.case_schedule(cs, 5, 10)[0]["mon_stop"], dt.datetime(2026, 11, 18, 9, 50), "다음 케이스 NEW 기준으로 다시 계산")
+        # 선택 창에서 고른 케이스는 적용 체크를 끈 사본으로 생성한다: 고정한 값이 아니라 지금 표로 계산한다
+        picked = copy.deepcopy(cs)
+        picked[2]["applied"] = False
+        self.assertEqual(core.case_schedule(picked, 5, 10)[2]["mon_stop"], dt.datetime(2026, 11, 10, 17, 50))
+        self.assertEqual(core.case_schedule(cs, 5, 10)[2]["mon_stop"], dt.datetime(2026, 11, 11, 9, 50))
+
+    def test_new_case_above_an_earlier_applied_case(self):
+        """새 케이스의 바로 아랫줄이 지난 적용 케이스이면 자동 중지 시각을 정할 수 없다. 적용 케이스의 값을 바꿔 맞추지 않고, 할 일을 알린다."""
+        cs = self.applied3()
+        core.freeze_applied(cs, 5, 10)
+        new = case("NEW", "2026-11-18 10:00:00", interval="")
+        cs.insert(1, new)
+        core.interval_from_starts(cs, 1)
+        core.recalc_starts(cs, 2)
+        s = core.case_schedule(cs, 5, 10)
+        self.assertIn("바로 아랫줄 케이스 B 의 잡 시작(2026-11-10 18:00:00)이 이 케이스의 잡 시작보다 늦지 않아", s[1]["stop_error"])
+        self.assertIn("그 케이스 아래로 옮기거나 모니터링 중지 칸에서 직접 입력", s[1]["stop_error"])
+        self.assertEqual([x["stop_error"] for x in (s[0], s[2], s[3])], ["", "", ""])
+        self.assertEqual(s[0]["mon_stop"], dt.datetime(2026, 11, 10, 17, 50), "적용 케이스 A 의 고정한 중지 시각은 그대로")
+        core.swap_cases(cs, 1, 2, True)
+        core.swap_cases(cs, 2, 3, True)             # 새 케이스를 지난 케이스들 아래로
+        self.assertEqual([c["name"] for c in cs], ["A", "B", "C", "NEW"])
+        s = core.case_schedule(cs, 5, 10)
+        self.assertEqual((cs[3]["start"], s[3]["stop_error"]), ("2026-11-18 10:00:00", ""))
+        # 직접 입력한 중지 시각이 시작보다 이르면 예전과 같은 오류 글
+        cs[3]["stop_mode"], cs[3]["stop_time"] = "manual", "2026-11-18 09:00:00"
+        self.assertEqual(core.case_schedule(cs, 5, 10)[3]["stop_error"], "모니터링 중지 시각이 모니터링 시작 시각보다 빠르거나 같음")
+
+    def test_fixed_stop_is_saved_in_the_case_file(self):
+        cs = self.applied3()
+        core.freeze_applied(cs, 5, 10)
+        text = core.cases_to_csv(cs)
+        rows = list(csv.reader(io.StringIO(text)))
+        self.assertEqual(rows[0][-1], "모니터링 중지 (적용 때 고정)")
+        self.assertEqual([r[-1] for r in rows[1:] if r[0] == "케이스"], ["2026-11-10 17:50:00", "2026-11-11 01:50:00", "2026-11-11 09:50:00"])
+        self.assertEqual([c["applied_stop"] for c in core.cases_from_csv(text)], [c["applied_stop"] for c in cs])
+        old = "\r\n".join(",".join(r[:-1]) for r in rows) + "\r\n"
+        self.assertEqual([c["applied_stop"] for c in core.cases_from_csv(old)], ["", "", ""], "이 열이 없는 예전 파일도 읽는다")
+
+
 class CommandTests(unittest.TestCase):
     def test_vm_percent(self):
         r = core.render_command("/x/a.sh -f '%Y' -g \\%m <실행시각>")

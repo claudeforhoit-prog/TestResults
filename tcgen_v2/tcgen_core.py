@@ -40,7 +40,7 @@ import shutil
 import sys
 import time
 
-VERSION = "2.7"
+VERSION = "2.8"
 KST_TO_UTC = dt.timedelta(hours=9)
 CHUNK = 100            # 붙여넣는 글 한 줄에 담는 명령 조각 길이(문자 수)
 NONE_JOB = "(없음)"
@@ -65,6 +65,7 @@ CASE_DEFAULTS = {
     "esx_profiles": [],    # 순서 실행: 케이스 시작 전에 적용할 ESX 호스트 설정 프로파일 이름 (탭 3, 대상 ESX)
     "max_wait": "",        # 순서 실행: 잡 종료를 기다리는 최대 시간 (시간:분). 비우면 제한 없음
     "seq_start": "",       # 순서 실행: 잡을 시작할 시각. 비우면 자동(앞 케이스가 끝난 뒤). '10:00', '2026-11-20 10:00:00', '+8:00'(앞 케이스 시작 + 8시간)
+    "applied_stop": "",    # 시각 지정: 적용 체크한 케이스의 자동 모니터링 중지 시각을 고정해 둔 값(freeze_applied). 적용 체크를 끄면 지운다
 }
 DEFAULT_CASE_DIR = "testcases"
 DEFAULT_RECORD = "test_record.csv"
@@ -314,11 +315,14 @@ def _clean_vm(v):
 
 def _clean_case(c):
     d = {"applied": bool(c.get("applied", False))}
-    for k in ("name", "esx", "interval", "start", "stop_mode", "stop_time", "desc", "group", "end_time", "max_wait", "seq_start"):
+    for k in ("name", "esx", "interval", "start", "stop_mode", "stop_time", "desc", "group", "end_time", "max_wait", "seq_start",
+              "applied_stop"):
         v = c.get(k, CASE_DEFAULTS[k])
         d[k] = "" if v is None else str(v)
     if d["stop_mode"] not in ("auto", "manual", "none"):
         d["stop_mode"] = "auto"
+    if not d["applied"]:
+        d["applied_stop"] = ""          # 고정한 값은 적용 체크한 케이스에만 둔다
     d["esx_profiles"] = _names(c.get("esx_profiles"))
     if "vms" in c:
         d["vms"] = [_clean_vm(v) for v in (c.get("vms") or []) if isinstance(v, dict)]
@@ -337,7 +341,7 @@ def _clean_case(c):
 # 테스트 케이스 CSV: 화면의 [다른 이름으로 저장] 이 만드는 형식. 케이스 행 아래에 그 케이스의 VM 행이 온다.
 CASE_CSV_HEADER = ["구분", "적용", "케이스 이름", "설명", "ESX 호스트", "VM 이름", "잡", "모니터링", "설정", "최대 대기", "테스트 그룹",
                    "종료 기준 VM", "간격", "잡 시작", "모니터링 중지", "모니터링 중지 시각", "잡 종료 (리포트)", "시작 시각 (순서 실행)",
-                   "전원"]
+                   "전원", "모니터링 중지 (적용 때 고정)"]
 STOP_LABELS = {"auto": "자동", "manual": "직접 입력", "none": "중지 없음"}
 CSV_TRUE = ("예", "Y", "YES", "1", "TRUE", "V", "O")
 
@@ -373,10 +377,10 @@ def cases_to_csv(cases):
         c = _clean_case(c)
         w.writerow(["케이스", "예" if c["applied"] else "", c["name"], c["desc"], c["esx"], "", "", _join_names(c["esx_monitors"]),
                     _join_names(c["esx_profiles"]), c["max_wait"], c["group"], "", c["interval"], c["start"],
-                    STOP_LABELS[c["stop_mode"]], c["stop_time"], c["end_time"], c["seq_start"], ""])
+                    STOP_LABELS[c["stop_mode"]], c["stop_time"], c["end_time"], c["seq_start"], "", c["applied_stop"]])
         for v in c["vms"]:
             w.writerow(["VM", "", "", "", "", v["name"], v["job"], _join_names(v["monitors"]), _join_names(v["profiles"]), "", "",
-                        "기준" if v["end_ref"] else "", "", "", "", "", "", "", POWER_LABELS[v["power"]]])
+                        "기준" if v["end_ref"] else "", "", "", "", "", "", "", POWER_LABELS[v["power"]], ""])
     return buf.getvalue()
 
 
@@ -405,7 +409,7 @@ def cases_from_csv(text):
                         "esx_profiles": _split_names(cell(r, "설정")), "max_wait": cell(r, "최대 대기"), "group": cell(r, "테스트 그룹"),
                         "interval": cell(r, "간격"), "start": cell(r, "잡 시작"), "stop_mode": stop_by_label.get(sm, sm or "auto"),
                         "stop_time": cell(r, "모니터링 중지 시각"), "end_time": cell(r, "잡 종료 (리포트)"),
-                        "seq_start": cell(r, "시작 시각 (순서 실행)")})
+                        "seq_start": cell(r, "시작 시각 (순서 실행)"), "applied_stop": cell(r, "모니터링 중지 (적용 때 고정)")})
         elif kind == "VM":
             if not out:
                 raise ValueError("데이터 %d번째 행: 케이스 행보다 VM 행이 먼저 나옴" % n)
@@ -509,7 +513,7 @@ def new_vm(name=""):
 def new_case(esx="", start="", count=2, prefix="ev"):
     return {"applied": False, "name": "", "esx": esx, "vms": [new_vm(vm_name(esx, k + 1, prefix)) for k in range(count)],
             "esx_monitors": [], "interval": "", "start": start, "stop_mode": "auto", "stop_time": "",
-            "desc": "", "group": "", "end_time": "", "esx_profiles": [], "max_wait": "", "seq_start": ""}
+            "desc": "", "group": "", "end_time": "", "esx_profiles": [], "max_wait": "", "seq_start": "", "applied_stop": ""}
 
 
 def rename_vms_for_esx(c, old, new, prefix="ev"):
@@ -961,9 +965,16 @@ def fmt_interval(td):
     return "%d:%02d" % (total // 60, total % 60)
 
 
+# 적용 체크한 케이스는 이미 등록한 기록이다(사용자 요청 2026-11-17 "이미 적용한 테스트 기록은 시작 시간 안바뀌게"). 그 케이스의 잡 시작,
+# 간격, 모니터링 중지, 잡 종료 (리포트) 는 다른 케이스를 추가하거나 고치거나 순서를 바꿔도 달라지지 않는다. 아래 함수들이 이 규칙을 지킨다.
 def recalc_starts(cases, from_index=1):
-    """from_index 행부터 아래로, 간격이 있는 행의 잡 시작 = 윗줄 잡 시작 + 간격 으로 다시 계산한다."""
+    """from_index 행부터 아래로, 간격이 있는 행의 잡 시작 = 윗줄 잡 시작 + 간격 으로 다시 계산한다.
+    적용 체크한 행은 바꾸지 않는다. 윗줄이 적용 체크한 케이스인 행도 다시 계산하지 않는다: 윗줄이 바뀌지 않으므로 계산할 일이 없고,
+    순서를 바꿔 그 자리에 온 행의 잡 시작을 지난 케이스 기준으로 바꾸면 안 된다. from_index 행만은 사용자가 방금 간격을 고치거나 새로
+    추가한 행이므로 윗줄이 적용 체크한 케이스여도 계산한다."""
     for i in range(max(1, from_index), len(cases)):
+        if cases[i].get("applied") or (i != from_index and cases[i - 1].get("applied")):
+            continue
         try:
             iv = parse_interval(cases[i].get("interval"))
             prev = parse_dt(cases[i - 1].get("start"))
@@ -975,8 +986,8 @@ def recalc_starts(cases, from_index=1):
 
 
 def interval_from_starts(cases, i):
-    """i 행의 잡 시작을 직접 고쳤을 때 그 행 간격을 윗줄과의 차이로 맞춘다. 첫 행 간격은 그대로 둔다."""
-    if i <= 0:
+    """i 행의 잡 시작을 직접 고쳤을 때 그 행 간격을 윗줄과의 차이로 맞춘다. 첫 행 간격과 적용 체크한 행의 간격은 그대로 둔다."""
+    if i <= 0 or i >= len(cases) or cases[i].get("applied"):
         return
     try:
         cur = parse_dt(cases[i].get("start"))
@@ -988,8 +999,71 @@ def interval_from_starts(cases, i):
     cases[i]["interval"] = fmt_interval(diff) if diff.total_seconds() > 0 else ""
 
 
+def fit_interval(cases, i):
+    """행을 옮기거나 지워 i 행의 윗줄이 달라졌을 때 부른다. i 행과 윗줄이 모두 적용 체크하지 않은 케이스이면 i 행의 잡 시작은 그대로 두고
+    간격을 윗줄과의 차이로 맞춘다(뒤에 윗줄을 고치면 i 행이 같은 폭으로 따라 움직인다). 윗줄이 적용 체크한 케이스이면 i 행을 그대로 둔다:
+    그 행은 다시 계산되지 않고(recalc_starts), 간격을 지난 케이스와의 차이(며칠)로 바꾸면 마지막 케이스의 자동 모니터링 중지 시각
+    (잡 시작 + 간격)이 며칠 뒤가 된다."""
+    if 0 < i < len(cases) and not cases[i].get("applied") and not cases[i - 1].get("applied"):
+        interval_from_starts(cases, i)
+
+
+TIME_FIELDS = ("start", "interval", "stop_mode", "stop_time", "end_time")      # 시각 지정에서 쓰는 케이스의 시각 값
+
+
+def swap_cases(cases, i, j, time_mode):
+    """탭 4 의 [위로], [아래로]: 이웃한 i 행과 j 행의 케이스를 서로 바꾼다.
+    순서 실행(time_mode 가 False): 케이스의 값은 모두 케이스를 따라간다.
+    시각 지정: 두 케이스 모두 적용 체크하지 않았으면 순서만 바꾸고 잡 시작, 간격, 모니터링 중지 설정, 잡 종료 (리포트) 는 그 자리에
+    남긴다(자리에 정해 둔 시각에 넣을 케이스를 바꾸는 것). 하나라도 적용 체크한 케이스이면 값이 모두 케이스를 따라간다. 이때는 적용
+    체크하지 않은 케이스의 잡 시작도 바꾸지 않고, 윗줄이 달라진 행의 간격만 맞춘다(fit_interval)."""
+    a, b = cases[i], cases[j]
+    follow = (not time_mode) or bool(a.get("applied")) or bool(b.get("applied"))
+    if not follow:
+        for key in TIME_FIELDS:
+            a[key], b[key] = b.get(key, ""), a.get(key, "")
+    cases[i], cases[j] = b, a
+    if time_mode and follow:
+        for k in (min(i, j), max(i, j), max(i, j) + 1):
+            fit_interval(cases, k)
+
+
+def _applied_stop(c):
+    """적용 체크한 케이스에 고정해 둔 자동 모니터링 중지 시각. 적용 체크하지 않았거나 고정한 값이 없으면 None."""
+    if not c.get("applied"):
+        return None
+    try:
+        return parse_dt(c.get("applied_stop"))
+    except ValueError:
+        return None
+
+
+def freeze_applied(cases, mon_lead_min, stop_lead_min):
+    """시각 지정: 적용 체크한 케이스 가운데 모니터링 중지가 자동이고 아직 고정한 값이 없는 케이스에, 지금 표로 계산한 중지 시각을
+    applied_stop 으로 적어 둔다. 자동 중지 시각은 다음 케이스의 잡 시작으로 계산하므로, 적어 두지 않으면 다음 케이스가 바뀔 때
+    (추가, 삭제, 순서 바꾸기) 이미 등록한 케이스의 중지 시각이 다르게 보인다. 적용 체크하지 않은 케이스의 값은 지운다.
+    바꾼 것이 있으면 True."""
+    changed, sched = False, None
+    for i, c in enumerate(cases):
+        if not c.get("applied"):
+            if c.get("applied_stop"):
+                c["applied_stop"] = ""
+                changed = True
+            continue
+        if (c.get("stop_mode") or "auto") != "auto" or _applied_stop(c) is not None:
+            continue
+        if sched is None:
+            sched = case_schedule(cases, mon_lead_min, stop_lead_min)
+        s = sched[i]
+        if s.get("mon_stop") is not None and not s.get("stop_error"):
+            c["applied_stop"] = fmt_dt(s["mon_stop"])
+            changed = True
+    return changed
+
+
 def case_schedule(cases, mon_lead_min, stop_lead_min):
-    """케이스마다 잡 시작, 모니터링 시작, 모니터링 중지 시각과 시각 오류를 반환한다."""
+    """케이스마다 잡 시작, 모니터링 시작, 모니터링 중지 시각과 시각 오류를 반환한다.
+    적용 체크한 케이스에 고정해 둔 자동 중지 시각(applied_stop)이 있으면 다음 케이스로 계산하지 않고 그 값을 쓴다."""
     starts = []
     errs = []
     for c in cases:
@@ -1006,6 +1080,7 @@ def case_schedule(cases, mon_lead_min, stop_lead_min):
         if starts[i] is None:
             out.append(r)
             continue
+        from_next = False
         r["mon_start"] = starts[i] - dt.timedelta(minutes=mon_lead_min)
         mode = c.get("stop_mode") or "auto"
         if mode == "none":
@@ -1015,9 +1090,12 @@ def case_schedule(cases, mon_lead_min, stop_lead_min):
                 r["mon_stop"] = parse_dt(c.get("stop_time"))
             except ValueError as e:
                 r["stop_error"] = "모니터링 중지 " + str(e)
+        elif _applied_stop(c) is not None:
+            r["mon_stop"] = _applied_stop(c)
         elif i + 1 < n:
             if starts[i + 1] is not None:
                 r["mon_stop"] = starts[i + 1] - dt.timedelta(minutes=stop_lead_min)
+                from_next = True
             else:
                 r["stop_error"] = "다음 케이스 잡 시작 시각이 맞지 않아 자동 중지 시각을 정할 수 없음"
         else:
@@ -1032,6 +1110,11 @@ def case_schedule(cases, mon_lead_min, stop_lead_min):
                                    "간격을 넣거나, 모니터링 중지 칸에서 직접 입력 또는 중지 없음을 고를 것")
         if r["mon_stop"] is not None and r["mon_stop"] <= r["mon_start"]:
             r["stop_error"] = "모니터링 중지 시각이 모니터링 시작 시각보다 빠르거나 같음"
+            if from_next and starts[i + 1] <= starts[i]:
+                # 바로 아랫줄이 더 이른 케이스(지난 기록)일 때: 무엇을 하면 되는지 적는다
+                r["stop_error"] = ("바로 아랫줄 케이스 %s 의 잡 시작(%s)이 이 케이스의 잡 시작보다 늦지 않아 자동 중지 시각을 정할 수 없음. "
+                                   "이 케이스를 그 케이스 아래로 옮기거나 모니터링 중지 칸에서 직접 입력을 고를 것"
+                                   % ((cases[i + 1].get("name") or "").strip() or "(이름 없음)", fmt_dt(starts[i + 1])))
         out.append(r)
     return out
 

@@ -415,7 +415,7 @@ class PlanTests(unittest.TestCase):
         res = gen(self.two(), st=settings(vm_user="tester", esx_addr="esx01=10.0.0.11;esx09=10.0.0.19", jump_log_dir="/data/log"))
         self.assertEqual(res["errors"], [])
         want = """TCGEN-PLAN 2
-VER 2.7
+VER 2.8
 RUNID 20261116-143000
 LOGDIR /data/log
 GEN 2026-11-16 14:30:00
@@ -643,7 +643,7 @@ class SettingsAndDataTests(unittest.TestCase):
         return snap
 
     def test_names_differ_from_v1(self):
-        self.assertEqual(core.VERSION, "2.7")
+        self.assertEqual(core.VERSION, "2.8")
         for k in self.keys:
             os.environ.pop(k, None)
         self.assertEqual(os.path.basename(core.default_data_dir()), "tcgen2_data")
@@ -984,8 +984,9 @@ class CaseFileTests(unittest.TestCase):
         self.assertEqual((first["적용"], first["케이스 이름"], first["ESX 호스트"], first["모니터링"], first["설정"], first["최대 대기"],
                           first["모니터링 중지"], first["잡 종료 (리포트)"], first["시작 시각 (순서 실행)"]),
                          ("예", "spr-base", "spr01", "host_mon", "ht_wholecore_1", "12:00", "직접 입력", "2026-11-20 11:50:00", "10:00"))
-        self.assertEqual(rows[0][-2:], ["시작 시각 (순서 실행)", "전원"], "새 열은 맨 뒤 (이 열이 없는 예전 파일도 읽힌다)")
-        old = "\r\n".join(",".join(r[:-2]) for r in csv.reader(io.StringIO(core.cases_to_csv([case("old-file")])))) + "\r\n"
+        self.assertEqual(rows[0][-3:], ["시작 시각 (순서 실행)", "전원", "모니터링 중지 (적용 때 고정)"],
+                         "새 열은 맨 뒤 (이 열이 없는 예전 파일도 읽힌다)")
+        old = "\r\n".join(",".join(r[:-3]) for r in csv.reader(io.StringIO(core.cases_to_csv([case("old-file")])))) + "\r\n"
         self.assertEqual(core.cases_from_csv(old)[0]["seq_start"], "", "시작 시각 열이 없는 파일은 자동으로 읽는다")
         self.assertEqual(core.cases_from_csv(old)[0]["vms"][0]["power"], "on", "전원 열이 없는 파일의 VM 은 켬")
         self.assertEqual([dict(zip(rows[0], r))["전원"] for r in rows[1:5]], ["", "켬", "켬", "끔"], "케이스 행은 비우고 VM 행은 켬, 끔")

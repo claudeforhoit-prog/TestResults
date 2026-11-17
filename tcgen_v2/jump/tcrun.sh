@@ -1,5 +1,5 @@
 #!/bin/sh
-# tcrun 2.7 - tcgen sequence runner. Runs on the jump VM (POSIX sh). tcgen block A installs it in the jump VM work folder
+# tcrun 2.8 - tcgen sequence runner. Runs on the jump VM (POSIX sh). tcgen block A installs it in the jump VM work folder
 # (setting of tcgen, ~/.tcgen when empty). tcrun uses the folder it is in as its work folder (D below).
 #
 #   sh <work folder>/tcrun check <plan>       read-only checks: ESX key login, tools, VMs, settings and power, VM login, clocks
@@ -29,7 +29,7 @@
 # the plan (NOCHK line) is not checked: no login to its VMs while the job runs. It ends at a time (2 min before the next
 # case is prepared, or when its maximum wait ends) and its monitoring stop is registered together with its start lines.
 
-TCRUN_VERSION=2.7
+TCRUN_VERSION=2.8
 case "$0" in        # the work folder is the folder of this file
   */tcrun) D=$(cd "${0%/tcrun}" 2>/dev/null && pwd) ;;
   tcrun) D=$(pwd) ;;

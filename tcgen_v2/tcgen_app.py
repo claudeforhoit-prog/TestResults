@@ -1037,7 +1037,12 @@ class App(object):
             "+ 케이스 추가: 선택한 케이스를 VM 구성까지 복사한다. 잡 시작 = 윗줄 잡 시작 + 간격. 설명, 테스트 그룹, 종료 기준 VM 은 "
             "복사하고 잡 종료 (리포트) 는 비운다.",
             "삭제, 위로, 아래로: 케이스 행을 고르면 케이스를, VM 행을 고르면 그 VM 을 대상으로 한다. "
-            "위로, 아래로는 순서만 바꾸고 시각은 그 행에 남는다.",
+            "위로, 아래로는 적용 체크하지 않은 케이스끼리는 순서만 바꾸고 시각은 그 행에 남는다.",
+            "적용 체크한 케이스는 등록한 기록으로 고정한다: 간격, 잡 시작, 모니터링 중지 칸은 고칠 수 없고, 다른 케이스를 추가하거나 "
+            "삭제하거나 순서를 바꿔도 그 케이스의 간격, 잡 시작, 모니터링 중지, 잡 종료 (리포트) 는 바뀌지 않는다. 위로, 아래로 옮기면 "
+            "이 값들이 케이스와 함께 움직인다. 고치려면 적용 체크를 끄고 고친 뒤 다시 체크한다.",
+            "바로 윗줄이 적용 체크한 케이스인 행은 윗줄과 이어지지 않는다: 다른 행을 고칠 때 다시 계산하지 않고, 잡 시작을 직접 적어도 "
+            "간격을 바꾸지 않는다. 그 행을 추가한 직후와 그 행의 간격을 직접 고칠 때만 잡 시작 = 윗줄 잡 시작 + 간격으로 계산한다.",
             "시각 형식: 2026-11-09 10:00:00, 간격 형식: 12:00",
             "설명: 케이스 행에 시험 조건을 적는다(한글 가능). 테스트 기록 CSV 와 리포트용 CSV 에 들어가고, 붙여넣기 블록과 "
             "crontab 줄에는 들어가지 않는다.",
@@ -1127,8 +1132,8 @@ class App(object):
                 dict(key="prof", title="설정", width=200, popup=self.edit_profiles),
                 dict(key="max_wait", title="최대 대기", width=80),
                 dict(key="seq_start", title="시작 시각", width=150),
-                dict(key="interval", title="간격", width=50),
-                dict(key="start", title="잡 시작 (KST)", width=140),
+                dict(key="interval", title="간격", width=50, popup=self.locked_notice),
+                dict(key="start", title="잡 시작 (KST)", width=140, popup=self.locked_notice),
                 dict(key="mon_start", title="모니터링 시작", width=95),
                 dict(key="mon_stop", title="모니터링 중지", width=135, popup=self.edit_stop),
                 dict(key="group", title="테스트 그룹", width=90),
@@ -1167,7 +1172,8 @@ class App(object):
     CASE_HINT = {
         "time": "칸을 두 번 누르거나 행을 고르고 Enter 를 누르면 고친다. 케이스 행(옅은 파란 바탕)은 케이스 설정, VM 행(└)은 그 VM 의 잡과 모니터링. "
                 "[명령어 생성] 을 누르면 넣을 케이스를 고르는 창이 열린다. 테스트 그룹, 잡 종료 (리포트), 종료 기준 VM 은 "
-                "리포트용 CSV 에만 들어간다. 자세한 설명은 [도움말].",
+                "리포트용 CSV 에만 들어간다. 적용 체크한 케이스의 간격, 잡 시작, 모니터링 중지는 고정된다(순서를 바꿔도 케이스와 함께 "
+                "움직인다). 자세한 설명은 [도움말].",
         "seq": "순서 실행: 점프 VM 이 케이스를 표의 순서대로 진행하고, 잡의 프로세스가 끝난 것을 확인한 뒤 다음 케이스로 넘어간다. "
                "시작 시각 칸을 비우면 자동(앞 케이스의 잡이 끝나고 '케이스 사이 간격' 뒤), 시각(10:00)이나 +간격(+8:00 = 앞 케이스 시작 "
                "8시간 뒤)을 적으면 그 시각에 잡을 시작하고 잡을 확인하지 않는다. "
@@ -2023,7 +2029,20 @@ class App(object):
     # ------------------------------------------------------------ 탭 4 (케이스 행 iid = c<케이스 순번>, VM 행 = c<순번>v<VM 순번>)
     def calc_schedule(self):
         ld = self.leads() or (self.settings["mon_lead_min"], self.settings["stop_lead_min"])
+        # 시각 지정: 적용 체크한 케이스의 자동 모니터링 중지 시각을 고정해 둔다. 다음 케이스가 바뀌어도 등록한 기록이 달라지지 않게 한다
+        if not self.loading and self.mode() == "time" and core.freeze_applied(self.cases, ld[0], ld[1]):
+            self.mark_cases()
         self.sched = core.case_schedule(self.cases, ld[0], ld[1])
+
+    LOCKED_TEXT = ("적용 체크한 케이스의 간격, 잡 시작, 모니터링 중지는 고칠 수 없음.\n\n이미 등록한 케이스의 기록이라 고정해 둔다. "
+                   "다른 케이스를 추가하거나 순서를 바꿔도 이 값은 바뀌지 않는다.\n고치려면 적용 체크를 먼저 끄고, 고친 뒤 다시 체크할 것.")
+
+    def is_locked(self, c):
+        """시각 지정에서 적용 체크한 케이스의 시각 칸(간격, 잡 시작, 모니터링 중지)은 고정한다."""
+        return bool(c and c.get("applied")) and self.mode() == "time"
+
+    def locked_notice(self, iid=None):
+        messagebox.showinfo(TITLE, self.LOCKED_TEXT, parent=self.root)
 
     @staticmethod
     def parse_iid(iid):
@@ -2067,6 +2086,8 @@ class App(object):
         if c is None:
             return "readonly"
         if k is None:
+            if key in ("interval", "start") and self.is_locked(c):
+                return "popup"              # 고치는 칸 대신 고정 안내(locked_notice)를 보인다
             return {"name": "entry", "desc": "entry", "esx": "entry", "mon": "popup", "interval": "entry", "start": "entry",
                     "mon_stop": "popup", "group": "entry", "end_time": "entry", "prof": "popup",
                     "max_wait": "entry", "seq_start": "entry"}.get(key, "readonly")
@@ -2147,6 +2168,8 @@ class App(object):
         if c is None or k is not None:
             return
         c["applied"] = not c.get("applied")
+        if not c["applied"]:
+            c["applied_stop"] = ""          # 고정해 둔 자동 중지 시각을 지운다. 다시 체크하면 그때의 표로 다시 고정한다
         self.mark_cases()
         self.t_case.refresh(iid)
 
@@ -2165,6 +2188,9 @@ class App(object):
         if c is None:
             return
         t = text.strip()
+        if k is None and key in ("interval", "start") and self.is_locked(c):
+            self.locked_notice()
+            return
         if k is None:
             if key in ("name", "esx"):
                 if t and not core.NAME_RE.match(t):
@@ -2193,7 +2219,9 @@ class App(object):
                     messagebox.showerror(TITLE, str(e), parent=self.root)
                     return
                 c["start"] = core.fmt_dt(d)
-                core.interval_from_starts(self.cases, i)
+                # 간격을 윗줄과의 차이로 맞춘다. 윗줄이 적용 체크한 케이스이면 간격을 그대로 둔다(지난 케이스와의 차이는 며칠이라, 그 값을
+                # 간격에 넣으면 마지막 케이스의 자동 모니터링 중지 시각이 며칠 뒤가 된다)
+                core.fit_interval(self.cases, i)
                 core.recalc_starts(self.cases, i + 1)
             elif key == "max_wait":
                 try:
@@ -2257,6 +2285,7 @@ class App(object):
             row = copy.deepcopy(src)
             row["name"] = unique_name(src.get("name", ""), set(x.get("name", "") for x in self.cases))
             row["applied"] = False          # 새로 만든 케이스는 아직 등록 전
+            row["applied_stop"] = ""
             row["end_time"] = ""            # 잡 종료는 케이스마다 다르므로 복사하지 않음 (자동)
             # 시각은 복사하지 않는다(자동: 앞 케이스가 끝난 뒤 시작). +간격은 복사한다(앞 케이스 시작 시각 기준이라 그대로 뜻이 맞음)
             row["seq_start"] = src.get("seq_start", "") if (src.get("seq_start") or "").startswith("+") else ""
@@ -2304,13 +2333,13 @@ class App(object):
                                    % (cname, len(c.get("vms") or [])), parent=self.root):
             return
         del self.cases[i]
-        if i < len(self.cases):
-            core.interval_from_starts(self.cases, i)
+        core.fit_interval(self.cases, i)        # 윗줄이 달라진 행의 간격 맞추기. 적용 체크한 케이스와 그 바로 아래 행은 그대로 둔다
         self.mark_cases()
         self.t_case.refresh(("c%d" % min(i, len(self.cases) - 1)) if self.cases else None)
 
     def move_row(self, step):
-        """케이스 행: 케이스 순서만 바꾸고 잡 시작, 간격, 모니터링 중지 설정, 잡 종료 (리포트) 는 그 자리에 남긴다.
+        """케이스 행: 케이스 순서를 바꾼다. 시각 지정에서 두 케이스 모두 적용 체크하지 않았으면 잡 시작, 간격, 모니터링 중지 설정,
+        잡 종료 (리포트) 는 그 자리에 남기고, 하나라도 적용 체크한 케이스이면 값이 모두 케이스를 따라간다(core.swap_cases).
         VM 행: 케이스 안에서 VM 순서를 바꾼다."""
         self.t_case.finish_edit()
         i, k, c, v = self._selected_case()
@@ -2328,11 +2357,7 @@ class App(object):
         j = i + step
         if not (0 <= j < len(self.cases)):
             return
-        a, b = self.cases[i], self.cases[j]
-        if self.mode() == "time":           # 시각 지정: 시각은 그 자리에 남긴다. 순서 실행: 케이스의 값은 모두 케이스를 따라간다
-            for key in ("start", "interval", "stop_mode", "stop_time", "end_time"):
-                a[key], b[key] = b.get(key, ""), a.get(key, "")
-        self.cases[i], self.cases[j] = b, a
+        core.swap_cases(self.cases, i, j, self.mode() == "time")
         self.mark_cases()
         self.t_case.refresh("c%d" % j)
 
@@ -2446,6 +2471,9 @@ class App(object):
         self.t_case.finish_edit()
         i, k, c, v = self._get(iid)
         if c is None or k is not None:
+            return
+        if self.is_locked(c):
+            self.locked_notice()
             return
         if not core.case_has_monitors(c):
             messagebox.showinfo(TITLE, "이 케이스는 모니터링을 고르지 않았음. VM 행이나 케이스 행의 모니터링 칸에서 먼저 선택할 것",

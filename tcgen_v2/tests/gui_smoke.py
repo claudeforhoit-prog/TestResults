@@ -502,6 +502,73 @@ def main():
           "[취소] 는 아무것도 만들지 않음(앞 결과 그대로)")
     check([c["applied"] for c in core.load_cases(BASE)] == [True, False, False], "체크 상태가 test_cases.json 에 저장됨")
 
+    # 적용 체크한 케이스는 고정된 기록: 순서를 바꾸거나 다른 케이스를 추가, 수정해도 간격, 잡 시작, 모니터링 중지, 잡 종료가 바뀌지 않는다
+    # (사용자 요청 2026-11-17 "이미 적용한 테스트 기록은 시작 시간 안바뀌게")
+    def snap():
+        return [(c["name"], c["interval"], c["start"], c["stop_mode"], c["end_time"], c["applied"]) for c in app.cases]
+
+    s0 = snap()
+    t.refresh("c0")
+    check(app.cases[0]["applied_stop"] == "2030-01-15 12:50:00" and core.load_cases(BASE)[0]["applied_stop"] == "2030-01-15 12:50:00",
+          "적용 체크한 케이스의 자동 모니터링 중지 시각을 고정해 저장 %r" % app.cases[0].get("applied_stop"))
+    check(t.kind("c0", col_of(t, "start")) == "popup" and t.kind("c0", col_of(t, "interval")) == "popup"
+          and t.kind("c1", col_of(t, "start")) == "entry" and t.kind("c0", col_of(t, "end_time")) == "entry",
+          "적용 체크한 케이스의 간격, 잡 시작 칸은 고치는 칸이 열리지 않음 (잡 종료는 고칠 수 있음)")
+    n_log = len(LOG)
+    t.start_edit("c0", col_of(t, "start"))
+    root.update()
+    check(t.editor is None and LOG[-1][0] == "info" and "적용 체크한 케이스의 간격, 잡 시작, 모니터링 중지는 고칠 수 없음" in LOG[-1][1],
+          "잡 시작 칸을 두 번 누르면 고정 안내")
+    app.commit_case("c0", "start", "2030-01-15 02:00:00")
+    app.commit_case("c0", "interval", "3:00")
+    n_top = len([w for w in root.winfo_children() if isinstance(w, tk.Toplevel)])
+    app.edit_stop("c0")
+    root.update()
+    check(snap() == s0 and len([x for x in LOG[n_log:] if x[0] == "info" and "고칠 수 없음" in x[1]]) == 4
+          and len([w for w in root.winfo_children() if isinstance(w, tk.Toplevel)]) == n_top,
+          "적용 체크한 케이스의 잡 시작, 간격, 모니터링 중지는 고쳐지지 않음")
+    t.refresh("c0")
+    app.move_row(1)
+    check([c["name"] for c in app.cases] == ["TC-base-b4", "TC-base-a", "TC-base-a-r3"], "적용 체크한 케이스를 아래로")
+    check([(c["start"], c["end_time"]) for c in app.cases] == [("2030-01-15 13:00:00", ""), ("2030-01-15 00:00:00", "2030-01-15 11:40:00"),
+                                                              ("2030-01-16 01:00:00", "")],
+          "잡 시작과 잡 종료가 케이스를 따라감 %s" % [(c["start"], c["end_time"]) for c in app.cases])
+    check(cell_of(t, "c1", "mon_stop") == "01-15 12:50 (자동)" and app.cases[2]["interval"] == "12:00",
+          "고정한 중지 시각도 케이스를 따라가고, 윗줄이 적용 케이스가 된 아래 행은 잡 시작과 간격이 그대로 %s %s"
+          % (cell_of(t, "c1", "mon_stop"), app.cases[2]["interval"]))
+    app.move_row(-1)
+    check(snap() == s0, "다시 위로 옮기면 처음과 같음 %s" % (snap(),))
+    app.toggle_applied("c1")
+    app.toggle_applied("c2")
+    check([c["applied_stop"] for c in app.cases] == ["2030-01-15 12:50:00", "2030-01-16 00:50:00", ""],
+          "적용 체크하면 그때의 자동 중지 시각을 고정 (중지 없음인 케이스는 고정할 값이 없음) %s" % [c["applied_stop"] for c in app.cases])
+    t.refresh("c0")
+    app.add_case()
+    t.finish_edit(commit=False)
+    app.commit_case("c1", "start", "2030-01-20 10:00:00")
+    check([(c["name"], c["start"]) for c in app.cases[2:]] == [("TC-base-b4", "2030-01-15 13:00:00"), ("TC-base-a-r3", "2030-01-16 01:00:00")]
+          and app.cases[1]["start"] == "2030-01-20 10:00:00" and app.cases[1]["applied_stop"] == "" and not app.cases[1]["applied"]
+          and app.cases[1]["interval"] == "12:00"
+          and cell_of(t, "c0", "mon_stop") == "01-15 12:50 (자동)" and cell_of(t, "c2", "mon_stop") == "01-16 00:50 (자동)",
+          "적용 케이스 사이에 케이스를 추가하고 잡 시작을 적어도 적용 케이스의 잡 시작과 중지 시각은 그대로 %s"
+          % [(c["name"], c["start"]) for c in app.cases])
+    t.refresh("c1")
+    app.del_row()
+    app.toggle_applied("c1")
+    app.toggle_applied("c2")
+    check(snap() == s0 and [c["applied_stop"] for c in app.cases] == ["2030-01-15 12:50:00", "", ""],
+          "추가한 케이스를 지우고 적용 체크를 끄면 처음과 같음(고정한 값은 지움) %s" % (snap(),))
+    check([c["applied_stop"] for c in core.load_cases(BASE)] == ["2030-01-15 12:50:00", "", ""], "고정한 값이 test_cases.json 에 저장됨")
+    app.show_help("4. 테스트 케이스", app.case_help)
+    root.update()
+    helps = [w.cget("text") for w in walk(app.help_win) if isinstance(w, ttk.Label)]
+    check(any("적용 체크한 케이스는 등록한 기록으로 고정한다" in x for x in helps) and any("바로 윗줄이 적용 체크한 케이스인 행" in x for x in helps),
+          "시각 지정의 탭 4 도움말에 적용 체크한 케이스의 고정 설명")
+    check(app.help_win.winfo_reqheight() <= app.px(900), "시각 지정의 탭 4 도움말 창 높이 %d" % app.help_win.winfo_reqheight())
+    shot_window(root, "도움말", "tcgen_time_help4.png")
+    app.help_win.destroy()
+    root.update()
+
     # 리포트용 CSV 저장: 케이스 고르기, 저장 위치 (비교 기준 칸은 없다. 표 순서대로 저장한다)
     app.nb.select(3)
     root.update()
@@ -994,7 +1061,7 @@ def main():
     app.t_case.refresh("c1")
     app.del_row()
     check([c["start"] for c in app.cases] == ["2030-01-15 00:00:00", "2030-01-16 01:00:00"], "삭제해도 다른 케이스 시각 유지")
-    check(app.cases[1]["interval"] == "25:00", "삭제 뒤 아래 행 간격 다시 계산")
+    check(app.cases[1]["interval"] == "12:00", "삭제 뒤 윗줄이 적용 체크한 케이스이면 아래 행의 간격은 그대로 (%s)" % app.cases[1]["interval"])
 
     # 저장 버튼 없이 고친 직후 창을 닫아도(끝내기 확인 없이) 다시 열면 남아 있다
     app.commit_run(0, "desc", "1 job edited")
