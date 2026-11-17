@@ -261,7 +261,7 @@ def main():
         code = ("import json,sys\n"
                 "from perfreport.build import run_csv\n"
                 "spec={'title':'cmp check','cases':[{'id':'CASE-A','name':'tA','palette':'파랑 계열'},{'id':'CASE-B','name':'tB','palette':'주황·빨강 계열'}],"
-                "'metrics':[{'metric':'TAT'},{'metric':'phase 소요 시간'},{'metric':'CPU|Usage (%)','value':'mean_max','chart':'bar','vms':'vm01,vm02'},"
+                "'metrics':[{'metric':'요약 표','items':['TAT','phase 소요 시간','CPU|Usage (%)'],'stats':['mean','min','max'],'vms':'vm01','diff':True,'phase_split':True},{'metric':'TAT'},{'metric':'phase 소요 시간'},{'metric':'CPU|Usage (%)','value':'mean_max','chart':'bar','vms':'vm01,vm02'},"
                 "{'metric':'CPU|Usage (%)','value':'series','chart':'line','vms':'vm01'}],"
                 "'baseline':{'name':'BM-A','kind':'BM','value':13800},'phase_bg':True,'phase_case':'CASE-A','word':True,'html':True}\n"
                 "if __name__=='__main__':\n"
@@ -276,6 +276,12 @@ def main():
             from docx.enum.text import WD_ALIGN_PARAGRAPH
             d4 = docx.Document(os.path.join(tmp, 'out_cmp', 'cmp check.docx'))
             h2 = [p.text for p in d4.paragraphs if p.style.name == 'Heading 2']
+            st_ = next((t for t in d4.tables if [c.text for c in t.rows[0].cells][:3] == ['케이스', 'VM', 'TAT (s) 평균']), None)
+            hd = [c.text for c in st_.rows[0].cells] if st_ else []
+            check('비교 리포트: 요약 표 (TAT · phase · Load · Compute · 지표의 평균 · 최소 · 최대, 첫 케이스 대비 차이)',
+                  st_ is not None and len(st_.rows) == 3 and 'Load (s) 최소' in hd and 'Compute (s) 최대' in hd and 'CPU > Usage (%) 평균 차이 (%)' in hd
+                  and st_.rows[1].cells[5].text == '기준' and st_.rows[2].cells[2].text == '13,185.00', str(hd[:6]))
+            h2 = [x for x in h2 if x != '요약 표']
             check('비교 리포트: 지표 순서대로 소제목', h2 == ['TAT', 'phase 소요 시간', 'CPU > Usage (%) · 평균과 최대', 'CPU > Usage (%) · 시계열'], str(h2))
             tat = next((t for t in d4.tables if t.rows[0].cells[-1].text == 'Degradation (%)'), None)
             check('비교 리포트: TAT 표에 기준선과 Degradation', tat is not None and len(tat.rows) >= 3)

@@ -973,7 +973,7 @@ def build(root):
     rb2 = ttk.Frame(cr)
     rb2.pack(fill='x', pady=(0, 6))
     ttk.Label(rb, text='넣을 지표', style='Head.TLabel').pack(side='left', padx=(0, 10))
-    cmp_add_cb = ttk.Combobox(rb, textvariable=cmp_add, values=list(CMP.JOB_ITEMS), width=30)
+    cmp_add_cb = ttk.Combobox(rb, textvariable=cmp_add, values=[CMP.SUMMARY] + list(CMP.JOB_ITEMS), width=30)
     cmp_add_cb.pack(side='left')
     mtree = ttk.Treeview(cr, columns=('on', 'ord', 'metric', 'value', 'chart', 'vms'), show='headings', selectmode='browse', height=8)
     for key, text, w_, anchor in (('on', '넣기', 46, 'center'), ('ord', '순서', 46, 'center'), ('metric', '지표', 220, 'w'),
@@ -1114,6 +1114,7 @@ def build(root):
             n += bool(it.get('on', True))
             mtree.insert('', 'end', iid=str(i), tags=('' if it.get('on', True) else 'off',),
                          values=('☑' if it.get('on', True) else '☐', n if it.get('on', True) else '', it['metric'],
+                                 (f'항목 {len(it.get("items") or [])}개 · ' + '·'.join(CMP.STATS[x] for x in it.get('stats') or [])) if it['metric'] == CMP.SUMMARY else
                                  CMP.VALUES[it['value']] if it['metric'] not in CMP.JOB_ITEMS else ('잡 평균' if it['metric'] == CMP.TAT else '단계 self 시간' if it['metric'] == CMP.PHASE else '세트 평균'),
                                  CMP.CHARTS[it['chart']], it.get('vms', '')))
         if select is not None and mtree.exists(str(select)):
@@ -1126,6 +1127,8 @@ def build(root):
         state['cmp_metrics'].append(dict(CMP.default_item(name), on=True))
         cmp_save_preset()
         cmp_refresh_metrics(len(state['cmp_metrics']) - 1)
+        if name == CMP.SUMMARY and not state.get('no_dialog'):
+            summary_dialog(len(state['cmp_metrics']) - 1)
 
     def cmp_metric_del():
         sel = mtree.selection()
@@ -1177,6 +1180,9 @@ def build(root):
             return
         key = mtree['columns'][int(col[1:]) - 1]
         it = state['cmp_metrics'][int(iid)]
+        if it['metric'] == CMP.SUMMARY:
+            summary_dialog(int(iid))
+            return
         job_item = it['metric'] in CMP.JOB_ITEMS
         if key == 'value' and not job_item:
             state['edit'] = edit_cell(mtree, iid, col, list(CMP.VALUES.values()), cmp_metric_done)
@@ -1184,6 +1190,72 @@ def build(root):
             state['edit'] = edit_cell(mtree, iid, col, [CMP.CHARTS['bar'], CMP.CHARTS['line']], cmp_metric_done)
         elif key == 'vms' and it['metric'] != CMP.PHASE:
             state['edit'] = edit_cell(mtree, iid, col, None, cmp_metric_done)
+
+    def summary_dialog(idx, auto_ok=False):
+        """요약 표 설정 창: 넣을 항목(TAT, phase, 지표), 통계, 행 · 열 방향, Load · Compute, 기준 대비 차이, 포함할 VM."""
+        it = CMP.normalize(state['cmp_metrics'][idx])
+        win = tk.Toplevel(root)
+        win.title('요약 표 설정')
+        win.geometry('760x620')
+        win.transient(root)
+        win.configure(bg=C['card'])
+        f = ttk.Frame(win, padding=12)
+        f.pack(fill='both', expand=True)
+        ttk.Label(f, text='넣을 항목', style='Head.TLabel').pack(anchor='w')
+        ttk.Label(f, text='TAT 는 TAT 로그, phase 는 phase 로그, 그 밖은 지표(잡 실행 구간 통계). 지표 목록은 [지표 목록 읽기] 를 누르면 나온다',
+                  style='Hint.TLabel').pack(anchor='w')
+        names = [CMP.TAT, CMP.PHASE] + [m for m in dict.fromkeys(state['metric_names'] + [x['metric'] for x in state['cmp_metrics']])
+                                        if m not in (CMP.SUMMARY, CMP.TAT, CMP.PHASE, CMP.CONC)]
+        names += [m for m in it['items'] if m not in names]
+        lf = ttk.Frame(f)
+        lf.pack(fill='both', expand=True, pady=(4, 8))
+        lst = tk.Listbox(lf, selectmode='multiple', exportselection=False, height=12, font=(FONT, 10))
+        sb = ttk.Scrollbar(lf, orient='vertical', command=lst.yview)
+        lst.configure(yscrollcommand=sb.set)
+        lst.pack(side='left', fill='both', expand=True)
+        sb.pack(side='right', fill='y')
+        for k, n_ in enumerate(names):
+            lst.insert('end', n_)
+            if n_ in it['items']:
+                lst.selection_set(k)
+        o = ttk.Frame(f)
+        o.pack(fill='x')
+        sv = {k: tk.BooleanVar(value=k in it['stats']) for k in CMP.STATS}
+        ttk.Label(o, text='통계').grid(row=0, column=0, sticky='w', pady=3)
+        so = ttk.Frame(o)
+        so.grid(row=0, column=1, sticky='w')
+        for k, t_ in CMP.STATS.items():
+            ttk.Checkbutton(so, text=t_, variable=sv[k]).pack(side='left', padx=(0, 10))
+        orient = tk.StringVar(value=it['orient'])
+        ttk.Label(o, text='행 · 열').grid(row=1, column=0, sticky='w', pady=3)
+        oo = ttk.Frame(o)
+        oo.grid(row=1, column=1, sticky='w')
+        ttk.Radiobutton(oo, text='행 = 케이스 · VM, 열 = 항목 · 통계', variable=orient, value='case_rows').pack(side='left', padx=(0, 14))
+        ttk.Radiobutton(oo, text='행 = 항목 · 통계, 열 = 케이스 · VM (항목이 많을 때)', variable=orient, value='item_rows').pack(side='left')
+        split = tk.BooleanVar(value=bool(it.get('phase_split')))
+        dif = tk.BooleanVar(value=bool(it.get('diff')))
+        vmv = tk.StringVar(value=it.get('vms', ''))
+        ttk.Checkbutton(o, text='phase 를 Load 와 Compute 로 나눠서도 넣기', variable=split).grid(row=2, column=1, sticky='w', pady=3)
+        ttk.Checkbutton(o, text='첫 케이스 대비 평균 차이 (%) 넣기', variable=dif).grid(row=3, column=1, sticky='w', pady=3)
+        ttk.Label(o, text='포함할 VM').grid(row=4, column=0, sticky='w', pady=3)
+        ttk.Entry(o, textvariable=vmv, width=30).grid(row=4, column=1, sticky='w')
+
+        def ok():
+            items = [names[k] for k in lst.curselection()]
+            stats = [k for k in CMP.STATS if sv[k].get()]
+            if not items or not stats:
+                messagebox.showwarning('요약 표 설정', '항목과 통계를 하나 이상 고르십시오.', parent=win)
+                return
+            state['cmp_metrics'][idx] = dict(CMP.normalize(dict(it, items=items, stats=stats, orient=orient.get(), phase_split=split.get(),
+                                                                diff=dif.get(), vms=vmv.get().strip())), on=state['cmp_metrics'][idx].get('on', True))
+            cmp_save_preset()
+            cmp_refresh_metrics(idx)
+            win.destroy()
+        b = ttk.Frame(f)
+        b.pack(fill='x', pady=(10, 0))
+        ttk.Button(b, text='확인', style='Blue.TButton', command=ok).pack(side='right')
+        ttk.Button(b, text='취소', command=win.destroy).pack(side='right', padx=6)
+        return {'win': win, 'list': lst, 'stats': sv, 'orient': orient, 'split': split, 'diff': dif, 'vms': vmv, 'ok': ok, 'names': names}
 
     def cmp_load_names():
         if not os.path.isfile(v['cases'].get()) or not os.path.isdir(v['data'].get()):
@@ -1199,7 +1271,7 @@ def build(root):
         b = base_by_name(name_of_choice(cmp_base.get()))
         return {'title': cmp_title.get().strip(),
                 'cases': [{'id': r['id'], 'name': r['name'], 'palette': r['palette'], 'display': ref_text(r['id'])} for r in cmp_selected()],
-                'metrics': [{k: it[k] for k in ('metric', 'value', 'chart', 'vms')} for it in state['cmp_metrics'] if it.get('on', True)],
+                'metrics': [{k: v_ for k, v_ in it.items() if k != 'on'} for it in state['cmp_metrics'] if it.get('on', True)],
                 'baseline': ({'name': b['name'], 'kind': b.get('kind', ''), 'cond': b.get('cond', ''), 'note': b.get('note', ''),
                               'value': str(b.get('tat', '')).replace(',', '') or 0} if b else None),
                 'phase_bg': cmp_phase.get(), 'phase_case': cmp_pcase.get(), 'word': cmp_word.get(), 'html': cmp_html.get()}
@@ -1423,7 +1495,7 @@ def build(root):
             elif kind == 'cmp_metrics':
                 names_btn.config(state='normal')
                 state['metric_names'] = list(val or [])
-                cmp_add_cb.config(values=list(CMP.JOB_ITEMS) + state['metric_names'])
+                cmp_add_cb.config(values=[CMP.SUMMARY] + list(CMP.JOB_ITEMS) + state['metric_names'])
                 log.insert('end', f'── 지표 {len(state["metric_names"])}개를 읽었습니다. 탭 4 의 넣을 지표 목록에서 고를 수 있습니다\n')
                 nb.select(tabc)
             elif kind == 'merr':
@@ -1470,7 +1542,7 @@ def build(root):
             'cmp': {'pal': cmp_pal, 'pal_pick': cmp_pal_pick, 'title': cmp_title, 'base': cmp_base, 'phase': cmp_phase, 'pcase': cmp_pcase, 'word': cmp_word, 'html': cmp_html,
                     'toggle': cmp_toggle, 'case_done': cmp_case_done, 'case_move': cmp_case_move, 'auto_colors': cmp_auto_colors,
                     'metric_add': cmp_metric_add, 'metric_del': cmp_metric_del, 'metric_move': cmp_metric_move,
-                    'metric_done': cmp_metric_done, 'spec': cmp_spec, 'sync': cmp_sync}}
+                    'metric_done': cmp_metric_done, 'spec': cmp_spec, 'sync': cmp_sync, 'summary_dialog': summary_dialog}}
 
 
 def main():

@@ -18,9 +18,11 @@ from docx.shared import Cm
 from . import analyze, docx_base, jobs as jobs_mod, palette as P, report_case as RC, report_docx as D
 
 TAT, PHASE, CONC = 'TAT', 'phase 소요 시간', '동시 실행 잡 elapsed'
+SUMMARY = '요약 표'
 JOB_ITEMS = (TAT, PHASE, CONC)
+STATS = {'mean': '평균', 'min': '최소', 'max': '최대'}
 VALUES = {'mean': '평균', 'max': '최대', 'mean_max': '평균과 최대', 'series': '시계열'}
-CHARTS = {'bar': '막대', 'stack': '누적 막대', 'line': '꺾은선'}
+CHARTS = {'bar': '막대', 'stack': '누적 막대', 'line': '꺾은선', 'table': '표'}
 plt, mticker = RC.plt, RC.matplotlib.ticker
 
 
@@ -31,6 +33,9 @@ def file_title(title):
 
 def default_item(metric):
     """지표를 처음 넣을 때의 값과 그래프 형식."""
+    if metric == SUMMARY:
+        return {'metric': SUMMARY, 'value': 'mean', 'chart': 'table', 'vms': '', 'items': [TAT, PHASE], 'stats': ['mean', 'min', 'max'],
+                'orient': 'case_rows', 'diff': False, 'phase_split': False}
     if metric == PHASE:
         return {'metric': metric, 'value': 'mean', 'chart': 'stack', 'vms': ''}
     return {'metric': metric, 'value': 'mean', 'chart': 'bar', 'vms': ''}
@@ -39,6 +44,12 @@ def default_item(metric):
 def normalize(item):
     """값과 그래프 형식의 짝을 맞춘다: phase 는 누적 막대, 꺾은선은 시계열, 시계열은 꺾은선. 잡 결과 항목은 시계열이 없다."""
     it = dict(default_item(item.get('metric', '')), **item)
+    if it['metric'] == SUMMARY:
+        it['chart'], it['value'] = 'table', 'mean'
+        it['stats'] = [x for x in STATS if x in (it.get('stats') or [])] or ['mean']
+        it['orient'] = it['orient'] if it.get('orient') in ('case_rows', 'item_rows') else 'case_rows'
+        it['items'] = [x for x in dict.fromkeys(it.get('items') or []) if x and x not in (SUMMARY, CONC)]
+        return it
     if it['metric'] == PHASE:
         it['chart'], it['value'] = 'stack', 'mean'
     elif it['metric'] in (TAT, CONC):
@@ -73,6 +84,9 @@ def validate(spec, known_cases=None):
             out.append('케이스 정보 파일에 없는 케이스: ' + ', '.join(gone))
     if not spec.get('metrics'):
         out.append('넣을 지표를 하나 이상 고르십시오.')
+    for m in spec.get('metrics') or []:
+        if m.get('metric') == SUMMARY and not normalize(m)['items']:
+            out.append('요약 표에 넣을 항목(TAT, phase, 지표)을 하나 이상 고르십시오. (넣을 지표 목록에서 요약 표를 두 번 누름)')
     if not (spec.get('word') or spec.get('html')):
         out.append('출력(Word, HTML)을 하나 이상 체크하십시오.')
     b = spec.get('baseline')
@@ -188,6 +202,111 @@ def line_chart(path, series, ylabel, bands=None):
     return _save(fig, path)
 
 
+def _tail(name):
+    m = re.search(r'([A-Za-z]+\d+)$', str(name))
+    return m.group(1).lower() if m else str(name).lower()
+
+
+def summary_values(it, sel, st):
+    """요약 표의 값: {(케이스 표시 이름, VM): {(항목, 통계): 값}}. 항목은 TAT(TAT 로그), phase · Load · Compute(phase 로그), 지표(잡 실행 구간 통계)."""
+    toks = vm_tokens(it.get('vms'))
+    out, cols = {}, []
+
+    def put(case, vm, item, stat, v):
+        if v is None:
+            return
+        out.setdefault((case, vm), {})[(item, stat)] = float(v)
+        if (item, stat) not in cols:
+            cols.append((item, stat))
+    for item in it['items']:
+        for c in sel:
+            cc = c['case']
+            if item == TAT:
+                for x in ((cc.get('jobs') or {}).get('mains') or []):
+                    if toks and not any(vm_match(h, toks) for h in x['hosts']):
+                        continue
+                    vm = ', '.join(x['hosts']) or x['label']
+                    for s_ in it['stats']:
+                        put(c['name'], vm, 'TAT (s)', s_, {'mean': x['tat'], 'min': x['min'], 'max': x['max']}[s_])
+            elif item == PHASE:
+                ph = cc.get('phase')
+                if not ph:
+                    continue
+                pj = ph.get('per_job') or []
+                vm = ', '.join(ph.get('hosts') or []) or ''
+                parts = [('phase 합계 (s)', [j['total'] for j in pj], ph['total'])]
+                if it.get('phase_split') and ph.get('load') is not None:
+                    loads = [j['load'] for j in pj if j.get('load') is not None]
+                    comps = [j['total'] - j['load'] for j in pj if j.get('load') is not None]
+                    parts += [('Load (s)', loads, ph['load']), ('Compute (s)', comps, ph['total'] - ph['load'])]
+                for name, vals, mean in parts:
+                    for s_ in it['stats']:
+                        v = mean if s_ == 'mean' else (min(vals) if s_ == 'min' else max(vals)) if vals else None
+                        put(c['name'], vm, name, s_, v)
+            else:
+                if st is None or not len(st):
+                    continue
+                x = st[(st['case'] == c['id']) & (st['metric'] == item)]
+                for _, r in x.iterrows():
+                    if toks and not vm_match(r['entity'], toks):
+                        continue
+                    for s_ in it['stats']:
+                        put(c['name'], str(r['entity']), item, s_, r[s_])
+    return out, cols
+
+
+def summary_table(doc, it, sel, st, units, table, D):
+    """비교 리포트의 요약 표. 행 · 열 방향, 통계, 기준 대비 차이 열을 설정대로."""
+    it = normalize(it)
+    vals, cols = summary_values(it, sel, st)
+    D._sub(doc, '요약 표', 2)
+    if not vals:
+        D._notes(doc, ['고른 케이스에 요약 표 항목의 값이 없음'])
+        return
+    keys = [k for c in sel for k in sorted([k for k in vals if k[0] == c['name']], key=lambda k: _tail(k[1]))]
+    base = sel[0]['name']
+
+    def diff(key, item):
+        if key[0] == base:
+            return '기준'
+        b = next((vals[k].get((item, 'mean')) for k in vals if k[0] == base and _tail(k[1]) == _tail(key[1])), None)
+        v = vals[key].get((item, 'mean'))
+        return f'{(v - b) / b * 100:+.2f}' if v is not None and b else ''
+    items = list(dict.fromkeys(c[0] for c in cols))
+    secs = {'TAT (s)', 'phase 합계 (s)', 'Load (s)', 'Compute (s)'}
+    num = lambda i, v: f'{v:,.2f}' if i in secs else analyze.fmt(v)
+    unit_of = lambda i: units.get(i) or ''
+    label = lambda i: i if (i.endswith(')') or not unit_of(i)) else f'{i} ({unit_of(i)})'
+    if it['orient'] == 'case_rows':
+        head = ['케이스', 'VM']
+        cells = []
+        for i in items:
+            for s_ in it['stats']:
+                if (i, s_) in cols:
+                    head.append(f'{label(i)} {STATS[s_]}')
+                    cells.append((i, s_))
+            if it.get('diff') and (i, 'mean') in cols:
+                head.append(f'{label(i)} 평균 차이 (%)')
+                cells.append((i, 'diff'))
+        rows = [[k[0], k[1]] + [(diff(k, i) if s_ == 'diff' else (num(i, vals[k][(i, s_)]) if (i, s_) in vals[k] else '')) for i, s_ in cells]
+                for k in keys]
+    else:
+        head = ['항목', '통계'] + [f'{k[0]} · {k[1]}' if k[1] else k[0] for k in keys]
+        rows = []
+        for i in items:
+            for s_ in it['stats'] + (['diff'] if it.get('diff') else []):
+                if s_ != 'diff' and (i, s_) not in cols or s_ == 'diff' and (i, 'mean') not in cols:
+                    continue
+                rows.append([label(i), '평균 차이 (%)' if s_ == 'diff' else STATS[s_]]
+                            + [(diff(k, i) if s_ == 'diff' else (num(i, vals[k][(i, s_)]) if (i, s_) in vals[k] else '')) for k in keys])
+    table('요약 표', head, rows)
+    D._notes(doc, ['TAT: TAT 로그 기준, VM 마다 TAT 측정 잡의 elapsed 평균 · 최소 · 최대',
+                   'phase: phase 로그 기준, 잡별 단계 합계의 평균 · 최소 · 최대' + (' · Load = init 단계 끝까지 누적, Compute = 합계 − Load' if it.get('phase_split') else ''),
+                   '지표: 잡 실행 구간의 VM 별 평균 · 최소 · 최대',
+                   (f'평균 차이: 첫 케이스({base})의 같은 VM(이름 끝 글자와 번호가 같은 VM) 평균 대비 %, 첫 케이스는 기준' if it.get('diff') else ''),
+                   (f'포함할 VM: {it["vms"]}' if vm_tokens(it.get('vms')) else '')])
+
+
 def build(spec, cases, meta, df, outdir, date, log=print, width_cm=None, extra_stats=None):
     """비교 문서(docx)를 만든다. cases: 케이스 dict(jobs · phase · label 포함), meta: {케이스명: {start, end, ...}}, df: 전체 값 표.
     extra_stats: 이전 결과 케이스의 통계 표(summary.as_case). 이전 결과 케이스의 시계열 행은 in_run=False 라 통계에 들어가지 않는다.
@@ -249,6 +368,9 @@ def build(spec, cases, meta, df, outdir, date, log=print, width_cm=None, extra_s
         m, toks = it['metric'], vm_tokens(it.get('vms'))
         who = f'포함할 VM: {it["vms"]}' if toks else '포함할 VM: 전부'
         png = os.path.join(chart_dir, f'{k:02d}.png')
+        if m == SUMMARY:
+            summary_table(doc, it, sel, st, units, table, D)
+            continue
         if m == TAT:
             groups, rows = [], []
             for c in sel:

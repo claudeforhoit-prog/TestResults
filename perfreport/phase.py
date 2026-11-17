@@ -208,7 +208,8 @@ def summarize(jobs):
         vals = {s: j['self'].get(s) for s, _ in stages}
         per_job.append({'name': f'잡 {j.get("idx") or n}' + (f' · {j["host"]}' if j.get('host') else ''),
                         'start': str(j.get('start') or ''), 'self': {k: (round(v, 2) if v is not None else None) for k, v in vals.items()},
-                        'total': round(sum(v for v in vals.values() if v is not None), 2)})
+                        'total': round(sum(v for v in vals.values() if v is not None), 2),
+                        'load': round(j['total'][LOAD_STAGE], 2) if j['total'].get(LOAD_STAGE) is not None else None})
     return {'stages': stages, 'bands': bands, 'total': round(acc, 2), 'per_job': per_job,
             'load': round(statistics.mean(lv), 2) if lv else None,
             'jobs': len(jobs), 'expected': int(max(exp)) if exp else None,
