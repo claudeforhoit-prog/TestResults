@@ -751,10 +751,21 @@ def main():
           "설정과 최대 대기도 test_cases.json 에 자동 저장")
     t.refresh("c1")
     times = [(c["start"], c["interval"]) for c in app.cases]          # + 케이스 추가는 아래 행의 잡 시작을 다시 계산한다(시각 지정용 값)
+    app.commit_case("c1", "seq_start", "+8.0")
+    t.refresh("c1")
+    check(app.cases[1]["seq_start"] == "+8:00" and cell_of(t, "c1", "seq_start") == "+8:00",
+          "시작 시각에 +간격: '+8.0' 은 '+8:00' 으로 저장(앞 케이스 시작 8시간 뒤)")
+    n_log = len(LOG)
+    app.commit_case("c1", "seq_start", "+0")
+    check(app.cases[1]["seq_start"] == "+8:00" and any(x[0] == "error" and "+8:00" in x[1] for x in LOG[n_log:]), "0 인 간격은 거부하고 형식을 알림")
     app.add_case()
     check(app.cases[2]["name"] == "TC-base-b4-r2" and app.cases[2]["esx_profiles"] == ["numa0"]
           and app.cases[2]["vms"][0]["profiles"] == ["pin", "aff"] and app.cases[2]["max_wait"] == "12:00",
           "+ 케이스 추가: 설정과 최대 대기도 복사")
+    check(app.cases[2]["seq_start"] == "+8:00", "+ 케이스 추가: +간격인 시작 시각은 복사(시각은 복사하지 않음)")
+    app.cases[1]["seq_start"] = app.cases[2]["seq_start"] = ""       # 선택(새 케이스)을 바꾸지 않고 되돌린다
+    app.mark_cases()
+    t.refresh()
     app.move_row(-1)
     check([c["name"] for c in app.cases[:3]] == ["TC-base-a", "TC-base-b4-r2", "TC-base-b4"]
           and app.cases[2]["start"] == "2030-01-15 13:00:00", "순서 실행에서 위로: 케이스의 값이 모두 케이스를 따라감")
@@ -826,7 +837,9 @@ def main():
     check(app.blk_setup.get("1.0", "end-1c") == res["setup"] and "tcgen_apply.py" in res["setup"], "A 블록: tcrun 과 설정 적용 스크립트 포함")
     check(app.blk_vm.get("1.0", "end-1c") == res["check"] and app.blk_esx.get("1.0", "end-1c") == res["run"], "P 블록, S 블록 표시")
     check(app.blk_wipe.get("1.0", "end-1c") == res["vm_wipe"], "D 블록 표시")
-    check(app.plan_text.get("1.0", "end-1c") == res["plan_view"] and "- 잡 종료 확인:" in res["plan_view"], "실행 계획 글 표시")
+    check(app.plan_text.get("1.0", "end-1c") == res["plan_view"] and "- 잡 확인 함:" in res["plan_view"]
+          and "   잡 확인: 함(다음 케이스가 자동이라 잡 종료를 알아야 함). 최대 대기 12:00" in res["plan_view"],
+          "실행 계획 글 표시(시각을 적은 케이스도 다음 케이스가 자동이면 확인한다고 알림)")
     heads = [app.plan_text.get(a, b) for a, b in zip(*[iter(app.plan_text.tag_ranges("plan_head"))] * 2)]
     cases = [app.plan_text.get(a, b) for a, b in zip(*[iter(app.plan_text.tag_ranges("plan_case"))] * 2)]
     check(heads[:2] == ["[공통 규칙]", "[ESX 호스트 esx01] 접속 주소 10.0.0.11, 케이스 2개"] and cases[0].startswith("1. "),

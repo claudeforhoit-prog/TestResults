@@ -1,13 +1,16 @@
 #!/bin/sh
-# tcrun 2.6 - tcgen sequence runner. Runs on the jump VM (POSIX sh). tcgen block A installs it in the jump VM work folder
+# tcrun 2.7 - tcgen sequence runner. Runs on the jump VM (POSIX sh). tcgen block A installs it in the jump VM work folder
 # (setting of tcgen, ~/.tcgen when empty). tcrun uses the folder it is in as its work folder (D below).
 #
 #   sh <work folder>/tcrun check <plan>       read-only checks: ESX key login, tools, VMs, settings and power, VM login, clocks
-#   sh <work folder>/tcrun start <plan>       start "run" in the background for every ESX host of the plan (block S uses this)
+#   sh <work folder>/tcrun start <plan>       start "run" in the background for every ESX host of the plan (block S uses this).
+#                                             A run of an ESX host that another run still works for waits in the queue
 #   sh <work folder>/tcrun run <plan> <esx>   run the cases of one ESX host in the order of the table
-#   sh <work folder>/tcrun status [-a]        state of every ESX host of the latest run and of every run that is still running
-#   sh <work folder>/tcrun stop [esx]         ask the running runs to stop (flag file). Running jobs are not touched.
-#   sh <work folder>/tcrun cancel [esx]       end the latest run now, take its crontab lines out, stop its monitoring
+#   sh <work folder>/tcrun status [-a]        state of every ESX host of the latest run, of every run that is running or
+#                                             queued, and of every run that left a case open
+#   sh <work folder>/tcrun stop [esx]         ask the runners to stop (flag file). Jobs, monitoring and crontab lines stay.
+#   sh <work folder>/tcrun cancel [esx]       end every runner now (running or queued), take the crontab lines of its case
+#                                             out and stop its monitoring. Also closes a case that an ended run left open
 #   sh <work folder>/tcrun key                print the line that registers the ssh key of this jump VM on an ESX host
 #   sh <work folder>/tcrun version
 #
@@ -20,8 +23,13 @@
 # (VMs marked off are shut down, the others are powered on one after another: power on, 1GB page backing complete,
 # ssh login), crontab lines, end of the job, monitoring stop. A job starts SETTLE_MIN or more after the last VM that
 # this case powered on was ready. Every job start on this jump VM is SPACING_MIN or more away from every other one.
+#
+# Checked and not checked: the job of a case is looked for on its VMs (pgrep) only when the next step needs the end of
+# the job: cases without a start time, and cases whose next case has no start time. A case whose start time is set by
+# the plan (NOCHK line) is not checked: no login to its VMs while the job runs. It ends at a time (2 min before the next
+# case is prepared, or when its maximum wait ends) and its monitoring stop is registered together with its start lines.
 
-TCRUN_VERSION=2.6
+TCRUN_VERSION=2.7
 case "$0" in        # the work folder is the folder of this file
   */tcrun) D=$(cd "${0%/tcrun}" 2>/dev/null && pwd) ;;
   tcrun) D=$(pwd) ;;
@@ -72,6 +80,7 @@ names_ok() {        # the names of case $SEQ are safe to put on a command line (
   done
   grep "^PROC $SEQ " "$PLAN" | grep -q "'" && return 1
   grep "^START $SEQ " "$PLAN" | grep -q -v '^START [0-9]* [0-9][0-9]* [0-9][0-9: -]*$' && return 1
+  grep "^NOCHK $SEQ " "$PLAN" | grep -q -v '^NOCHK [0-9]* [0-9][0-9]* [0-9: -]*$' && return 1
   return 0
 }
 addr_ok() {
@@ -266,17 +275,19 @@ ssh_setup() {
   if setsid -w true >/dev/null 2>&1; then SETSID="setsid -w"; else SETSID=setsid; fi
   APPLY_SHA=$(sha "$D/tcgen_apply.py")
 }
-guard() {           # guard <pid> <seconds>: wait for the pid; end it when it runs longer. 124 = ended by the time limit
+guard() {           # guard <pid> <seconds>: wait for the pid; end it when it runs longer. 124 = ended by the time limit.
+                    # G_STOP=1: end it too when the stop flag of this runner appears. 125 = ended by a stop request
   G_P=$1
-  rm -f "$W/timedout"
+  rm -f "$W/timedout" "$W/stopwait"
   (
     G_I=0
     while [ "$G_I" -lt "$2" ]; do
       sleep 1
       kill -0 "$G_P" 2>/dev/null || exit 0
+      if [ -n "$G_STOP" ] && [ -n "$STOPF" ] && [ -f "$STOPF" ]; then : > "$W/stopwait"; break; fi
       G_I=$((G_I + 1))
     done
-    : > "$W/timedout"
+    [ -f "$W/stopwait" ] || : > "$W/timedout"
     kill "$G_P" 2>/dev/null
     sleep 2
     kill -9 "$G_P" 2>/dev/null
@@ -287,6 +298,7 @@ guard() {           # guard <pid> <seconds>: wait for the pid; end it when it ru
   kill "$G_W" 2>/dev/null
   wait "$G_W" 2>/dev/null
   [ -f "$W/timedout" ] && G_R=124
+  [ -f "$W/stopwait" ] && G_R=125
   return $G_R
 }
 vmrun() {           # vmrun <ssh target> <script> <output> [seconds]: run the script with sh on a VM
@@ -487,7 +499,14 @@ lpage_wait() {      # lpage_wait <vm>: wait until the 1GB page backing of the VM
                     # memSize / 1024, no increase in 6 readings = stopped. VMs without 1GB pages: no wait
   setstate running "vm $1: waiting for the 1GB page backing"
   mk_apply "$W/lpw.sh" lpagewait "$1" $((PON_WAIT * 60))
+  G_STOP=$PV_STOPPABLE
   esxrun "$W/lpw.sh" "$W/lpw.out" $((PON_WAIT * 60 + 300))
+  G_STOP=
+  if [ -f "$W/stopwait" ]; then
+    LW_FAIL=; PO_STOP=1
+    WHY="stop requested while the 1GB page backing of vm $1 was read. The VM stays powered on"
+    return 1
+  fi
   LW_R=$(tval TCGEN-RESULT "$W/lpw.out")
   LW_N=$(say "$LW_R" | cut -d' ' -f3); LW_T=$(say "$LW_R" | cut -d' ' -f4); LW_F=$(say "$LW_R" | cut -d' ' -f5)
   LW_S=error
@@ -516,13 +535,21 @@ lpage_wait() {      # lpage_wait <vm>: wait until the 1GB page backing of the VM
   return 1
 }
 power_on() {        # power_on <vm>: power on through the ESX host when off, wait for the 1GB page backing, then for ssh login.
-                    # PO_NEW=1: this call powered the VM on, PO_READY = when it was ready. LW_FAIL=1: the backing failed
-  PO_NEW=0; LW_FAIL=
+                    # PO_NEW=1: this call powered the VM on, PO_READY = when it was ready. LW_FAIL=1: the backing failed.
+                    # PV_STOPPABLE=1 (set by power_vms): a stop request ends the waits. PO_STOP=1: ended by a stop request
+  PO_NEW=0; LW_FAIL=; PO_STOP=
   STEP=poweron; setstate running "power on $1"
   PO_S=$(now)
   mk_apply "$W/pon.sh" poweron "$1" $((PON_WAIT * 60))
+  G_STOP=$PV_STOPPABLE
   esxrun "$W/pon.sh" "$W/pon.out" $((PON_WAIT * 60 + 300))
   PO_X=$?
+  G_STOP=
+  if [ -f "$W/stopwait" ]; then
+    PO_STOP=1
+    WHY="stop requested while vm $1 was being powered on. Its power-on task goes on to its end on the ESX host"
+    return 1
+  fi
   PO_R=$(tval TCGEN-RESULT "$W/pon.out")
   case "$PO_R" in
     poweredon*) PO_NEW=1; logf '    | ' "$W/pon.out" ;;
@@ -537,6 +564,11 @@ power_on() {        # power_on <vm>: power on through the ESX host when off, wai
   say 'echo TCGEN-UP' > "$W/up.sh"
   setstate running "vm $1 is powered on. waiting for ssh login"
   while :; do
+    if [ -n "$PV_STOPPABLE" ] && [ -f "$STOPF" ]; then
+      PO_STOP=1
+      WHY="stop requested while tcrun waited for the ssh login of vm $1. The VM stays powered on"
+      return 1
+    fi
     vmrun "$PO_T" "$W/up.sh" "$W/up.out" 40
     grep -q '^TCGEN-UP' "$W/up.out" && break
     if grep -q -i -E 'permission denied|too many authentication failures|host key verification failed' "$W/up.out"; then
@@ -563,6 +595,7 @@ power_on() {        # power_on <vm>: power on through the ESX host when off, wai
   return 0
 }
 apply_undo() {      # put the settings back, then power on (in table order) the VMs that were on before
+  PV_STOPPABLE=       # a rollback is not ended by a stop request
   STEP=rollback; setstate running "putting the settings back on $CHF"
   mk_apply "$W/rb.sh" rollback "$TAG"
   esxrun "$W/rb.sh" "$W/rb.out" $((SHUT_WAIT * 60 + 900))
@@ -614,9 +647,15 @@ power_fail() {      # power_fail <reason>: a VM could not be powered as wanted. 
     pause "$PF_T."
   fi
 }
+power_stopped() {   # power_stopped <where>: a stop request came while the VMs of the case were powered. tcrun ends here and
+                    # puts nothing back (a rollback would shut VMs down again)
+  PS_T="while the VMs of case $CNAME were being powered ($1)."
+  [ "$R_APPLY" = changed ] && PS_T="$PS_T The settings of the case stay applied."
+  stopped "$PS_T VMs that were not powered on yet stay off. No crontab line of the case was registered."
+}
 power_vms() {       # VM power as the case wants it: VMs marked off are shut down first, then the other VMs are powered on
                     # one after another in table order (each one: power on, 1GB page backing complete, ssh login)
-  PV_NEW=
+  PV_NEW=; PO_STOP=
   for PV_VM in $OFFVMS; do
     STEP=poweroff; setstate running "powering off vm $PV_VM (the case wants it off)"
     mk_apply "$W/poff.sh" poweroff "$PV_VM" $((SHUT_WAIT * 60))
@@ -636,8 +675,16 @@ power_vms() {       # VM power as the case wants it: VMs marked off are shut dow
   [ -n "$ONVMS" ] || return 0
   log "VM power: the VMs of this case are powered on one after another when off (power on, 1GB page backing, ssh login):$ONVMS"
   for PV_VM in $ONVMS; do
-    if ! power_on "$PV_VM"; then
-      power_fail "$WHY"
+    if [ -f "$STOPF" ]; then
+      power_stopped "stop requested before vm $PV_VM was looked at"
+      return 1
+    fi
+    PV_STOPPABLE=1
+    power_on "$PV_VM"
+    PV_X=$?
+    PV_STOPPABLE=
+    if [ "$PV_X" != 0 ]; then
+      if [ -n "$PO_STOP" ]; then power_stopped "$WHY"; else power_fail "$WHY"; fi
       return 1
     fi
     [ "$PO_NEW" = 1 ] && PV_NEW="$PV_NEW $PV_VM"
@@ -673,7 +720,7 @@ probe_clocks() {    # OFF = how far the latest clock is ahead of this machine (>
       ""|*[!0-9]*) WHY="vm $PC_VM: ssh login failed (exit $PC_R: $(first "$W/probe.out"))"; return 1 ;;
     esac
     if [ "$(tval TCGEN-CRONTAB "$W/probe.out")" != yes ]; then WHY="vm $PC_VM: crontab command not found"; return 1; fi
-    if vhas PROC "$PC_VM" && [ "$(tval TCGEN-PGREP "$W/probe.out")" != yes ]; then
+    if [ -z "$NOCHK" ] && vhas JOB "$PC_VM" && [ "$(tval TCGEN-PGREP "$W/probe.out")" != yes ]; then
       WHY="vm $PC_VM: pgrep not found, the end of the job cannot be detected"
       return 1
     fi
@@ -793,9 +840,24 @@ register() {
     if [ -n "$AT" ] && [ $((AT / 60 * 60)) != "$TJOB" ]; then
       release_start $((AT / 60 * 60)) "$ME"          # the start time of the plan is not used: give it back
     fi
+    # a case that is not checked ends at a time: 2 min before the next case is prepared (NOCHK), or when the maximum
+    # wait ends, whichever is earlier. The monitoring stop is registered for that time together with the start lines.
+    TSTOPN=
+    if [ -n "$NOCHK" ]; then
+      [ "$MAXW" -gt 0 ] && TSTOPN=$(( (TJOB + MAXW * 60 + 59) / 60 * 60 ))
+      if [ "$NOCHK" -gt 0 ]; then
+        RG_H=$(( (NOCHK - 120) / 60 * 60 ))
+        if [ -z "$TSTOPN" ] || [ "$RG_H" -lt "$TSTOPN" ]; then TSTOPN=$RG_H; fi
+      fi
+      if [ -n "$TSTOPN" ] && [ "$TSTOPN" -le $((TJOB + 60)) ]; then
+        release_start "$TJOB" "$ME"
+        pause "the job of case $CNAME would start $(tstr "$TJOB"), but the case must end $(tstr "$TSTOPN") (the next case is prepared then, or the maximum wait ends). Nothing of case $CNAME was started. Change the start times in tcgen and generate again."
+        return 1
+      fi
+    fi
     WHY=
     for RG_VM in $REGVMS; do
-      mk_vmcron "$RG_VM" "$W/reg.sh" ${TMON:+MS:$TMON} "JOB:$TJOB"
+      mk_vmcron "$RG_VM" "$W/reg.sh" ${TMON:+MS:$TMON} "JOB:$TJOB" ${TSTOPN:+MX:$TSTOPN}
       vmrun "$(target "$RG_VM")" "$W/reg.sh" "$W/reg.out" 60
       RG_R=$?
       if [ "$(tval TCGEN-CRON "$W/reg.out")" != ok ]; then
@@ -806,7 +868,7 @@ register() {
       grep '^TCGEN-LINE ' "$W/reg.out" | cut -d' ' -f2- | sed "s/^/$(stamp)     | /" >> "$LOG"
     done
     if [ -z "$WHY" ] && has EMS; then
-      mk_esxcron "$W/ereg.sh" "EMS:$TMON"
+      mk_esxcron "$W/ereg.sh" "EMS:$TMON" ${TSTOPN:+EMX:$TSTOPN}
       esxrun "$W/ereg.sh" "$W/ereg.out" 60
       RG_R=$?
       if [ "$(tval TCGEN-CRON "$W/ereg.out")" != ok ]; then
@@ -850,10 +912,61 @@ register() {
   else
     log "times: job start $R_JOB (every VM in the same minute, no monitoring, no other job on this jump VM starts within $SPACING min of it)"
   fi
+  if [ -n "$NOCHK" ] && [ -n "$TSTOPN" ]; then
+    log "not checked: the plan sets the start time of this case. End of the case: $(tstr "$TSTOPN") (the monitoring stop is registered for that time, then the lines are removed)"
+  elif [ -n "$NOCHK" ]; then
+    log "not checked: the plan sets the start time of this case. It has no end time (last case of this ESX host, no maximum wait)"
+  fi
   return 0
 }
 
 # ---------------------------------------------------------------- step 4: end of the job
+stop_at_start() {   # a stop request came while tcrun waited for the job start: before the start the lines are removed
+  WJ_N=$(($(now) + OFF))
+  if [ "$WJ_N" -lt $((TJOB - 5)) ]; then
+    log "stop requested before the job start: removing the lines of this case"
+    unregister
+    : > "$W/times"
+    release_start "$TJOB" "$ME"
+    if [ "$HASMON" = 1 ] && [ "$WJ_N" -ge $((TMON - 30)) ]; then
+      log "the monitoring of this case has started or is about to start: stopping it"
+      stop_mon_core
+    fi
+    stopped "before the job of case $CNAME started. Its lines were removed."
+  else
+    hint_stop
+    stopped "just after the job of case $CNAME started. The job and the monitoring keep running."
+  fi
+}
+wait_nocheck() {    # a case whose start time is set by the plan (NOCHK): tcrun does not look for the job and does not log in
+                    # to the VMs while it runs. The case ends at TSTOPN (the monitoring stop was registered together with the
+                    # start lines), or stays open when it has no end time (last case of the ESX host, no maximum wait)
+  STEP=wait-start; setstate running "lines registered. job start $R_JOB. The job is not checked (start time of the plan)"
+  if ! wait_until $((TJOB - MINOFF + 30)); then
+    stop_at_start
+    return 1
+  fi
+  log "the job start time $R_JOB has passed. The job of case $CNAME is not checked (the plan sets its start time): no login to its VMs while it runs"
+  if [ -z "$TSTOPN" ]; then
+    OPEN_CASE=$CNAME
+    log "case $CNAME stays open: it has no end time (last case of this ESX host, no maximum wait). Its lines stay and its monitoring is not stopped by this run"
+    log "it is closed when the next run of this ESX host prepares its first case, or by: sh $D/tcrun cancel $CHF"
+    hint_stop
+    return 0
+  fi
+  STEP=wait-end; setstate running "job started $R_JOB (not checked). The case ends $(tstr "$TSTOPN")"
+  if ! wait_until $((TSTOPN - MINOFF + 20)); then
+    hint_stop
+    stopped "while case $CNAME was running (not checked). The job and the monitoring keep running. The lines of the case stay registered (monitoring stop at $(tstr "$TSTOPN"))."
+    return 1
+  fi
+  R_STOP=$(tstr "$TSTOPN")
+  log "end of case $CNAME: $R_STOP (time of the plan, the job was not checked)"
+  STEP=remove-lines; setstate running "removing the lines of the case"
+  unregister
+  : > "$W/times"
+  return 0
+}
 poll_all() {
   ALLSEEN=1; ALLGONE=1; ALLZERO=1; PSUM=; NOTSEEN=
   for PA_VM in $JOBVMS; do
@@ -901,21 +1014,7 @@ wait_job() {
   #   No job is running then, so these checks put no load on a measurement.
   WJ_FIRST=$((TJOB - MINOFF + FIRST))
   if ! wait_until "$WJ_FIRST"; then
-    WJ_N=$(($(now) + OFF))
-    if [ "$WJ_N" -lt $((TJOB - 5)) ]; then
-      log "stop requested before the job start: removing the lines of this case"
-      unregister
-      : > "$W/times"
-      release_start "$TJOB" "$ME"
-      if [ "$HASMON" = 1 ] && [ "$WJ_N" -ge $((TMON - 30)) ]; then
-        log "the monitoring of this case has started or is about to start: stopping it"
-        stop_mon_core
-      fi
-      stopped "before the job of case $CNAME started. Its lines were removed."
-    else
-      hint_stop
-      stopped "just after the job of case $CNAME started. The job and the monitoring keep running."
-    fi
+    stop_at_start
     return 1
   fi
   STEP=wait-job; setstate running "checking the job processes (check 1)"
@@ -1061,14 +1160,32 @@ run_case() {
     grep -q "^OFF $SEQ $(bre "$RC_VM")\$" "$PLAN" || ONVMS="$ONVMS $RC_VM"
   done
   REGVMS=$(grep "^PAT $SEQ " "$PLAN" | cut -d' ' -f3)
-  JOBVMS=$(grep "^PROC $SEQ " "$PLAN" | cut -d' ' -f3)
+  JOBVMS=$(grep "^JOB $SEQ " "$PLAN" | cut -d' ' -f3)
   HASMON=0
   if grep -q "^MS $SEQ " "$PLAN" || has EMS; then HASMON=1; fi
   AT=$(clines START | head -n 1 | cut -d' ' -f1)
   case "$AT" in ""|*[!0-9]*) AT= ;; esac
   ATTEXT=$(clines START | head -n 1 | cut -d' ' -f2-)
+  # NOCHK: the plan sets the start time of this case and of the next one, so the job is not checked. Its value is the
+  # time when the next case is prepared (0: no next case)
+  NOCHK=$(clines NOCHK | head -n 1 | cut -d' ' -f1)
+  case "$NOCHK" in *[!0-9]*) NOCHK= ;; esac
+  [ -n "$AT" ] || NOCHK=
+  MAXW=$(clines MAXWAIT | head -n 1)
+  case "$MAXW" in ""|*[!0-9]*) MAXW=0 ;; esac
+  TSTOPN=
   log "==== case $CNAME ($IDX of $TOTAL) begin. VMs: $(say $VMS)${OFFVMS:+ (powered off for this case: $(say $OFFVMS))}"
   setstate running "case started"
+  if [ -z "$NOCHK" ]; then
+    for RC_VM in $JOBVMS; do
+      vhas PROC "$RC_VM" && continue
+      pause "the plan has no process name for the job of vm $RC_VM in case $CNAME, and this case is checked. Generate again in tcgen. Nothing was done."
+      return 1
+    done
+  elif [ "$NOCHK" = 0 ] && [ "$MAXW" = 0 ] && [ "$IDX" -lt "$TOTAL" ]; then
+    pause "the plan gives case $CNAME no end time, but it is not the last case of this ESX host. Generate again in tcgen. Nothing was done."
+    return 1
+  fi
   if [ -n "$AT" ] && [ "$PREP" -gt 0 ] && [ "$(now)" -lt $((AT - PREP * 60)) ]; then
     STEP=wait-prepare
     log "start time $ATTEXT: the preparation (settings, VM power) starts $PREP min before it, at $(tstr $((AT - PREP * 60)))"
@@ -1078,8 +1195,19 @@ run_case() {
       return 1
     fi
   fi
+  if [ "$IDX" = 1 ] && [ -n "$TAKE" ]; then
+    take_over
+  fi
   if has AH || has AV; then
     apply_settings || return 1
+    if [ -f "$STOPF" ]; then
+      if [ "$R_APPLY" = changed ]; then
+        stopped "after the settings of case $CNAME were applied. Its VMs are powered off and were not powered on again."
+      else
+        stopped "after the settings of case $CNAME were compared (nothing was changed)"
+      fi
+      return 1
+    fi
   fi
   if [ "$CH" != "-" ] && [ -n "$VMS" ]; then
     power_vms || return 1
@@ -1095,6 +1223,13 @@ run_case() {
     return 0
   fi
   register || return 1
+  if [ -n "$NOCHK" ]; then
+    wait_nocheck || return 1
+    if [ -n "$OPEN_CASE" ]; then R_STATUS="done (not checked, open)"; else R_STATUS="done (not checked)"; fi
+    write_result; write_report
+    log "==== case $CNAME done (not checked). job start $R_JOB"
+    return 0
+  fi
   wait_job || return 1
   PREV_END=$WJ_E
   stop_mon || return 1
@@ -1128,8 +1263,19 @@ cmd_run() {
   for CR_X in "$RD" "$LOGDIR"; do
     can_write "$CR_X" || { say "tcrun: 1 MB cannot be written in $CR_X (disk full or disk quota, $(free_mb "$CR_X") MB free on the disk)"; exit 2; }
   done
+  # one runner at a time works for an ESX host: under the lock, note the runners of this ESX host that are alive now
+  # (this run waits for them in the queue), then write the pid file of this runner
+  QWAIT=
+  lock_md; CR_LK=$?
+  for CR_P in "$D"/runs/*/"$CHF".pid; do
+    [ "$CR_P" = "$PIDF" ] && continue
+    alive "$CR_P" || continue
+    CR_P=${CR_P%/*}
+    QWAIT="$QWAIT ${CR_P##*/}"
+  done
   say $$ > "$PIDF"
-  CNAME=; IDX=0; STEP=start; HOW=; HOW_TEXT=; PREV_END=
+  [ "$CR_LK" = 0 ] && unlock_md
+  CNAME=; IDX=0; STEP=start; HOW=; HOW_TEXT=; PREV_END=; TAKE=; OPEN_CASE=; R_DONE=
   trap 'rm -f "$PIDF"' 0
   trap 'log "ended by a signal"; release_mine "$CHF"; setstate stopped "ended by a signal"; exit 1' 2 15
   trap '' 1
@@ -1140,9 +1286,25 @@ cmd_run() {
   log "tcrun $TCRUN_VERSION run $RUNID, esx $CHF ($EADDR), $TOTAL case(s), pid $$"
   old_claims
   claim_plan_starts "$CH" | while IFS= read -r CR_LINE; do log "$CR_LINE"; done
+  CR_GO=1
+  if [ -n "$QWAIT" ]; then
+    queue_wait || CR_GO=
+  fi
+  if [ -n "$CR_GO" ]; then
+    CR_B=$(host_block)
+    if [ -n "$CR_B" ]; then
+      R_DONE=1
+      pause "$CR_B. Nothing of this run was started."
+      CR_GO=
+    fi
+  fi
+  if [ -n "$CR_GO" ]; then
+    TAKE=$(open_runs done)
+    [ -n "$TAKE" ] && log "run(s) $(say $TAKE) left a case open on this ESX host (not checked, no end time). It is closed right before the first case of this run is prepared"
+  fi
   log "settings: job starts $LEAD min after the monitoring start, first check $FIRST s after the job start and then every $POLL s, ended after $GONE checks without the process, start wait $START_WAIT min, power on wait $PON_WAIT min, boot wait $BOOT_WAIT min, shutdown wait $SHUT_WAIT min, job $SETTLE min or more after the last VM that the case powered on was ready, $GAP min or more between the end of a job and the start of the next job (cases without a start time), job starts $SPACING min or more apart on this jump VM, preparation $PREP min before a start time of the plan"
-  setstate running "started"
-  for SEQ in $SEQS; do
+  [ -n "$CR_GO" ] && setstate running "started"
+  for SEQ in ${CR_GO:+$SEQS}; do
     IDX=$((IDX + 1))
     CNAME=$(cname "$SEQ")
     if [ -f "$STOPF" ]; then
@@ -1156,7 +1318,11 @@ cmd_run() {
   if [ -z "$HOW" ]; then
     STEP=end
     log "run finished: all $TOTAL case(s) done"
-    setstate done "all $TOTAL case(s) finished"
+    if [ -n "$OPEN_CASE" ]; then
+      setstate done "all $TOTAL case(s) finished. Case $OPEN_CASE stays open (not checked, no end time): its monitoring is not stopped. It is closed when the next run of this ESX host prepares its first case, or by sh $D/tcrun cancel $CHF"
+    else
+      setstate done "all $TOTAL case(s) finished"
+    fi
     return 0
   fi
   CR_I=0; CR_REST=
@@ -1164,10 +1330,102 @@ cmd_run() {
     CR_I=$((CR_I + 1))
     [ "$CR_I" -ge "$IDX" ] && CR_REST="$CR_REST $(cname "$CR_S")"
   done
-  log "run ended ($HOW) at case $CNAME. Not finished:$CR_REST"
+  if [ "$IDX" = 0 ]; then
+    log "run ended ($HOW) before its first case. Not finished:$CR_REST"
+  else
+    log "run ended ($HOW) at case $CNAME. Not finished:$CR_REST"
+  fi
   log "to go on: fix the cause, tick the finished cases as applied in tcgen, generate again and paste block S"
   setstate "$HOW" "$HOW_TEXT"
   return 1
+}
+
+# ---------------------------------------------------------------- runs of the same ESX host: queue, open cases
+# One runner at a time works for an ESX host. A run that is started while another run still works for the same ESX host
+# waits in the queue and starts when that run has ended as done.
+# An "open case" is a case whose crontab lines are on the hosts (its monitoring may run) after its runner ended:
+#   <run>/<host>.work/times holds "<case number> <monitoring start> <job start>" from the registration until the lines are removed.
+state_of() {        # state_of <run dir> <host file name>: state of that runner: running, queued, done, paused, stopped, cancelled,
+                    # died (the state says running or queued, but the runner is gone) or none
+  SO_S=$(grep '^state=' "$1/$2.state" 2>/dev/null | cut -d= -f2-)
+  case "$SO_S" in
+    running|queued) alive "$1/$2.pid" || SO_S=died ;;
+    "") SO_S=none ;;
+  esac
+  say "$SO_S"
+}
+open_case_name() {  # open_case_name <run dir> <host file name>: name of the open case ("" when there is none)
+  OC_Q=$(cut -d' ' -f1 "$1/$2.work/times" 2>/dev/null)
+  case "$OC_Q" in ""|*[!0-9]*) return 0 ;; esac
+  OC_N=$(grep "^CASE $OC_Q " "$1/plan" 2>/dev/null | head -n 1 | cut -d' ' -f4)
+  say "${OC_N:-number $OC_Q}"
+}
+open_runs() {       # open_runs [done]: run ids (other than this run) whose runner for ESX host $CHF has ended with a case open.
+                    # "done": only those that ended as done (a case that was not checked and has no end time)
+  for OR_F in "$D"/runs/*/"$CHF".work/times; do
+    [ -s "$OR_F" ] || continue
+    OR_D=${OR_F%/*}; OR_D=${OR_D%/*}
+    [ "${OR_D##*/}" = "$RUNID" ] && continue
+    alive "$OR_D/$CHF.pid" && continue
+    if [ "$1" = done ] && [ "$(state_of "$OR_D" "$CHF")" != done ]; then continue; fi
+    say "${OR_D##*/}"
+  done
+}
+host_block() {      # prints why run $RUNID must not be started for ESX host $CH now (prints nothing when it may start).
+                    # Needs PLAN, RUNID, CH, CHF
+  HB_AUTO=1
+  HB_Q=$(cseqs "$CH" | head -n 1)
+  grep -q "^START $HB_Q " "$PLAN" && HB_AUTO=
+  for HB_R in $(open_runs); do
+    HB_D=$D/runs/$HB_R
+    HB_S=$(state_of "$HB_D" "$CHF")
+    HB_C=$(open_case_name "$HB_D" "$CHF")
+    if [ "$HB_S" != done ]; then
+      say "run $HB_R of this ESX host ended as $HB_S and left case $HB_C open (crontab lines on the hosts, its monitoring may run). Close it first: sh $D/tcrun cancel $CHF"
+      return 0
+    fi
+    if [ -n "$HB_AUTO" ]; then
+      say "case $HB_C of run $HB_R is still open on this ESX host (it was not checked and has no end time), and the first case of this run has no start time: tcrun cannot tell when that job ends. Give the first case a start time in tcgen, or close the open case first: sh $D/tcrun cancel $CHF"
+      return 0
+    fi
+  done
+  [ -n "$HB_AUTO" ] || return 0
+  for HB_F in "$D"/runs/*/"$CHF".pid; do           # a run that still works here and will leave its last case open
+    alive "$HB_F" || continue
+    HB_D=${HB_F%/*}
+    [ "${HB_D##*/}" = "$RUNID" ] && continue
+    HB_L=$(grep "^CASE [0-9]* $(bre "$CH") " "$HB_D/plan" 2>/dev/null | tail -n 1 | cut -d' ' -f2)
+    [ -n "$HB_L" ] || continue
+    grep -q "^NOCHK $HB_L 0 " "$HB_D/plan" 2>/dev/null || continue
+    grep -q "^MAXWAIT $HB_L [1-9]" "$HB_D/plan" 2>/dev/null && continue
+    say "run ${HB_D##*/} still works for this ESX host and its last case is not checked and has no end time, and the first case of this run has no start time: tcrun cannot tell when that job ends. Give the first case of this run a start time in tcgen"
+    return 0
+  done
+  return 0
+}
+queue_wait() {      # wait until the runners of this ESX host that were alive when this one started ($QWAIT) have ended.
+                    # 1 = this run does not start (stop request, or one of them did not end as done)
+  STEP=queued
+  log "queued: run(s)$QWAIT still work for this ESX host. This run starts when they have ended as done"
+  for QW_R in $QWAIT; do
+    setstate queued "waiting for run $QW_R of this ESX host to end"
+    while alive "$D/runs/$QW_R/$CHF.pid" && [ ! -f "$STOPF" ]; do
+      sleep 5
+    done
+    if [ -f "$STOPF" ]; then                      # looked at first: a stop request often ends both runners at once
+      R_DONE=1
+      stopped "while this run was queued behind run $QW_R. Nothing of this run was started."
+      return 1
+    fi
+    QW_S=$(state_of "$D/runs/$QW_R" "$CHF")
+    if [ "$QW_S" != done ]; then
+      R_DONE=1
+      pause "run $QW_R of this ESX host ended as $QW_S, not as done. Nothing of this run was started. Look at that run (sh $D/tcrun status), then generate again in tcgen."
+      return 1
+    fi
+    log "queued: run $QW_R ended as done"
+  done
+  return 0
 }
 
 # ---------------------------------------------------------------- start, status, stop, key
@@ -1210,9 +1468,10 @@ cmd_start() {
       say "==== $CS_F: run $RUNID was already started on this jump VM. Not started again. Generate again in tcgen to run again."
       continue
     fi
-    CS_O=$(running_for "$CS_F")
-    if [ -n "$CS_O" ]; then
-      say "==== $CS_F: run $CS_O is still running for this ESX host. Not started. (sh $D/tcrun status)"
+    CH=$CS_CH; CHF=$CS_F
+    CS_B=$(host_block)
+    if [ -n "$CS_B" ]; then
+      say "==== $CS_F: not started. $CS_B"
       continue
     fi
     claim_plan_starts "$CS_CH" | sed "s/^/==== $CS_F: /"
@@ -1235,7 +1494,9 @@ cmd_start() {
   done
   for CS_X in $CS_L; do
     CS_F=${CS_X%%:*}
-    if [ -f "$RD/$CS_F.state" ]; then
+    if [ -f "$RD/$CS_F.state" ] && [ "$(state_of "$RD" "$CS_F")" = queued ]; then
+      say "queued:  run $RUNID esx $CS_F   $(grep '^text=' "$RD/$CS_F.state" | cut -d= -f2-). It starts when that has ended as done   log: $LOGDIR/tcrun-$RUNID-$CS_F.log"
+    elif [ -f "$RD/$CS_F.state" ]; then
       say "started: run $RUNID esx $CS_F   log: $LOGDIR/tcrun-$RUNID-$CS_F.log"
     else
       say "==== $CS_F: the runner did not start:"
@@ -1254,16 +1515,22 @@ cmd_status() {
   CT_LAST=$LR
   CT_N=0
   for CT_D in $(ls "$D/runs" 2>/dev/null | sort); do
+    CT_RUNLIVE=0                                 # a run with a runner that is alive is shown with all its ESX hosts
+    for CT_F in "$D/runs/$CT_D"/*.pid; do
+      alive "$CT_F" && CT_RUNLIVE=1
+    done
     for CT_F in "$D/runs/$CT_D"/*.state; do
       [ -f "$CT_F" ] || continue
       CT_X=$(basename "$CT_F" .state)
       CT_S=$(grep '^state=' "$CT_F" | cut -d= -f2-)
       CT_LIVE=0
       alive "$D/runs/$CT_D/$CT_X.pid" && CT_LIVE=1
-      if [ "$CT_S" = running ] && [ "$CT_LIVE" = 0 ]; then
+      if { [ "$CT_S" = running ] || [ "$CT_S" = queued ]; } && [ "$CT_LIVE" = 0 ]; then
         CT_S="died (the runner is not running any more. see $D/runs/$CT_D/$CT_X.out)"
       fi
-      [ "$CT_ALL" = 1 ] || [ "$CT_D" = "$CT_LAST" ] || [ "$CT_LIVE" = 1 ] || continue
+      CT_OPEN=
+      [ "$CT_LIVE" = 0 ] && CT_OPEN=$(open_case_name "$D/runs/$CT_D" "$CT_X")
+      [ "$CT_ALL" = 1 ] || [ "$CT_D" = "$CT_LAST" ] || [ "$CT_RUNLIVE" = 1 ] || [ -n "$CT_OPEN" ] || continue
       CT_N=$((CT_N + 1))
       say "== run $CT_D  esx $CT_X : $CT_S"
       grep -v '^state=' "$CT_F" | sed 's/^/   /'
@@ -1276,6 +1543,9 @@ cmd_status() {
         esac
         say "   log=$CT_L/tcrun-$CT_D-$CT_X.log"
         tail -n 3 "$CT_L/tcrun-$CT_D-$CT_X.log" 2>/dev/null | sed 's/^/   > /'
+      fi
+      if [ -n "$CT_OPEN" ]; then
+        say "   open case: $CT_OPEN. Its crontab lines are on the hosts and its monitoring may run. Close it: sh $D/tcrun cancel $CT_X"
       fi
     done
   done
@@ -1306,6 +1576,7 @@ cmd_stop() {
     CP_N=$((CP_N + 1))
   done
   [ "$CP_N" -gt 0 ] || say "no running tcrun${1:+ for $1}"
+  [ "$CP_N" -gt 0 ] && say "stop ends the runners only: jobs, monitoring and crontab lines of a case that has started stay. To remove them: sh $D/tcrun cancel [esx]"
   latest_run
   if [ -n "$LR" ] && [ -f "$D/runs/$LR/plan" ]; then
     PLAN=$D/runs/$LR/plan
@@ -1315,7 +1586,8 @@ cmd_stop() {
       alive "$D/runs/$LR/$CP_X.pid" && continue
       CP_S=$(grep '^state=' "$D/runs/$LR/$CP_X.state" 2>/dev/null | cut -d= -f2-)
       CP_T=$(grep '^text=' "$D/runs/$LR/$CP_X.state" 2>/dev/null | cut -d= -f2-)
-      say "run $LR esx $CP_X: not running (${CP_S:-not started}${CP_T:+: $CP_T}). To take its crontab lines out: sh $D/tcrun cancel $CP_X"
+      CP_O=$(open_case_name "$D/runs/$LR" "$CP_X")
+      say "run $LR esx $CP_X: not running (${CP_S:-not started}${CP_T:+: $CP_T})${CP_O:+. Case $CP_O is open: to remove its crontab lines and stop its monitoring: sh $D/tcrun cancel $CP_X}"
     done
   fi
   return 0
@@ -1330,7 +1602,8 @@ cmd_key() {
   say "sh $D/esxssh <esx host> hostname"
 }
 
-# ---------------------------------------------------------------- cancel
+# ---------------------------------------------------------------- cancel, closing an open case
+csay() { [ -n "$CC_SAY" ] && say "$*"; return 0; }
 latest_run() {      # LR = the latest run on this jump VM that has a state file (the run that status shows first)
   LR=
   for LR_D in $(ls "$D/runs" 2>/dev/null | sort); do
@@ -1346,33 +1619,96 @@ cancel_mon_stop() { # run the monitoring stop commands of case $SEQ now, once (V
     vlines MX "$CM_VM" | sed 's/\\%/%/g' > "$W/mx.sh"
     vmrun "$(target "$CM_VM")" "$W/mx.sh" "$W/mx.out" 120
     CM_R=$?
-    log "cancel: monitoring stop commands run on vm $CM_VM (exit $CM_R)"
+    log "monitoring stop commands run on vm $CM_VM (exit $CM_R)"
     logf '    | ' "$W/mx.out"
-    say "   monitoring stop: vm $CM_VM (exit $CM_R)"
+    csay "   monitoring stop: vm $CM_VM (exit $CM_R)"
   done
   if has EMX; then
     clines EMX > "$W/emx.sh"
     esxrun "$W/emx.sh" "$W/emx.out" 120
     CM_R=$?
-    log "cancel: monitoring stop commands run on esx $CHF (exit $CM_R)"
+    log "monitoring stop commands run on esx $CHF (exit $CM_R)"
     logf '    | ' "$W/emx.out"
-    say "   monitoring stop: esx $CHF (exit $CM_R)"
+    csay "   monitoring stop: esx $CHF (exit $CM_R)"
   fi
 }
-cancel_chain() {    # cancel run $RUNID for the ESX host $CH
+close_case() {      # close_case [jobs]: close the open case of the run whose plan is loaded, for ESX host $CH: remove its lines,
+                    # stop its monitoring when that has started. "jobs": also show the job processes that still run.
+                    # CC_SAY=1: print to the terminal too. Needs PLAN, RD, CH, CHF, EADDR, W, LOG. 1 = there was no open case
+  CC_F=$RD/$CHF.work/times
+  SEQ=$(cut -d' ' -f1 "$CC_F" 2>/dev/null)
+  CC_MON=$(cut -d' ' -f2 "$CC_F" 2>/dev/null)
+  case "$SEQ" in ""|*[!0-9]*) return 1 ;; esac
+  case "$CC_MON" in *[!0-9]*) CC_MON= ;; esac
+  names_ok || return 1
+  CNAME=$(cname "$SEQ")
+  REGVMS=$(grep "^PAT $SEQ " "$PLAN" | cut -d' ' -f3)
+  JOBVMS=$(grep "^JOB $SEQ " "$PLAN" | cut -d' ' -f3)
+  OFF=0
+  unregister
+  csay "   crontab lines of case $CNAME removed (see the log for each host)"
+  if [ -n "$CC_MON" ] && [ "$(now)" -ge $((CC_MON - 60)) ]; then
+    cancel_mon_stop
+  fi
+  if [ "$1" = jobs ]; then
+    for CC_VM in $JOBVMS; do
+      if ! vhas PROC "$CC_VM"; then
+        csay "   job on vm $CC_VM: not looked for (the plan has no process name). tcrun does not end jobs."
+        continue
+      fi
+      mk_poll "$CC_VM" "$W/poll.sh"
+      vmrun "$(target "$CC_VM")" "$W/poll.sh" "$W/poll.out" 60
+      CC_J=$(tval TCGEN-PROC "$W/poll.out" | tr -d ' ')
+      csay "   job on vm $CC_VM: ${CC_J:-unknown} process(es) match '$(vlines PROC "$CC_VM" | head -n 1)'. tcrun does not end jobs."
+      log "job on vm $CC_VM: ${CC_J:-unknown} process(es) still match the process name"
+    done
+  fi
+  : > "$CC_F"
+  return 0
+}
+close_open() {      # close_open <run id> <closed by>: close the case that an ended run left open for this ESX host. Runs in a
+                    # subshell with the plan of that run, so that nothing of the calling runner changes
+  (
+    CO_W=$W; CO_LOG=$LOG
+    load_plan "$D/runs/$1/plan"
+    W=$CO_W; LOG=$CO_LOG
+    EADDR=$(esxaddr "$CH")
+    if [ "$CH" != "-" ] && ! addr_ok "$EADDR"; then
+      log "WARN the plan of run $1 holds an ESX address that tcrun does not accept: its open case was not closed"
+      exit 0
+    fi
+    CC_SAY=
+    if close_case; then
+      ST=$RD/$CHF.state
+      TOTAL=$(cseqs "$CH" | grep -c .); IDX=$TOTAL; STEP=end
+      setstate done "all $TOTAL case(s) finished. Case $CNAME was closed $(stamp) by $2 (monitoring stopped, lines removed)"
+      printf '%s,%s,,,,,,,,%s,%s,"%s"\n' "$CNAME" "$CHF" "$(stamp)" "$(stamp)" "closed by $2" >> "$LOGDIR/tcrun-$RUNID-$CHF-result.csv"
+      log "case $CNAME of run $1 is closed"
+    fi
+  )
+}
+take_over() {       # close the cases that earlier runs of this ESX host left open (not checked, no end time), right before
+                    # the first case of this run is prepared
+  for TO_R in $TAKE; do
+    log "run $TO_R left its last case open on this ESX host (not checked, no end time). Closing it now: monitoring stop, lines removed"
+    close_open "$TO_R" "run $RUNID before case $CNAME was prepared"
+  done
+  TAKE=
+}
+cancel_chain() {    # cancel the runner of run $RUNID for ESX host $CH (running or queued) and close its open case
   ST=$RD/$CHF.state; PIDF=$RD/$CHF.pid; STOPF=$RD/$CHF.stop
   LOG=$LOGDIR/tcrun-$RUNID-$CHF.log; RES=$LOGDIR/tcrun-$RUNID-$CHF-result.csv
   EADDR=$(esxaddr "$CH")
-  CN_S=$(grep '^state=' "$ST" 2>/dev/null | cut -d= -f2-)
+  CN_S=$(state_of "$RD" "$CHF")
   CNAME=$(grep '^case=' "$ST" 2>/dev/null | cut -d= -f2-)
   STEP=$(grep '^step=' "$ST" 2>/dev/null | cut -d= -f2-)
   IDX=$(grep '^pos=' "$ST" 2>/dev/null | cut -d= -f2- | cut -d/ -f1); TOTAL=$(cseqs "$CH" | grep -c .)
-  case "$CN_S" in
-    done) say "== esx $CHF: run $RUNID is done. Nothing to cancel."; return 0 ;;
-    cancelled) say "== esx $CHF: run $RUNID was cancelled already."; return 0 ;;
-  esac
-  if [ "$CH" != "-" ] && ! addr_ok "$EADDR"; then say "== esx $CHF: bad ESX address in the plan. Not cancelled."; return 1; fi
-  say "== esx $CHF: cancelling run $RUNID (state ${CN_S:-none}, case ${CNAME:-none}, step ${STEP:-none})"
+  if [ "$CH" != "-" ] && ! addr_ok "$EADDR"; then say "== run $RUNID esx $CHF: bad ESX address in the plan. Not cancelled."; return 1; fi
+  if [ "$CN_S" = done ]; then
+    say "== run $RUNID esx $CHF: closing the case that this run left open (${CNAME:-?})"
+  else
+    say "== run $RUNID esx $CHF: cancelling (state $CN_S, case ${CNAME:-none}, step ${STEP:-none})"
+  fi
   W=$RD/$CHF.cancel.$$
   mkdir -p "$W" || { say "   cannot create $W"; return 1; }
   if alive "$PIDF"; then
@@ -1388,34 +1724,12 @@ cancel_chain() {    # cancel run $RUNID for the ESX host $CH
         say "   WARN it was changing settings or VM power on the ESX host. That task goes on to its end on the host: check the VMs" ;;
     esac
   fi
-  log "CANCEL requested (sh tcrun cancel). state was ${CN_S:-none}, case ${CNAME:-none}, step ${STEP:-none}"
-  # the case whose crontab lines may be on the hosts: <work>/times is written when its lines are registered
-  # and removed when they are removed
-  SEQ=$(cut -d' ' -f1 "$RD/$CHF.work/times" 2>/dev/null)
-  CN_MON=$(cut -d' ' -f2 "$RD/$CHF.work/times" 2>/dev/null)
-  case "$SEQ" in ""|*[!0-9]*) SEQ= ;; esac
-  case "$CN_MON" in *[!0-9]*) CN_MON= ;; esac
-  if [ -n "$SEQ" ] && names_ok; then
-    CNAME=$(cname "$SEQ")
-    REGVMS=$(grep "^PAT $SEQ " "$PLAN" | cut -d' ' -f3)
-    JOBVMS=$(grep "^PROC $SEQ " "$PLAN" | cut -d' ' -f3)
-    OFF=0
-    unregister
-    say "   crontab lines of case $CNAME removed (see the log for each host)"
-    if [ -n "$CN_MON" ] && [ "$(now)" -ge $((CN_MON - 60)) ]; then
-      cancel_mon_stop
-    fi
-    for CN_VM in $JOBVMS; do
-      mk_poll "$CN_VM" "$W/poll.sh"
-      vmrun "$(target "$CN_VM")" "$W/poll.sh" "$W/poll.out" 60
-      CN_J=$(tval TCGEN-PROC "$W/poll.out" | tr -d ' ')
-      say "   job on vm $CN_VM: ${CN_J:-unknown} process(es) match '$(vlines PROC "$CN_VM" | head -n 1)'. tcrun does not end jobs."
-      log "cancel: job on vm $CN_VM: ${CN_J:-unknown} process(es) still match the process name"
-    done
-    : > "$RD/$CHF.work/times"
-  else
+  log "CANCEL requested (sh tcrun cancel). state was $CN_S, case ${CNAME:-none}, step ${STEP:-none}"
+  CC_SAY=1
+  if ! close_case jobs; then
     say "   no crontab lines of this run are registered on the hosts"
   fi
+  CC_SAY=
   # job start times of this run and ESX host that have not come yet
   CN_N=$(now)
   for CN_D in "$MD"/[0-9]*; do
@@ -1425,46 +1739,77 @@ cancel_chain() {    # cancel run $RUNID for the ESX host $CH
     [ "$CN_T" -gt "$CN_N" ] || continue
     case "$(cat "$CN_D/who" 2>/dev/null)" in "run $RUNID, esx $CHF, "*) rm_claim "$CN_T" ;; esac
   done
+  if [ "$CN_S" = done ]; then
+    [ -n "$CNAME" ] && printf '%s,%s,,,,,,,,%s,%s,"%s"\n' "$CNAME" "$CHF" "$(stamp)" "$(stamp)" "closed by sh tcrun cancel" >> "$RES"
+    log "case ${CNAME:-?} is closed (sh tcrun cancel)"
+    IDX=$TOTAL; STEP=end
+    setstate done "all $TOTAL case(s) finished. Case ${CNAME:-?} was closed $(stamp) by sh tcrun cancel (monitoring stopped, lines removed)"
+    say "   closed. The run stays done."
+    return 0
+  fi
   [ -n "$CNAME" ] && printf '%s,%s,,,,,,,,,%s,"%s"\n' "$CNAME" "$CHF" "$(stamp)" "cancelled" >> "$RES"
   log "CANCELLED. Settings that this run applied stay as they are."
   setstate cancelled "cancelled at $(stamp) by sh tcrun cancel. Settings that the run applied stay as they are"
   say "   cancelled. Settings that this run applied stay as they are."
 }
-cmd_cancel() {      # cancel [esx]: end the latest run (all its ESX hosts or one) and take its crontab lines out
-  latest_run
-  [ -n "$LR" ] && [ -f "$D/runs/$LR/plan" ] || { say "no run to cancel on this jump VM"; return 0; }
-  load_plan "$D/runs/$LR/plan"
-  ssh_setup
+cmd_cancel() {      # cancel [esx]: every runner that is running or queued, and every case that an ended run left open.
+                    # The newest run first, so that a queued run is ended before the run it waits for
   CN_K=0
-  for CH in $(chains); do
-    CHF=$(chfile "$CH")
-    [ -z "$1" ] || [ "$1" = "$CHF" ] || continue
-    CN_K=$((CN_K + 1))
-    cancel_chain
+  for CN_RID in $(ls "$D/runs" 2>/dev/null | sort -r); do
+    CN_PL=$D/runs/$CN_RID/plan
+    [ -f "$CN_PL" ] || continue
+    CN_HIT=
+    for CN_F in "$D/runs/$CN_RID"/*.pid; do
+      alive "$CN_F" && CN_HIT=1
+    done
+    for CN_F in "$D/runs/$CN_RID"/*.work/times; do
+      [ -s "$CN_F" ] && CN_HIT=1
+    done
+    [ -n "$CN_HIT" ] || continue
+    [ "$(head -n 1 "$CN_PL")" = "TCGEN-PLAN 2" ] || continue
+    load_plan "$CN_PL"
+    [ -n "$SO" ] || ssh_setup
+    for CH in $(chains); do
+      CHF=$(chfile "$CH")
+      [ -z "$1" ] || [ "$1" = "$CHF" ] || continue
+      alive "$RD/$CHF.pid" || [ -s "$RD/$CHF.work/times" ] || continue
+      CN_K=$((CN_K + 1))
+      cancel_chain
+    done
   done
-  [ "$CN_K" -gt 0 ] || say "run $RUNID has no ESX host $1"
+  [ "$CN_K" -gt 0 ] || say "nothing to cancel${1:+ for $1}: no run is running or queued, and no case is open"
+  return 0
 }
 
 # ---------------------------------------------------------------- check (reads only)
 ck_bad() { BAD=$((BAD + 1)); say "  [PROBLEM] $*"; : > "$W/bad.$BAD"; }
 ck_ok() { say "  [ok] $*"; }
-ck_vm() {           # login, clock, pgrep and crontab of one VM (once per ssh target)
+ck_vm() {           # login, clock, pgrep and crontab of one VM (one login per ssh target: $W/done.vm holds "<target> <pgrep yes|no|fail>")
   CV_T=$(target "$1")
-  if grep -q "^$(bre "$CV_T")\$" "$W/done.vm" 2>/dev/null; then return 0; fi
-  say "$CV_T" >> "$W/done.vm"
-  CV_J=$(now)
-  vmrun "$CV_T" "$W/probe.sh" "$W/probe.out" 60
-  CV_R=$?
-  CV_C=$(tval TCGEN-CLOCK "$W/probe.out")
-  case "$CV_C" in
-    ""|*[!0-9]*) ck_bad "vm $1 ($CV_T): ssh login failed (exit $CV_R: $(first "$W/probe.out"))"; return 0 ;;
-  esac
-  ck_ok "vm $1 ($CV_T): ssh login works, clock $((CV_C - CV_J)) s ahead of the jump VM, tcgen lines in crontab: $(tval TCGEN-LINES "$W/probe.out")"
-  say "$((CV_C - CV_J))" >> "$W/clocks"
-  [ "$(tval TCGEN-CRONTAB "$W/probe.out")" = yes ] || ck_bad "vm $1: crontab command not found"
-  if vhas PROC "$1" && [ "$(tval TCGEN-PGREP "$W/probe.out")" != yes ]; then
-    ck_bad "vm $1: pgrep not found, the end of the job cannot be detected"
+  CV_P=$(grep "^$(bre "$CV_T") " "$W/done.vm" 2>/dev/null | head -n 1 | cut -d' ' -f2)
+  if [ -z "$CV_P" ]; then
+    CV_J=$(now)
+    vmrun "$CV_T" "$W/probe.sh" "$W/probe.out" 60
+    CV_R=$?
+    CV_C=$(tval TCGEN-CLOCK "$W/probe.out")
+    case "$CV_C" in
+      ""|*[!0-9]*)
+        say "$CV_T fail" >> "$W/done.vm"
+        ck_bad "vm $1 ($CV_T): ssh login failed (exit $CV_R: $(first "$W/probe.out"))"
+        return 0 ;;
+    esac
+    CV_P=no
+    [ "$(tval TCGEN-PGREP "$W/probe.out")" = yes ] && CV_P=yes
+    say "$CV_T $CV_P" >> "$W/done.vm"
+    ck_ok "vm $1 ($CV_T): ssh login works, clock $((CV_C - CV_J)) s ahead of the jump VM, tcgen lines in crontab: $(tval TCGEN-LINES "$W/probe.out")"
+    say "$((CV_C - CV_J))" >> "$W/clocks"
+    [ "$(tval TCGEN-CRONTAB "$W/probe.out")" = yes ] || ck_bad "vm $1: crontab command not found"
   fi
+  [ "$CV_P" = fail ] && return 0
+  if vhas JOB "$1" && ! has NOCHK && [ "$CV_P" != yes ]; then       # pgrep is needed only for a case whose job is checked
+    ck_bad "vm $1: pgrep not found, the end of the job of case $CNAME cannot be detected"
+  fi
+  return 0
 }
 check_body() {
   BAD=0
@@ -1491,6 +1836,21 @@ check_body() {
     CHF=$(chfile "$CH"); EADDR=$(esxaddr "$CH")
     say ""
     say "== ESX host $CHF"
+    # other runs of this ESX host: a run that still works here (this run is queued behind it), a case left open
+    CB_BLK=$(host_block)
+    [ -n "$CB_BLK" ] && ck_bad "esx $CHF: block S would not start this run. $CB_BLK"
+    CB_BUSY=$(running_for "$CHF")
+    if [ -n "$CB_BUSY" ]; then
+      ck_ok "esx $CHF: run $CB_BUSY still works for this ESX host. Block S puts this run in the queue: it starts when that run has ended as done. This check does not log in to the VMs of this ESX host (a job may run)"
+      say "       that run now: case $(grep '^case=' "$D/runs/$CB_BUSY/$CHF.state" 2>/dev/null | cut -d= -f2-), $(grep '^text=' "$D/runs/$CB_BUSY/$CHF.state" 2>/dev/null | cut -d= -f2-)"
+    else
+      CB_BUSY=$(open_runs done | head -n 1)
+      if [ -n "$CB_BUSY" ] && [ -z "$CB_BLK" ]; then
+        ck_ok "esx $CHF: case $(open_case_name "$D/runs/$CB_BUSY" "$CHF") of run $CB_BUSY is still open (not checked, no end time). This run closes it right before its first case is prepared. This check does not log in to the VMs of this ESX host (a job may run)"
+      elif [ -n "$CB_BLK" ]; then
+        CB_BUSY=$(open_runs | head -n 1)
+      fi
+    fi
     CB_ESX=0
     if [ "$CH" != "-" ]; then
       for SEQ in $(cseqs "$CH"); do
@@ -1542,6 +1902,21 @@ check_body() {
           ck_bad "case $CNAME: the start time $(clines START | head -n 1 | cut -d' ' -f2-) has already passed. Change it in tcgen and generate again."
         else
           ck_ok "start time: job at $(clines START | head -n 1 | cut -d' ' -f2-) ($(( (CB_AT - $(now)) / 60 )) min from now). Preparation (settings, VM power) from $PREP min before it."
+          if has NOCHK; then
+            CB_NC=$(clines NOCHK | head -n 1 | cut -d' ' -f1); CB_NT=$(clines NOCHK | head -n 1 | cut -d' ' -f2-)
+            CB_MW=$(clines MAXWAIT | head -n 1)
+            case "$CB_MW" in ""|*[!0-9]*) CB_MW=0 ;; esac
+            if [ "$CB_NC" != 0 ] && [ "$CB_MW" -gt 0 ]; then
+              CB_E="2 min before $CB_NT (the next case is prepared then), or $CB_MW min after the job start (maximum wait), whichever is earlier"
+            elif [ "$CB_NC" != 0 ]; then
+              CB_E="2 min before $CB_NT (the next case is prepared then)"
+            elif [ "$CB_MW" -gt 0 ]; then
+              CB_E="$CB_MW min after the job start (maximum wait)"
+            else
+              CB_E="none (last case of this ESX host, no maximum wait). Its monitoring is stopped when the next run of this ESX host prepares its first case, or by sh $D/tcrun cancel $CHF"
+            fi
+            ck_ok "not checked: the plan sets the start time, so tcrun does not look for the job and does not log in to the VMs while it runs. End of the case: $CB_E"
+          fi
           CB_M=$((CB_AT / 60 * 60))
           for CB_D in "$MD"/[0-9]*; do
             [ -d "$CB_D" ] || continue
@@ -1581,6 +1956,10 @@ check_body() {
         fi
         if [ "$CB_PW" = 1 ] && grep "^TCGEN-POWER $(bre "$CB_VM") " "$W/apply.out" | grep -q ' now=off '; then
           ck_ok "vm $CB_VM: powered off now. The run powers it on and then waits for its ssh login."
+          continue
+        fi
+        if [ -n "$CB_BUSY" ]; then
+          ck_ok "vm $CB_VM: not logged in to by this check (run $CB_BUSY, see above). The run looks at it when it starts."
           continue
         fi
         ck_vm "$CB_VM"

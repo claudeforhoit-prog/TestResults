@@ -925,9 +925,13 @@ class App(object):
         "S. 실행 블록: 점프 VM 터미널에 붙여넣으면 ESX 호스트별 진행이 백그라운드로 시작된다. 터미널을 닫아도 계속된다. "
         "설정 값이 현재 값과 다른 케이스에서는 그 케이스의 VM 을 자동으로 종료하고 다시 켠다. VM 행의 전원 칸이 끔인 VM 은 끄고, "
         "켬인 VM 은 꺼져 있으면 켠다.",
-        "진행 확인: sh {D}/tcrun status (실행의 모든 ESX 호스트와 각 상태). 멈추기: sh {D}/tcrun stop (실행 중인 잡은 건드리지 "
-        "않는다). 취소: sh {D}/tcrun cancel [ESX 호스트] (진행을 바로 끝내고 등록한 crontab 줄을 지운다. 시작된 모니터링은 중지 "
-        "명령을 실행한다. 실행 중인 잡은 끝내지 않고 목록만 보인다. 적용한 설정은 그대로 둔다).",
+        "실행을 더할 때: 앞 실행이 진행 중인 ESX 호스트에 새 S 블록을 붙여넣으면 그 실행은 대기(queued)했다가 앞 실행이 done 으로 "
+        "끝나면 스스로 시작한다. 앞 실행이 멈췄거나(paused, stopped) 줄을 남긴 채 끝났으면 시작하지 않고 이유를 알린다. 그때는 "
+        "sh {D}/tcrun cancel <ESX 호스트> 로 정리한 뒤 같은 S 블록을 다시 붙여넣는다.",
+        "진행 확인: sh {D}/tcrun status (진행 중, 대기 중, 줄이 남은 실행을 ESX 호스트별로). 멈추기: sh {D}/tcrun stop (진행만 "
+        "멈춘다. 시작된 잡, 모니터링, crontab 줄은 그대로 둔다). 취소: sh {D}/tcrun cancel [ESX 호스트] (진행 중이거나 대기 중인 "
+        "실행을 바로 끝내고 등록한 crontab 줄을 지운다. 시작된 모니터링은 중지 명령을 실행한다. 실행 중인 잡은 끝내지 않고 목록만 "
+        "보인다. 적용한 설정은 그대로 둔다. 끝난 실행이 남긴 줄과 모니터링도 정리한다).",
         "점프 VM 로그 폴더에 남는 파일: tcrun-<실행 ID>-<ESX 호스트>.log (단계와 시각), -result.csv (케이스별 결과), "
         "-perfreport_cases.csv (성능 리포트 생성기의 케이스 정보 파일. 잡 시작과 종료는 실제 시각).",
         "진행이 중간에 멈추면 로그의 PAUSED 줄에서 이유를 확인하고 고친 뒤, 끝난 케이스를 탭 4 에서 적용 체크하고 다시 생성해 "
@@ -967,11 +971,20 @@ class App(object):
                 "프로파일), 최대 대기, 시작 시각, 테스트 그룹",
                 "시작 시각: 비우면 '자동' 이다. 자동인 케이스는 앞 케이스의 잡이 끝난 시각에서 %d분(설정 영역의 '케이스 사이 간격') 이상 지난 "
                 "뒤에 잡을 시작한다. 시각을 적으면 그 시각에 잡을 시작한다. '10:00' 처럼 시:분만 적으면 [명령어 생성] 을 누른 뒤 처음 오는 "
-                "그 시각이고, '2026-11-20 10:00:00' 처럼 날짜까지 적을 수도 있다. 예: 첫 케이스에 10:00 을 적고 나머지를 비우면 첫 케이스는 "
-                "10시에, 나머지는 앞 케이스가 끝난 뒤 차례로 시작한다." % int(st.get("seq_gap_min", 30)),
-                "시각을 적은 케이스: 그 시각 %d분 전(설정 영역의 '시작 시각 준비')에 설정 적용과 VM 전원 맞추기를 시작한다. 케이스 사이 간격은 "
-                "적용하지 않는다. 앞 케이스가 그때까지 끝나지 않았거나 VM 을 켠 뒤의 대기가 남았으면 가능한 가장 이른 시각에 시작하고 로그에 "
-                "WARN 을 남긴다." % int(st.get("seq_prep_lead_min", 60)),
+                "그 시각이고, '2026-11-20 10:00:00' 처럼 날짜까지 적을 수도 있다." % int(st.get("seq_gap_min", 30)),
+                "시작 시각에 +간격: '+8:00', '+8', '+8.5' 처럼 + 로 시작하면 같은 ESX 호스트의 바로 앞 케이스 시작 시각에서 그만큼 뒤다"
+                "(8시간, 8시간, 8시간 30분). 예: 첫 케이스에 10:00, 다음 케이스들에 +8:00 을 적으면 10:00, 18:00, 다음 날 02:00 에 시작한다. "
+                "그 호스트의 첫 케이스(이번 생성에 넣는 케이스 가운데)에는 시각을 직접 적는다. +간격을 적은 케이스를 [+ 케이스 추가] 로 "
+                "복사하면 같은 +간격이 들어간다.",
+                "시각을 적은 케이스(시각 또는 +간격): 그 시각 %d분 전(설정 영역의 '시작 시각 준비')에 설정 적용과 VM 전원 맞추기를 시작한다. "
+                "케이스 사이 간격은 적용하지 않는다. VM 을 켠 뒤의 대기가 남았으면 가능한 가장 이른 시각에 시작하고 로그에 WARN 을 "
+                "남긴다." % int(st.get("seq_prep_lead_min", 60)),
+                "잡 확인 안 함: 시작 시각을 적은 케이스는 정해진 시각에 진행하므로 잡 프로세스를 확인하지 않는다. 잡이 실행되는 동안 VM 에 "
+                "접속하지 않는다(VM 접속은 준비 때 VM 마다 2~3번, 케이스가 끝난 뒤 1번). 그 케이스는 다음 케이스 준비 2분 전에 모니터링을 "
+                "중지하고 끝낸다. 최대 대기를 적었으면 잡 시작 + 최대 대기가 더 이를 때 그 시각에 끝낸다. 마지막 케이스에 최대 대기가 없으면 "
+                "모니터링을 중지하지 않고 실행을 끝낸다(같은 ESX 호스트의 다음 실행이 준비를 시작할 때나 tcrun cancel 로 중지).",
+                "잡 확인 함: 시작 시각이 자동인 케이스와, 시각을 적었어도 바로 다음 케이스가 자동인 케이스는 잡 종료를 알아야 하므로 확인한다. "
+                "어느 케이스를 확인하는지는 탭 5 의 실행 계획에 케이스마다 '잡 확인: 함 / 안 함' 으로 나온다.",
                 "잡 시작 최소 간격: 모든 잡 시작은 서로 %d분 이상 떨어진다. ESX 호스트가 달라도, 이 점프 VM 에서 도는 다른 실행과도 같다. "
                 "자동인 케이스의 잡 시작이 다른 잡 시작과 가까우면 그 잡 시작 %d분 뒤로 옮기고 로그에 spacing 줄을 남긴다. 시각을 적은 "
                 "케이스끼리 이보다 가까우면 [명령어 생성] 이 오류를 낸다." % (int(st.get("seq_start_spacing_min", 5)),
@@ -987,7 +1000,7 @@ class App(object):
                 "VM 을 켠 케이스의 잡은 마지막으로 켠 VM 의 준비(1GB page backing 확인, ssh 로그인)가 끝난 시각에서 %d분 이상 지난 뒤에 "
                 "시작한다. 모니터링은 잡 시작 %d분 전에 시작한다. 켜져 있던 VM 만 쓰면 이 대기는 없다. 이 값은 설정 영역의 'VM 켠 뒤 "
                 "잡 시작까지 최소' 칸에서 바꾼다." % (int(st.get("seq_settle_min", 10)), ld[0]),
-                "잡 종료 확인: 탭 1 의 프로세스 이름으로 각 VM 에서 프로세스를 찾는다. 잡이 있는 모든 VM 에서 한 번 이상 보인 뒤 "
+                "잡 종료 확인(확인하는 케이스): 탭 1 의 프로세스 이름으로 각 VM 에서 프로세스를 찾는다. 잡이 있는 모든 VM 에서 한 번 이상 보인 뒤 "
                 "%d회 연속으로 없으면 종료로 판정한다. 잡 시작 뒤 %d분 안에 한 번도 보이지 않으면 진행을 멈춘다."
                 % (int(st.get("seq_gone_count", 3)), int(st.get("seq_start_wait_min", 10))),
                 "확인하는 때: 잡이 실행되는 동안 VM 접속을 줄이려고, 잡 시작 %d초 뒤에 한 번 확인한 다음 %d분(설정 영역의 '잡 종료 확인 간격')마다 "
@@ -996,7 +1009,8 @@ class App(object):
                 % (int(st.get("seq_first_check_sec", 60)), poll_minutes(st.get("seq_poll_sec", 1800))),
                 "설정 칸: 두 번 누르면 탭 3 의 프로파일을 고르는 창이 열린다. 여러 개를 고르면 탭 3 의 순서대로 합치고, 같은 키가 겹치면 "
                 "아래쪽 프로파일의 값을 쓴다.",
-                "최대 대기: 잡 시작부터 이 시간(시간:분, 예 12:00)이 지나도 잡이 끝나지 않으면 진행을 멈춘다. 비우면 제한이 없다.",
+                "최대 대기: 잡을 확인하는 케이스는 잡 시작부터 이 시간(시간:분, 예 12:00)이 지나도 잡이 끝나지 않으면 진행을 멈춘다. "
+                "잡을 확인하지 않는 케이스는 이 시간이 지나면 모니터링을 중지하고 케이스를 끝낸다. 비우면 제한이 없다.",
                 "ESX 호스트가 없는 케이스는 VM 전원을 다루지 않고, 잡, 모니터링, 설정이 있는 VM 행만 쓴다. 그 VM 은 켜져 있어야 한다.",
                 "잡 없이 설정만 지정한 케이스는 설정만 적용하고 다음 케이스로 넘어간다. 모니터링만 있고 잡이 없는 케이스는 오류다.",
                 "[명령어 생성] 을 누르면 넣을 케이스를 고르는 창이 열린다. 처음에는 적용 체크하지 않은 케이스가 골라져 있다. "
@@ -1155,7 +1169,8 @@ class App(object):
                 "[명령어 생성] 을 누르면 넣을 케이스를 고르는 창이 열린다. 테스트 그룹, 잡 종료 (리포트), 종료 기준 VM 은 "
                 "리포트용 CSV 에만 들어간다. 자세한 설명은 [도움말].",
         "seq": "순서 실행: 점프 VM 이 케이스를 표의 순서대로 진행하고, 잡의 프로세스가 끝난 것을 확인한 뒤 다음 케이스로 넘어간다. "
-               "시작 시각 칸을 비우면 자동(앞 케이스의 잡이 끝나고 '케이스 사이 간격' 뒤), 시각을 적으면 그 시각에 잡을 시작한다. "
+               "시작 시각 칸을 비우면 자동(앞 케이스의 잡이 끝나고 '케이스 사이 간격' 뒤), 시각(10:00)이나 +간격(+8:00 = 앞 케이스 시작 "
+               "8시간 뒤)을 적으면 그 시각에 잡을 시작하고 잡을 확인하지 않는다. "
                "케이스 행의 설정 칸은 ESX 호스트 설정, VM 행의 설정 칸은 VM 설정(탭 3 의 프로파일)이다. "
                "칸을 두 번 누르거나 행을 고르고 Enter 를 누르면 고친다. [명령어 생성] 을 누르면 넣을 케이스를 고르는 창이 열린다. "
                "자세한 설명은 [도움말].",
@@ -1610,7 +1625,7 @@ class App(object):
             return
         parent = os.path.normpath(parent)
         try:
-            dest, done = core.backup_to(self.base, parent)
+            dest, done = core.backup_to(self.base, parent, s=self.settings)
         except OSError as e:
             messagebox.showerror(TITLE, "백업하지 못함\n%s\n%s" % (parent, e), parent=self.root)
             return
@@ -1643,9 +1658,16 @@ class App(object):
             messagebox.showerror(TITLE, "이 폴더에는 tcgen 데이터 파일이 없음\n%s\n\n필요한 파일: %s"
                                  % (src, ", ".join(core.DATA_FILES)), parent=self.root)
             return
+        got = core.backup_case_file(src)
+        extra = ""
+        if got and got[1]:
+            extra = ("\n\n이 백업에는 테스트 케이스 파일의 사본이 있다. 아래 파일도 백업한 때의 내용으로 바꾼다(바꾸기 전 내용은 같은 "
+                     "backup 폴더에 복사).\n%s" % got[0])
+        elif got:
+            extra = ("\n\n이 백업에는 테스트 케이스 파일의 사본이 없다. 탭 4 의 표는 아래 파일의 지금 내용 그대로다.\n%s" % got[0])
         if not messagebox.askyesno(TITLE, "이 백업으로 현재 데이터를 바꿀까요?\n\n백업 폴더: %s\n데이터 폴더: %s\n\n"
                                           "바꾸기 전 현재 파일은 데이터 폴더의 backup 아래에 복사해 둔다. 테스트 기록, 로그 파일은 같은 이름이 "
-                                          "없을 때만 복사한다." % (src, self.base), parent=self.root):
+                                          "없을 때만 복사한다.%s" % (src, self.base, extra), parent=self.root):
             return
         try:
             keep, done = core.restore_from(src, self.base)
@@ -2185,7 +2207,8 @@ class App(object):
                 try:
                     c["seq_start"] = core.fmt_seq_start(t)
                 except ValueError as ex:
-                    messagebox.showerror(TITLE, "시작 시각 칸. %s\n\n비우면 자동(앞 케이스가 끝난 뒤 시작)이다." % ex, parent=self.root)
+                    messagebox.showerror(TITLE, "시작 시각 칸. %s\n\n비우면 자동(앞 케이스가 끝난 뒤 시작)이다. 시각은 10:00 또는 "
+                                         "2026-11-20 10:00:00, 앞 케이스 시작 시각 기준의 간격은 +8:00 처럼 적는다." % ex, parent=self.root)
                     return
             elif key in ("desc", "group"):
                 c[key] = " ".join(t.split())          # 줄바꿈, 탭은 빈칸 하나로
@@ -2235,7 +2258,8 @@ class App(object):
             row["name"] = unique_name(src.get("name", ""), set(x.get("name", "") for x in self.cases))
             row["applied"] = False          # 새로 만든 케이스는 아직 등록 전
             row["end_time"] = ""            # 잡 종료는 케이스마다 다르므로 복사하지 않음 (자동)
-            row["seq_start"] = ""           # 시작 시각도 복사하지 않음 (자동: 앞 케이스가 끝난 뒤 시작)
+            # 시각은 복사하지 않는다(자동: 앞 케이스가 끝난 뒤 시작). +간격은 복사한다(앞 케이스 시작 시각 기준이라 그대로 뜻이 맞음)
+            row["seq_start"] = src.get("seq_start", "") if (src.get("seq_start") or "").startswith("+") else ""
             if row.get("stop_mode") == "manual":
                 row["stop_mode"], row["stop_time"] = "auto", ""
             self.cases.insert(new, row)
@@ -2778,6 +2802,11 @@ class App(object):
                         "점프 VM 로그 폴더: %s\n" % res["jump_log_dir"])
         if any(pc["host_opts"] or any(vm["set"] for vm in pc["vms"]) for pc in res["cases"]):
             t.insert("end", "설정을 적용하는 케이스가 있다. 값이 현재 값과 다르면 그 케이스의 VM 을 자동으로 종료하고 다시 켠다.\n", "warn")
+        nochk = [pc["name"] for pc in res["cases"] if pc.get("nocheck")]
+        chk = [pc["name"] for pc in res["cases"] if not pc.get("nocheck") and any(vm["job"] for vm in pc["vms"])]
+        if nochk:
+            t.insert("end", "잡 확인: 시작 시각을 적은 케이스 %d개는 확인하지 않음(잡이 실행되는 동안 VM 접속 없음)%s\n" % (
+                len(nochk), (", 확인하는 케이스 %d개(%s)" % (len(chk), ", ".join(chk[:8]))) if chk else ""))
         offs = ["%s(%s)" % (pc["name"], ", ".join(vm["name"] for vm in pc["vms"] if vm["power"] == "off"))
                 for pc in res["cases"] if any(vm["power"] == "off" for vm in pc["vms"])]
         if offs:

@@ -9,7 +9,8 @@ tcrun 과 tcgen_apply.py 에는 시험용 코드가 없다. 경로만 환경 변
 경우: (a) 케이스 2개의 전체 흐름 (b) 값이 이미 같음 (d) 게스트 종료 불가 (e) 전원 켜기 실패와 rollback
 (f) 프로세스가 보이지 않음 (g) ssh 일시 실패 (h) stop (i) 없는 VM, 없는 호스트 옵션 (j) 판 불일치
 (k) ESX 호스트 2대 (l) 설정만 있는 케이스, 그리고 VM 을 켠 뒤 대기, 시계 차이, 점검(check), 등록 실패, 최대 대기,
-VM 전원(꺼진 VM 을 하나씩 켜기, 1GB page backing, 끔인 VM), 시작 시각 준비, 잡 시작 최소 간격.
+VM 전원(꺼진 VM 을 하나씩 켜기, 1GB page backing, 끔인 VM), 시작 시각 준비, 잡 시작 최소 간격,
+잡을 확인하지 않는 케이스(시작 시각 지정), 같은 ESX 호스트의 실행 대기(queue), 열린 케이스 닫기, cancel.
 """
 import csv
 import datetime as dt
@@ -418,7 +419,7 @@ class StartTimeAndGapTests(TcrunBase):
         self.assertIn("WARN the start time 2026-11-20 10:03 of the plan cannot be met any more", log)
         self.assertLess(epoch(b["job_start"]) - epoch(a["end"]), 75 + 60 + 90, "지킬 수 없으면 가능한 가장 이른 시각에 시작")
         self.assertNotIn("gap:", log, "시각을 적은 케이스에는 케이스 사이 간격을 적용하지 않음")
-        self.assertEqual(b["status"], "done")
+        self.assertEqual(b["status"], "done (not checked, open)", "시각을 적은 마지막 케이스는 확인하지 않고, 끝나는 시각이 없어 열린 채로 남음")
 
     def test_check_reports_a_start_time_that_has_passed(self):
         e = self.e
@@ -877,7 +878,7 @@ class StopTests(TcrunBase):
         self.assertTrue(out.startswith("no running tcrun\n"), out)
         self.assertIn("run %s esx esx01: not running (stopped: while the job of case h1 was running" % RID, out,
                       "멈춘 호스트는 상태와 함께 알리고 cancel 을 안내")
-        self.assertIn("To take its crontab lines out: sh %s/tcrun cancel esx01" % e.tcgen, out)
+        self.assertIn("Case h1 is open: to remove its crontab lines and stop its monitoring: sh %s/tcrun cancel esx01" % e.tcgen, out)
         self.assertIn("esx esx01 : stopped", e.tcrun("status")[1])
 
     def test_h_stop_after_monitoring_started_before_the_job(self):
@@ -943,24 +944,30 @@ class MultiHostAndCheckTests(TcrunBase):
         # 같은 실행을 다시 시작하지 않는다
         rc, out2 = e.tcrun("start", plan)
         self.assertEqual(out2.count("was already started on this jump VM"), 2, out2)
-        # 같은 ESX 호스트의 다른 실행도 시작하지 않는다
+        # 같은 ESX 호스트의 다른 실행은 대기한다(앞 실행이 done 으로 끝나면 시작)
         res2, plan2 = self.gen([case("k3", [vm("esx01ev02", "job_a")])], now=GEN + dt.timedelta(seconds=7))
         rc, out3 = e.tcrun("start", plan2)
-        self.assertIn("==== esx01: run %s is still running for this ESX host. Not started." % RID, out3)
-        self.assertEqual(e.state(res2["run_id"], "esx01"), {})
+        self.assertIn("queued:  run %s esx esx01   waiting for run %s of this ESX host to end. It starts when that has ended as done"
+                      % (res2["run_id"], RID), out3)
+        self.assertEqual(e.state(res2["run_id"], "esx01")["state"], "queued")
         e.wait_for(lambda: e.state(RID, "esx02").get("state") == "done", seconds=240, what="esx02 완료")
         self.assertEqual(e.state(RID, "esx01")["state"], "running", "esx02 는 esx01 을 기다리지 않고 끝남")
         self.assertIn("run finished: all 1 case(s) done", self.log("esx02"))
         self.assertIn("esx esx02 (10.0.0.12)", self.log("esx02"))
-        self.assertNotIn("k2", self.log("esx01"))
+        self.assertNotIn("==== case k2", self.log("esx01"), "다른 ESX 호스트의 케이스를 진행하지 않음(잡 시작 간격을 맞춘 spacing 줄에는 이름이 나올 수 있음)")
         self.assertEqual([r["case"] for r in self.results("esx02")], ["k2"])
         self.assertEqual(len(self.fired(cron, "esx02", "mon.sh stop h")), 1)
         rc, st = e.tcrun("status")
         self.assertIn("esx esx01 : running", st)
         self.assertIn("esx esx02 : done", st)
+        self.assertIn("== run %s  esx esx01 : queued" % res2["run_id"], st)
         rc, out4 = e.tcrun("stop", "esx01")
         self.assertIn("stop requested: run %s esx esx01" % RID, out4)
+        self.assertIn("stop requested: run %s esx esx01" % res2["run_id"], out4, "대기 중인 실행에도 stop 을 알림")
         e.wait_for(lambda: e.state(RID, "esx01").get("state") == "stopped", what="esx01 stop")
+        e.wait_for(lambda: e.state(res2["run_id"], "esx01").get("state") == "stopped", what="대기 중인 실행 stop")
+        self.assertIn("while this run was queued behind run %s. Nothing of this run was started." % RID, e.state(res2["run_id"], "esx01")["text"])
+        self.assertEqual(self.tc_lines("esx01ev02"), [], "대기하다 멈춘 실행은 아무것도 등록하지 않음")
 
     def minutes(self):
         d = os.path.join(self.e.tcgen, "minutes")
@@ -1087,12 +1094,21 @@ class MultiHostAndCheckTests(TcrunBase):
         rc, out = e.tcrun("status")
         self.assertIn("== run %s  esx esx01 : died (the runner is not running any more." % RID, out)
         self.assertTrue(e.tcrun("stop")[1].startswith("no running tcrun\n"))
+        self.assertIn("open case: z1.", out)
         res2, plan2 = self.gen([case("z2", [vm("esx01ev02", "job_a")])], now=GEN + dt.timedelta(seconds=30))
+        rc, out = e.tcrun("start", plan2)
+        self.assertIn("==== esx01: not started. run %s of this ESX host ended as died and left case z1 open" % RID, out)
+        self.assertIn("Close it first: sh %s/tcrun cancel esx01" % e.tcgen, out)
+        self.assertEqual(e.state(res2["run_id"], "esx01"), {}, "시작하지 않았으므로 같은 S 블록을 다시 붙여넣을 수 있음")
+        self.assertIn("esx esx01 : died", e.tcrun("status", "-a")[1])
+        rc, out = e.tcrun("cancel", "esx01")
+        self.assertIn("== run %s esx esx01: cancelling (state died, case z1, step wait-start)" % RID, out)
+        self.assertEqual(self.tc_lines("esx01ev01"), [], "죽은 실행이 남긴 줄을 지움")
         rc, out = e.tcrun("start", plan2)
         self.assertIn("started: run %s esx esx01" % res2["run_id"], out)
         e.wait_for(lambda: e.state(res2["run_id"], "esx01").get("state") == "done", seconds=240, what="새 실행 완료")
         self.assertIn("== run %s  esx esx01 : done" % res2["run_id"], e.tcrun("status")[1])
-        self.assertIn("esx esx01 : died", e.tcrun("status", "-a")[1])
+        self.assertIn("== run %s  esx esx01 : cancelled" % RID, e.tcrun("status", "-a")[1])
 
     def test_n_check_reports_and_changes_nothing(self):
         """점검: ESX 키 접속, 도구, VM 찾기, 현재 값과 목표 값, VM 접속, 시계 차이를 보이고 아무것도 바꾸지 않는다."""
@@ -1183,7 +1199,7 @@ class CancelAndStatusTests(TcrunBase):
         rc, out = e.tcrun("cancel")
         self.assertEqual(rc, 0, out)
         p.wait(timeout=60)
-        self.assertIn("== esx esx01: cancelling run %s (state running, case x1, step wait-job)" % RID, out)
+        self.assertIn("== run %s esx esx01: cancelling (state running, case x1, step wait-job)" % RID, out)
         self.assertIn("the runner (pid %d) was ended at step wait-job" % p.pid, out)
         self.assertIn("crontab lines of case x1 removed", out)
         self.assertIn("monitoring stop: vm esx01ev01 (exit 0)", out)
@@ -1200,7 +1216,7 @@ class CancelAndStatusTests(TcrunBase):
         self.assertEqual(self.results()[-1]["status"], "cancelled")
         self.assertNotIn(int(epoch("2026-11-20 13:00:00")), self.minutes(), "쓰지 않은 시작 시각 기록을 돌려줌")
         self.assertIn("== run %s  esx esx01 : cancelled" % RID, e.tcrun("status")[1])
-        self.assertIn("run %s was cancelled already" % RID, e.tcrun("cancel")[1])
+        self.assertEqual(e.tcrun("cancel")[1].strip(), "nothing to cancel: no run is running or queued, and no case is open")
 
     def test_cancel_before_the_job_start(self):
         """잡 시작 전 cancel: 줄을 지워 모니터링과 잡이 시작되지 않는다. 시작 전이므로 중지 명령은 실행하지 않는다."""
@@ -1302,6 +1318,310 @@ class CancelAndStatusTests(TcrunBase):
             self.assertIn("[ok] folder %s: 1 MB can be written" % e.tcgen, out)
         finally:
             os.chmod(e.log, 0o700)
+
+
+class NoCheckTests(TcrunBase):
+    """시작 시각을 적은 케이스(시각, +간격)는 잡을 확인하지 않는다 (사용자 요청 2026-11-17 "시작 시간 내가 지정하는거면 실행 확인
+    작업을 안하면 좋겠어", "체크할 때 부하가 꽤 되는거같음")."""
+
+    def vm_logins(self):
+        p = os.path.join(self.e.root, "ssh_calls.txt")
+        if not os.path.exists(p):
+            return 0
+        with open(p) as f:
+            return len([x for x in f.read().splitlines() if x.startswith("vm ")])
+
+    def test_cases_with_a_start_time_are_not_checked(self):
+        """두 케이스 모두 시작 시각을 적으면: 잡이 실행되는 동안 VM 에 접속하지 않고, 모니터링 중지는 시작 줄과 함께 등록하고,
+        다음 케이스 준비 2분 전(마지막 케이스는 잡 시작 + 최대 대기)에 케이스를 끝낸다."""
+        e = self.e
+        self.two_vms()
+        c1 = case("t1", [vm("esx01ev01", "job_a", ["gmon"]), vm("esx01ev02", "job_a")], esx_monitors=["hmon"], seq_start="10:12")
+        c2 = case("t2", [vm("esx01ev01", "job_a", ["gmon"])], seq_start="+0:16", max_wait="0:05")
+        res, plan = self.gen([c1, c2], seq_prep_lead_min=6)
+        self.assertIn("NOCHK 001 %d 2026-11-20 10:22\n" % int(epoch("2026-11-20 10:22:00")), res["plan"])
+        self.assertIn("NOCHK 002 0 -\n", res["plan"])
+        cron = e.start_cron()
+        p = e.tcrun_bg("run", plan, "esx01")
+        e.wait_for(lambda: "The job of case t1 is not checked" in self.log(), seconds=300, what="t1 잡 시작")
+        n0, seen = self.vm_logins(), []
+        while "end of case t1" not in self.log():
+            seen.append(self.vm_logins())
+            time.sleep(0.05)
+            self.assertIsNone(p.poll(), self.ctx())
+        self.assertTrue(len(seen) > 10 and set(seen[:-1]) == {n0}, "잡 시작 뒤 케이스가 끝날 때까지 VM 접속이 없음: %s, %s" % (n0, sorted(set(seen))))
+        self.assertEqual(p.wait(timeout=300), 0, self.ctx())
+        log = self.log()
+        self.assertNotRegex(log, r" check \d+ \(case ", "잡 확인을 하지 않음")
+        self.assert_order(log, [
+            "registered on vm esx01ev01:", "mon.sh start g # tcgen t1 esx01ev01", "job.sh simA 100 # tcgen t1 esx01ev01",
+            "20 10 20 11 * sh %s/mon.sh stop g # tcgen t1 esx01ev01" % e.bin, "registered on esx esx01 (UTC):",
+            "20 01 20 11 * sh %s/mon.sh stop h # tcgen t1 esx01" % e.bin,
+            "times: monitoring start 2026-11-20 10:11:00, job start 2026-11-20 10:12:00",
+            "not checked: the plan sets the start time of this case. End of the case: 2026-11-20 10:20:00",
+            "the job start time 2026-11-20 10:12:00 has passed. The job of case t1 is not checked",
+            "end of case t1: 2026-11-20 10:20:00", "removed the lines of this case: vm esx01ev01",
+            "==== case t1 done (not checked). job start 2026-11-20 10:12:00",
+            "start time 2026-11-20 10:28: the preparation (settings, VM power) starts 6 min before it, at 2026-11-20 10:22:00",
+            "not checked: the plan sets the start time of this case. End of the case: 2026-11-20 10:33:00",
+            "end of case t2: 2026-11-20 10:33:00", "run finished: all 2 case(s) done"])
+        a, b = self.results()
+        self.assertEqual([(r["case"], r["status"], r["job_start"], r["monitor_stop"], r["first_seen"], r["job_end"]) for r in (a, b)],
+                         [("t1", "done (not checked)", "2026-11-20 10:12:00", "2026-11-20 10:20:00", "", ""),
+                          ("t2", "done (not checked)", "2026-11-20 10:28:00", "2026-11-20 10:33:00", "", "")])
+        for host, word, when in (("esx01ev01", "mon.sh start g # tcgen t1", "10:11"), ("esx01", "mon.sh start h # tcgen t1", "10:11"),
+                                 ("esx01ev01", "job.sh simA 100 # tcgen t1", "10:12"), ("esx01ev02", "job.sh simA 100 # tcgen t1", "10:12"),
+                                 ("esx01ev01", "mon.sh stop g # tcgen t1", "10:20"), ("esx01", "mon.sh stop h # tcgen t1", "10:20"),
+                                 ("esx01ev01", "mon.sh start g # tcgen t2", "10:27"), ("esx01ev01", "job.sh simA 100 # tcgen t2", "10:28"),
+                                 ("esx01ev01", "mon.sh stop g # tcgen t2", "10:33")):
+            self.assertEqual(self.fired(cron, host, word), [epoch("2026-11-20 %s:00" % when)], (host, word))
+        self.assertEqual(len(cron.fired), 9, cron.fired)
+        self.assertEqual(self.tc_lines("esx01ev01"), [])
+        self.assertEqual(e.esx_crontab("esx01"), fakeenv.ESX_DEFAULT_CRON.splitlines())
+        raw, rep = self.report()
+        self.assertEqual([r[1:2] + r[4:6] for r in rep[1:]], [["t1", "2026-11-20 10:12:00", ""], ["t2", "2026-11-20 10:28:00", ""]],
+                         "리포트용 CSV 의 잡 종료 시각은 비움(성능 리포트 생성기가 정함)")
+        self.assertEqual(e.state(RID, "esx01")["text"], "all 2 case(s) finished")
+
+    def test_last_case_without_an_end_time_stays_open(self):
+        """마지막 케이스에 최대 대기가 없으면 끝나는 시각이 없다: 잡 시작 뒤 실행은 done 으로 끝나고 케이스는 열린 채로 남는다.
+        tcrun cancel 이 닫는다(모니터링 중지, 줄 삭제). 같은 ESX 호스트의 다음 실행은 첫 케이스가 자동이면 시작하지 않는다."""
+        e = self.e
+        self.two_vms()
+        res, plan = self.gen([case("o1", [vm("esx01ev01", "job_long", ["gmon"])], esx_monitors=["hmon"], seq_start="10:10")], seq_prep_lead_min=5)
+        self.assertIn("NOCHK 001 0 -\n", res["plan"])
+        cron = e.start_cron()
+        rc, out = e.tcrun("run", plan, "esx01", timeout=600)
+        log = self.log()
+        self.assertEqual(rc, 0, self.ctx(out))
+        st = e.state(RID, "esx01")
+        self.assertEqual(st["state"], "done")
+        self.assertIn("Case o1 stays open (not checked, no end time): its monitoring is not stopped.", st["text"])
+        self.assertIn("case o1 stays open: it has no end time (last case of this ESX host, no maximum wait)", log)
+        self.assertEqual(self.results()[0]["status"], "done (not checked, open)")
+        self.assertEqual(len(self.tc_lines("esx01ev01")), 2, "모니터링 시작 줄과 잡 줄이 남음(중지 줄은 등록하지 않음)")
+        self.assertEqual(self.fired(cron, "esx01ev01", "mon.sh stop"), [])
+        rc, out = e.tcrun("status")
+        self.assertIn("== run %s  esx esx01 : done" % RID, out)
+        self.assertIn("open case: o1. Its crontab lines are on the hosts and its monitoring may run. Close it: sh %s/tcrun cancel esx01" % e.tcgen, out)
+        # 첫 케이스가 자동인 다음 실행: 앞 잡이 언제 끝나는지 알 수 없으므로 시작하지 않는다
+        res2, plan2 = self.gen([case("o2", [vm("esx01ev01", "job_a")])], now=GEN + dt.timedelta(minutes=20))
+        rc, out = e.tcrun("start", plan2)
+        self.assertIn("==== esx01: not started. case o1 of run %s is still open on this ESX host (it was not checked and has no end time), "
+                      "and the first case of this run has no start time: tcrun cannot tell when that job ends." % RID, out)
+        rc, out = e.tcrun("check", plan2)
+        self.assertIn("[PROBLEM] esx esx01: block S would not start this run. case o1 of run %s is still open" % RID, out)
+        self.assertIn("[ok] vm esx01ev01: not logged in to by this check (run %s, see above)" % RID, out)
+        self.assertEqual(e.state(res2["run_id"], "esx01"), {})
+        # cancel 이 열린 케이스를 닫는다
+        n = len(e.vm_file("esx01ev01", "mon.log"))
+        rc, out = e.tcrun("cancel")
+        self.assertIn("== run %s esx esx01: closing the case that this run left open (o1)" % RID, out)
+        self.assertIn("monitoring stop: vm esx01ev01 (exit 0)", out)
+        self.assertIn("monitoring stop: esx esx01 (exit 0)", out)
+        self.assertIn("job on vm esx01ev01: 1 process(es) match 'simLong'. tcrun does not end jobs.", out)
+        self.assertIn("closed. The run stays done.", out)
+        self.assertEqual(self.tc_lines("esx01ev01"), [])
+        self.assertEqual([x[:2] for x in e.vm_file("esx01ev01", "mon.log")][n:], [["stop", "g"]])
+        st = e.state(RID, "esx01")
+        self.assertEqual(st["state"], "done")
+        self.assertIn("Case o1 was closed", st["text"])
+        self.assertEqual(self.results()[-1]["status"], "closed by sh tcrun cancel")
+        self.assertEqual(e.tcrun("cancel")[1].strip(), "nothing to cancel: no run is running or queued, and no case is open")
+        self.assertNotIn("open case:", e.tcrun("status")[1])
+        rc, out = e.tcrun("start", plan2)
+        self.assertIn("started: run %s esx esx01" % res2["run_id"], out)
+        e.tcrun("cancel")
+
+    def test_next_run_takes_over_an_open_case(self):
+        """끝나는 시각이 없어 열린 채로 남은 케이스는, 같은 ESX 호스트의 다음 실행이 첫 케이스(시작 시각 지정)를 준비하기 직전에 닫는다."""
+        e = self.e
+        self.two_vms()
+        res, plan = self.gen([case("o1", [vm("esx01ev01", "job_a", ["gmon"])], esx_monitors=["hmon"], seq_start="10:08")], seq_prep_lead_min=4)
+        cron = e.start_cron()
+        rc, out = e.tcrun("run", plan, "esx01", timeout=600)
+        self.assertEqual(rc, 0, self.ctx(out))
+        self.assertEqual(len(self.tc_lines("esx01ev01")), 2)
+        res2, plan2 = self.gen([case("n1", [vm("esx01ev01", "job_a")], seq_start="10:24", max_wait="0:03")],
+                               now=GEN + dt.timedelta(minutes=9), seq_prep_lead_min=4)
+        rid2 = res2["run_id"]
+        rc, out = e.tcrun("check", plan2)
+        self.assertIn("[ok] esx esx01: case o1 of run %s is still open (not checked, no end time). This run closes it right before its first "
+                      "case is prepared." % RID, out)
+        self.assertIn("CHECK RESULT: OK", out)
+        rc, out = e.tcrun("start", plan2)
+        self.assertIn("started: run %s esx esx01" % rid2, out)
+        e.wait_for(lambda: e.state(rid2, "esx01").get("state") == "done", seconds=600, what="다음 실행 완료")
+        log2 = self.log(rid=rid2)
+        self.assert_order(log2, [
+            "run(s) %s left a case open on this ESX host (not checked, no end time). It is closed right before the first case of this run is prepared" % RID,
+            "start time 2026-11-20 10:24: the preparation (settings, VM power) starts 4 min before it, at 2026-11-20 10:20:00",
+            "run %s left its last case open on this ESX host (not checked, no end time). Closing it now" % RID,
+            "removed the lines of this case: vm esx01ev01", "monitoring stop commands run on vm esx01ev01 (exit 0)",
+            "monitoring stop commands run on esx esx01 (exit 0)", "case o1 of run %s is closed" % RID,
+            "VM power:", "registered on vm esx01ev01:", "==== case n1 done (not checked)"])
+        closed = next(x for x in log2.splitlines() if "case o1 of run %s is closed" % RID in x)
+        self.assertGreaterEqual(epoch(closed[:19]), epoch("2026-11-20 10:20:00"), "다음 실행의 준비 시작(10:20) 때 닫음")
+        self.assertLess(epoch(closed[:19]), epoch("2026-11-20 10:22:00"))
+        mon = e.vm_file("esx01ev01", "mon.log")
+        self.assertEqual([x[:2] for x in mon], [["start", "g"], ["stop", "g"]], "앞 실행의 모니터링을 중지 명령으로 끝냄")
+        st = e.state(RID, "esx01")
+        self.assertEqual(st["state"], "done")
+        self.assertIn("Case o1 was closed", st["text"])
+        self.assertIn("by run %s before case n1 was prepared" % rid2, st["text"])
+        self.assertEqual(self.results()[-1]["status"], "closed by run %s before case n1 was prepared" % rid2)
+        self.assertEqual(self.tc_lines("esx01ev01"), [])
+        self.assertNotIn("open case:", e.tcrun("status", "-a")[1])
+
+
+class QueueTests(TcrunBase):
+    """같은 ESX 호스트의 실행은 한 번에 하나만 진행한다. 진행 중에 붙여넣은 실행은 대기했다가 앞 실행이 done 으로 끝나면 시작한다
+    (사용자 보고 2026-11-17 "처음 tcrun 으로 테스트 수행했다가 추가로 실험 계획 추가하거나 할때 잘안되는거같아")."""
+
+    def test_second_run_waits_in_the_queue_and_starts_by_itself(self):
+        e = self.e
+        self.two_vms()
+        res, plan = self.gen([case("q1", [vm("esx01ev01", "job_b", ["gmon"])])])
+        cron = e.start_cron()
+        rc, out = e.tcrun("start", plan)
+        self.assertIn("started: run %s esx esx01" % RID, out)
+        e.wait_for(lambda: "the process is seen on every VM" in self.log(), seconds=300, what="q1 잡 실행 중")
+        res2, plan2 = self.gen([case("q2", [vm("esx01ev01", "job_a")])], now=GEN + dt.timedelta(minutes=3))
+        rid2 = res2["run_id"]
+        rc, out = e.tcrun("check", plan2)
+        self.assertIn("[ok] esx esx01: run %s still works for this ESX host. Block S puts this run in the queue: it starts when that run has "
+                      "ended as done. This check does not log in to the VMs of this ESX host (a job may run)" % RID, out)
+        self.assertIn("[ok] vm esx01ev01: not logged in to by this check (run %s, see above). The run looks at it when it starts." % RID, out)
+        self.assertIn("CHECK RESULT: OK", out)
+        rc, out = e.tcrun("start", plan2)
+        self.assertIn("queued:  run %s esx esx01   waiting for run %s of this ESX host to end. It starts when that has ended as done" % (rid2, RID), out)
+        rc, out = e.tcrun("status")
+        self.assertIn("== run %s  esx esx01 : running" % RID, out)
+        self.assertIn("== run %s  esx esx01 : queued" % rid2, out)
+        self.assertEqual(self.tc_lines("esx01ev01")[-1].split(" # ")[1], "tcgen q1 esx01ev01", "대기 중에는 아무것도 등록하지 않음")
+        e.wait_for(lambda: e.state(rid2, "esx01").get("state") == "done", seconds=600, what="대기하던 실행 완료")
+        self.assertEqual(e.state(RID, "esx01")["state"], "done")
+        log2 = self.log(rid=rid2)
+        self.assert_order(log2, ["queued: run(s) %s still work for this ESX host. This run starts when they have ended as done" % RID,
+                                 "queued: run %s ended as done" % RID, "==== case q2 (1 of 1) begin", "==== case q2 done"])
+        a, b = self.results()[0], self.results(rid=rid2)[0]
+        self.assertGreaterEqual(epoch(b["begin"]), epoch(a["end"]), "앞 실행이 끝난 뒤에 시작")
+        self.assertEqual((a["status"], b["status"]), ("done", "done"))
+        self.assertEqual(len(self.fired(cron, "esx01ev01", "job.sh")), 2)
+
+    def test_queued_run_does_not_start_after_a_paused_run_and_cancel_opens_the_host(self):
+        """앞 실행이 done 이 아닌 상태로 끝나면 대기하던 실행은 시작하지 않는다. 앞 실행이 줄을 남긴 채 멈췄으면(열린 케이스)
+        cancel 로 닫기 전에는 그 ESX 호스트의 새 실행을 시작하지 않는다."""
+        e = self.e
+        self.two_vms()
+        res, plan = self.gen([case("f1", [vm("esx01ev01", "job_wrong", ["gmon"])])])      # 프로세스 이름이 맞지 않아 멈추는 잡
+        cron = e.start_cron()
+        rc, out = e.tcrun("start", plan)
+        e.wait_for(lambda: "times: monitoring start" in self.log(), seconds=300, what="f1 등록")
+        res2, plan2 = self.gen([case("f2", [vm("esx01ev02", "job_a")])], now=GEN + dt.timedelta(minutes=2))
+        rid2 = res2["run_id"]
+        rc, out = e.tcrun("start", plan2)
+        self.assertIn("queued:  run %s esx esx01" % rid2, out)
+        e.wait_for(lambda: e.state(rid2, "esx01").get("state") == "paused", seconds=600, what="대기하던 실행이 멈춤")
+        self.assertEqual(e.state(RID, "esx01")["state"], "paused")
+        st2 = e.state(rid2, "esx01")
+        self.assertIn("run %s of this ESX host ended as paused, not as done. Nothing of this run was started." % RID, st2["text"])
+        self.assertIn("run ended (paused) before its first case. Not finished: f2", self.log(rid=rid2))
+        self.assertEqual(self.tc_lines("esx01ev02"), [])
+        self.assertEqual(self.results(rid=rid2), [], "시작하지 않은 실행은 결과 행이 없음")
+        # 멈춘 실행의 케이스가 열려 있음: 새 실행은 시작하지 않고, 점검도 문제로 알린다
+        res3, plan3 = self.gen([case("f3", [vm("esx01ev02", "job_a")])], now=GEN + dt.timedelta(minutes=30))
+        rid3 = res3["run_id"]
+        rc, out = e.tcrun("start", plan3)
+        self.assertIn("==== esx01: not started. run %s of this ESX host ended as paused and left case f1 open (crontab lines on the hosts, "
+                      "its monitoring may run). Close it first: sh %s/tcrun cancel esx01" % (RID, e.tcgen), out)
+        rc, out = e.tcrun("check", plan3)
+        self.assertIn("[PROBLEM] esx esx01: block S would not start this run. run %s of this ESX host ended as paused and left case f1 open" % RID, out)
+        self.assertRegex(out, r"CHECK RESULT: 1 problem")
+        rc, out = e.tcrun("cancel")
+        self.assertIn("== run %s esx esx01: cancelling (state paused, case f1, step wait-job)" % RID, out)
+        self.assertIn("monitoring stop: vm esx01ev01 (exit 0)", out)
+        self.assertNotIn(rid2, out, "시작하지 않은 실행에는 닫을 것이 없음")
+        self.assertEqual(self.tc_lines("esx01ev01"), [])
+        rc, out = e.tcrun("start", plan3)
+        self.assertIn("started: run %s esx esx01" % rid3, out, "닫은 뒤에는 같은 S 블록으로 시작")
+        e.wait_for(lambda: e.state(rid3, "esx01").get("state") == "done", seconds=600, what="새 실행 완료")
+
+    def test_cancel_ends_every_run_newest_first(self):
+        """cancel 은 진행 중이거나 대기 중인 실행을 모두 끝낸다(대기 중인 실행부터). 호스트를 주면 그 호스트만."""
+        e = self.e
+        self.two_vms()
+        e.add_vm("esx02ev01")
+        e.add_esx("esx02", vms=[("esx02ev01", {})])
+        res, plan = self.gen([case("c1", [vm("esx01ev01", "job_long", ["gmon"])]), case("d1", [vm("esx02ev01", "job_long")], esx="esx02")])
+        cron = e.start_cron()
+        rc, out = e.tcrun("start", plan)
+        e.wait_for(lambda: all("the process is seen on every VM" in self.log(h) for h in ("esx01", "esx02")), seconds=300, what="두 호스트 잡 실행 중")
+        res2, plan2 = self.gen([case("c2", [vm("esx01ev02", "job_a")])], now=GEN + dt.timedelta(minutes=10))
+        rid2 = res2["run_id"]
+        rc, out = e.tcrun("start", plan2)
+        self.assertIn("queued:  run %s esx esx01" % rid2, out)
+        rc, out = e.tcrun("cancel", "esx02")
+        self.assertIn("== run %s esx esx02: cancelling (state running, case d1, step wait-job)" % RID, out)
+        self.assertNotIn("esx esx01", out, "다른 호스트는 건드리지 않음")
+        self.assertEqual(e.state(RID, "esx02")["state"], "cancelled")
+        self.assertEqual(e.state(RID, "esx01")["state"], "running")
+        self.assertEqual(e.state(rid2, "esx01")["state"], "queued")
+        rc, out = e.tcrun("cancel")
+        self.assertLess(out.index("== run %s esx esx01: cancelling (state queued" % rid2),
+                        out.index("== run %s esx esx01: cancelling (state running, case c1" % RID), "대기 중인 실행을 먼저 끝냄")
+        self.assertEqual((e.state(RID, "esx01")["state"], e.state(rid2, "esx01")["state"]), ("cancelled", "cancelled"))
+        self.assertEqual(self.tc_lines("esx01ev01"), [])
+        self.assertEqual(self.tc_lines("esx01ev02"), [], "대기하던 실행은 시작된 적이 없음")
+        self.assertEqual([x[:2] for x in e.vm_file("esx01ev01", "mon.log")], [["start", "g"], ["stop", "g"]])
+        time.sleep(120 / e.speed)
+        self.assertEqual(e.state(rid2, "esx01")["state"], "cancelled", "취소한 뒤에 대기하던 실행이 시작되지 않음")
+        self.assertEqual(e.tcrun("cancel")[1].strip(), "nothing to cancel: no run is running or queued, and no case is open")
+
+
+class StopDuringPowerTests(TcrunBase):
+    """stop 은 VM 을 켜고 기다리는 동안에도 바로 적용된다 (사용자 보고 2026-11-17 "tcrun stop 으로 stop 도 안되는거같고")."""
+
+    def test_stop_while_waiting_for_the_ssh_login(self):
+        e = self.e
+        e.add_vm("esx01ev01")
+        e.add_vm("esx01ev02")
+        e.add_esx("esx01", vms=[("esx01ev01", {"state": "off", "boot_sec": 1200}), ("esx01ev02", {"state": "off"})])
+        res, plan = self.gen([case("s1", [vm("esx01ev01", "job_a"), vm("esx01ev02", "job_a")], esx_profiles=["numa0"])], seq_boot_wait_min=30)
+        cron = e.start_cron()
+        p = e.tcrun_bg("run", plan, "esx01")
+        e.wait_for(lambda: e.state(RID, "esx01").get("text", "").startswith("vm esx01ev01 is powered on. waiting for ssh login"), seconds=300,
+                   what="ssh 로그인 대기")
+        t0 = e.now()
+        rc, out = e.tcrun("stop")
+        self.assertIn("stop requested: run %s esx esx01" % RID, out)
+        self.assertEqual(p.wait(timeout=60), 1, self.ctx())
+        self.assertLess(e.now() - t0, 300, "부팅 대기 한도(30분)를 기다리지 않고 멈춤")
+        st = e.state(RID, "esx01")
+        self.assertEqual(st["state"], "stopped")
+        self.assertIn("while the VMs of case s1 were being powered (stop requested while tcrun waited for the ssh login of vm esx01ev01. "
+                      "The VM stays powered on). The settings of the case stay applied. VMs that were not powered on yet stay off.", st["text"])
+        self.assertNotIn("rollback:", self.log(), "stop 은 설정을 되돌리지 않음")
+        self.assertEqual(e.esx_adv("esx01", "/Numa/LocalityWeightActionAffinity"), "0")
+        vms = e.esx_vms("esx01")
+        self.assertEqual((vms["esx01ev01"]["state"], vms["esx01ev02"]["state"]), ("on", "off"))
+        self.assertEqual(cron.fired, [])
+
+    def test_stop_while_the_power_on_task_runs(self):
+        e = self.e
+        e.add_vm("esx01ev01")
+        e.add_esx("esx01", vms=[("esx01ev01", {"state": "off", "poweron": "slow", "poweron_sec": 25})])
+        res, plan = self.gen([case("s2", [vm("esx01ev01", "job_a")])])
+        p = e.tcrun_bg("run", plan, "esx01")
+        e.wait_for(lambda: e.state(RID, "esx01").get("text") == "power on esx01ev01", seconds=300, what="켜기 작업 중")
+        time.sleep(1.0)
+        t0 = time.time()
+        e.tcrun("stop")
+        self.assertEqual(p.wait(timeout=60), 1, self.ctx())
+        self.assertLess(time.time() - t0, 15, "켜기 작업(25초)이 끝나기를 기다리지 않고 멈춤")
+        st = e.state(RID, "esx01")
+        self.assertEqual(st["state"], "stopped")
+        self.assertIn("stop requested while vm esx01ev01 was being powered on. Its power-on task goes on to its end on the ESX host", st["text"])
 
 
 class WorkFolderTests(TcrunBase):
