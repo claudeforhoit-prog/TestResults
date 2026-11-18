@@ -482,6 +482,20 @@ class ApplyTests(unittest.TestCase):
         res, _ = self.apply(["snapshot"], "key numvcpus\n")
         self.assertEqual(res, "error snapshot spec: no vm line")
 
+    def test_snapshot_reads_the_host_options_of_the_spec(self):
+        """구성 스냅샷의 host 줄: 그 호스트 옵션의 지금 값을 TCGEN-HOPT </구역/옵션>|<값> 줄로 낸다(VCF Operations 에 기록할 값).
+        읽지 못한 옵션은 이유를 적고 나머지는 읽는다. 아무것도 변경하지 않는다."""
+        res, lines = self.apply(["snapshot"], "vm esx01ev01\nhost /Numa/LocalityWeightActionAffinity\nhost /Numa/NoSuchOption\n"
+                                "host /Numa/LocalityWeightActionAffinity\n")
+        self.assertEqual(res, "snapshot 1 of 1 VM(s) read")
+        self.assertEqual([ln for ln in lines if ln.startswith("TCGEN-HOPT ")], ["TCGEN-HOPT /Numa/LocalityWeightActionAffinity|130"],
+                         "같은 옵션은 한 번만, 값은 호스트의 지금 값")
+        self.assertTrue(any(ln.startswith("host option /Numa/NoSuchOption: not read: host option '/Numa/NoSuchOption' cannot be read")
+                            for ln in lines), lines)
+        self.assertEqual(self.changing_calls(), [])
+        res, lines = self.apply(["snapshot"], "vm esx01ev01\n")
+        self.assertEqual([ln for ln in lines if ln.startswith("TCGEN-HOPT ")], [], "host 줄이 없으면 호스트 옵션을 읽지 않는다")
+
     def test_check_shows_power(self):
         """check 는 VM 마다 지금 전원과 케이스가 원하는 전원을 보인다(off 줄이 있는 VM 은 끔)."""
         self.set_vm("esx01ev02", state="off")

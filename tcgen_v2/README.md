@@ -1,4 +1,4 @@
-# 테스트 실행 명령 생성기 (tcgen) v2.12
+# 테스트 실행 명령 생성기 (tcgen) v2.13
 
 > 이 생성기를 고치거나 AI 로 다시 만들 때는 `DEVELOPER.md`(구조, 설계 규칙, plan 형식, 시험)를 먼저 읽는다.
 
@@ -29,9 +29,11 @@ v2 는 v1.4 와 따로 설치하고 따로 실행한다. 프로그램 이름, �
 - 잡은 탭 4 에 적은 시작 시각에 시작한다. 진행 스크립트는 시작 시각을 변경하지 않는다.
 - 진행 스크립트는 잡이 끝났는지 확인하지 않는다. 다음 케이스의 시작 시각은 앞 케이스의 잡이 끝나는 때를 보고 사용자가 정한다.
 
-## 2. v2.12 에서 달라진 것
+## 2. v2.12, v2.13 에서 달라진 것
 
-v2.11 을 쓰던 경우에 확인할 것을 먼저 적는다.
+v2.13 은 v2.12 에 VCF Operations 기록을 더했다. 설정 영역에 `Operations 주소`, `Operations 계정`, `Operations 암호` 칸이 생겼다. 주소를 적으면 구성 스냅샷 때 점프 VM 이 VM 설정과 케이스의 호스트 옵션을 Operations 에 기록한다(7.4절). 주소를 비우면 v2.12 와 같게 동작한다. v2.12 에서 올릴 때도 A 블록을 다시 붙여넣는다.
+
+v2.11 을 쓰던 경우에 확인할 것은 다음과 같다.
 
 | 항목 | v2.11 | v2.12 |
 | :-- | :-- | :-- |
@@ -53,7 +55,7 @@ v2.11 을 쓰던 경우에 확인할 것을 먼저 적는다.
 판을 올릴 때 할 일은 다음과 같다.
 
 1. 점프 VM 에서 진행 중인 실행이 없는지 확인한다(`sh ~/.tcgen/tcrun status`). v2.11 의 실행이 남긴 crontab 줄이 있으면 `sh ~/.tcgen/tcrun cancel` 로 지운 뒤에 판을 올린다.
-2. v2.12 의 A 블록을 점프 VM 에 다시 붙여넣는다. 생성기와 진행 스크립트의 판 번호가 같아야 한다.
+2. 새 판의 A 블록을 점프 VM 에 다시 붙여넣는다. 생성기와 진행 스크립트의 판 번호가 같아야 한다(v2.12 에서 v2.13 으로 올릴 때도 같다).
 3. 탭 4 에서 `잡 시작 (환산)` 칸을 확인한다. `+간격` 의 기준이 바로 윗줄로 변경됐으므로, ESX 호스트가 섞여 있는 표는 시각이 v2.11 과 다르게 계산된다.
 4. v2.11 에서 생성하고 아직 적용 체크하지 않은 케이스는 적용 체크를 먼저 한다. 적용 체크한 케이스의 시작 시각은 생성한 때의 날짜 시각으로 고정된다.
 5. 설정 파일의 `시작 시각 준비` 가 예전 기본값 60분이면 `설정 적용` 30분 전으로 한 번 변경된다. 직접 고친 값은 그대로 둔다.
@@ -198,6 +200,9 @@ v2 를 처음 실행할 때 `tcgen2_data` 에 데이터가 없고 v1 의 데이�
 | ESX 접속 주소 | 선택. `호스트이름=주소` 를 `;` 로 구분한다. 비우면 ESX 호스트 이름으로 접속한다 |
 | 점프 VM 작업 폴더 | 진행 스크립트, ESX 키, VM 비밀번호, 실행 기록을 두는 점프 VM 의 폴더. 비우면 `~/.tcgen`. 변경하면 A 블록을 다시 붙여넣는다(6.2절) |
 | 스냅샷 때 VM 에서 실행할 명령 | 선택. 구성 스냅샷 때 케이스의 켜져 있는 VM 마다 실행할 명령 한 줄(7.4절). 게스트 구성을 VCF Operations 에 기록하는 guest_config_push 를 VM 안의 경로로 적는다. 500자 이하이고 한글, `!`, 탭, 변수는 쓸 수 없다 |
+| Operations 주소 | 선택. VCF Operations 의 이름이나 IP. 비우면 Operations 에 기록하지 않는다. 적으면 구성 스냅샷 때 점프 VM 이 VM 설정과 케이스의 호스트 옵션을 기록한다(7.4절) |
+| Operations 계정 | Operations 의 로컬 계정(인증 소스 LOCAL) |
+| Operations 암호 | 적고 Enter 를 누르거나 다른 칸으로 가면 암호화해 저장하고 칸을 비운다. 옆에 `저장됨` 또는 `없음` 이 보인다. 암호 자체는 저장하지 않는다. guest_config_push 의 `OPS_PASS_ENC`, `OPS_ENC_KEY` 와 같은 방식이다. 주소와 계정을 모두 지우면 저장해 둔 암호도 지운다 |
 | [설정 백업] | 고른 폴더에 `tcgen2_backup_년월일시분초` 폴더를 만들고 데이터 파일과 `testcases` 폴더를 복사한다. 따로 지정한 테스트 케이스 파일도 `case_file_<파일 이름>` 으로 함께 복사한다 |
 | [백업 불러오기] | 고른 백업 폴더의 데이터 파일로 현재 데이터를 교체한다. 교체 전 파일은 데이터 폴더 `backup` 아래에 복사해 둔다 |
 | [데이터 폴더 열기], [데이터 폴더 변경], [테스트 케이스 폴더 열기] | 데이터 폴더를 열거나 다른 폴더로 정한다(4.1절). PC 의 로그 폴더를 연다 |
@@ -459,6 +464,7 @@ ssh -i ~/.tcgen/id_esx -o BatchMode=yes root@esx01 hostname
 | 같은 ESX 호스트의 다른 실행: 진행 중이면 이 실행이 대기한다고 알리고 그 실행이 끝나는 시각을 보인다. 이 실행의 케이스 가운데 잡 시작이 그 시각의 2분 뒤보다 이른 것은 문제로 알린다(대기하는 동안 시작 시각이 지나 등록되지 않는다). 줄을 남긴 채 멈춘 실행이 있으면 문제로 알린다 | `its job start is less than 2 min after the end of run ...`, `block S would not start this run. ... Remove them first: sh ~/.tcgen/tcrun cancel esx01` |
 | VM 접속, `crontab` 명령, 시계가 점프 VM 과 몇 초 다른지. 꺼져 있어 실행이 켤 VM 과 전원 끔인 VM 에는 접속하지 않는다. 같은 ESX 호스트에 진행 중인 실행이나 crontab 줄이 남은 실행이 있으면 그 호스트의 VM 에는 접속하지 않는다(실행 중인 잡에 부하를 주지 않음) | `ssh login failed` |
 | VM 시계끼리의 차이 | 30초를 넘으면 `the clocks of the VMs differ by N s` |
+| `Operations 주소` 를 적었으면 Operations 로그인과, 케이스의 VM 과 ESX 호스트의 객체가 Operations 에 있는지(기록하지 않는다) | `VCF Operations: login to VCF Operations ... failed`, `VCF Operations has no VirtualMachine object with this name` |
 | `스냅샷 때 VM 에서 실행할 명령` 을 적었으면 켜져 있는 VM 마다 그 스크립트 파일을 읽을 수 있는지(명령은 실행하지 않는다) | `the file of the command at the config snapshot is not there or cannot be read: <경로>` |
 
 설정과 전원 비교 줄은 아래처럼 나온다. `[change]` 는 실행이 변경할 항목, `[same]` 은 이미 같은 항목이다.
@@ -579,7 +585,22 @@ files in /home/<계정>/tcgen_log : tcrun-20261120-100000-jobs.csv (which jobs a
 - 명령은 모든 VM 에 같은 글로 실행한다. 스크립트가 모든 VM(과 BM 서버)의 같은 경로에 있어야 한다.
 - 결과는 스냅샷 csv 의 `snapshot command` 행과 진행 로그의 `config snapshot: command on vm <VM>: ...` 줄에 남는다. 실패해도 케이스는 진행한다.
 - 명령 하나에 최대 150초를 기다린다. 잡 시작 2분 전이 지나면 남은 VM 에서는 실행하지 않는다(`not run (no time left before the job start)`).
-- VM 설정(vmx 값)과 호스트 옵션은 이 판에서 Operations 에 기록하지 않는다.
+
+설정 영역의 `Operations 주소`, `Operations 계정`, `Operations 암호` 를 적었으면 구성 스냅샷 때 점프 VM 이 아래 값을 VCF Operations 에 기록한다(v2.13).
+
+| 기록하는 값 | Operations 의 객체 | 속성 이름 |
+| :-- | :-- | :-- |
+| VM 설정: 구성 스냅샷 csv 의 `vm advanced config` 구간. config_snapshot 이 기록하던 11개 키와, 이번 실행의 설정 프로파일이 다루는 vmx 키 | 이름이 VM 이름과 같은 VirtualMachine 객체 | `Custom Configuration\|VM\|<키>` |
+| 케이스의 호스트 옵션(케이스 행의 설정 프로파일에 적은 옵션). 값은 구성 스냅샷 때 ESX 호스트에서 읽은 값이다 | 이름이 ESX 호스트 이름과 같은 HostSystem 객체. 없으면 `<ESX 호스트>.<도메인>`, `ESX 접속 주소` 의 주소로 찾는다 | `Custom Configuration\|Host\|<구역.옵션>` |
+
+- Guest OS 설정은 여기서 기록하지 않는다. `스냅샷 때 VM 에서 실행할 명령` 의 guest_config_push 가 게스트와 BM 서버 안에서 기록한다(`Custom Configuration|Guest|*`).
+- `sched.mem.pin` 은 설정 프로파일이 그 키를 다룰 때만 기록한다. CPU affinity 키는 기록하지 않는다. vmx 에 없는 키의 값은 `(없음)` 이다.
+- 호출은 guest_config_push 와 같다: 토큰 발급(`/suite-api/api/auth/token/acquire`), 객체 조회(`/api/resources`), 속성 기록(`/api/resources/<id>/properties`). 케이스마다 한 번 로그인한다.
+- 점프 VM 에 `curl`, `openssl`(1.1.1 이상), 그리고 `python3` 나 `jq` 가 있어야 하고, 점프 VM 에서 Operations 로 HTTPS 접속이 돼야 한다. 인증서는 확인하지 않는다(guest_config_push 의 기본과 같다. `settings.json` 의 `ops_verify_tls` 를 `true` 로 하면 확인한다).
+- 결과는 스냅샷 csv 의 `operations write` 행(VM 마다 `ok: N properties`, `not written (...)`, `failed (...)`)과 진행 로그의 `config snapshot: VCF Operations: ...` 줄에 남는다. 기록하지 못해도 케이스는 진행하고 로그에 WARN 이 남는다.
+- ESX 호스트가 없는 케이스(BM 서버)는 VM 설정이 없으므로 여기서 기록하지 않는다.
+- 호스트 옵션을 스냅샷 때 읽지 못하면 그 옵션은 기록하지 않고 로그에 WARN 을 남긴다(`N of M host option(s) of the case not read ...`).
+- 암호: PC 의 `settings.json` 에는 암호화한 글과 키가 저장된다. P 블록과 S 블록에 든 plan, 점프 VM 의 `runs/<실행 ID>/plan`(본인만 읽기)에도 같은 두 값이 들어간다. 암호 자체와 토큰은 로그에 남지 않고, 점프 VM 에서 명령줄 인자로 넘기지 않는다(본인만 읽는 임시 파일로 넘기고 바로 지운다). 블록을 다른 사람에게 넘기지 않는다(10절).
 
 ### 7.5 모니터링
 
@@ -700,6 +721,7 @@ tail -f ~/tcgen_log/tcrun-<실행 ID>-<ESX 호스트>.log        # 로그를 계
 - 전원 끔인 VM 은 VM 설정만 적고 Guest OS 값은 `(없음)` 이다. ESX 호스트를 적지 않은 케이스는 Guest OS 구간만 있다.
 - Guest OS 설정은 스냅샷을 남긴 때의 값이다. 잡 명령이 시작하면서 게스트 설정을 변경하면 그 값은 들어가지 않는다.
 - 읽지 못한 부분이 있으면 진행 로그에 `WARN config snapshot of case <케이스> is not complete: <이유>` 줄이 남고, 읽은 부분만 파일에 적는다.
+- `Operations 주소` 를 적었으면 `vm advanced config` 구간의 마지막 행 `operations write` 에 VM 마다 Operations 기록 결과가 들어간다(7.4절).
 
 ## 9. PC 의 기록 파일
 
@@ -733,7 +755,7 @@ tail -f ~/tcgen_log/tcrun-<실행 ID>-<ESX 호스트>.log        # 로그를 계
 
 ## 10. 제한과 주의
 
-- 실제 ESX 호스트, VM, 점프 VM 에서 v2.12 를 아직 실행하지 않았다. 12절의 '실제 장비에서 확인할 것' 을 먼저 본다. 처음에는 중요하지 않은 VM 한 대로 P 블록과 S 블록을 실행해 본다.
+- 실제 ESX 호스트, VM, 점프 VM, VCF Operations 에서 v2.12 와 v2.13 을 아직 실행하지 않았다. 12절의 '실제 장비에서 확인할 것' 을 먼저 본다. 처음에는 중요하지 않은 VM 한 대로 P 블록과 S 블록을 실행해 본다.
 - 진행 스크립트는 잡이 시작됐는지, 끝났는지 확인하지 않는다. 잡 명령이 틀려 시작되지 않아도 진행은 계속된다. 처음 쓰는 명령은 VM 에서 직접 확인한다.
 - 설정이 앞 케이스와 다른 케이스는 잡 시작 30분 전에 그 케이스의 VM 을 종료한다. 그때 앞 케이스의 잡이 실행 중이면 중단된다. 시작 시각은 앞 케이스의 잡이 끝나는 때를 보고 정한다.
 - 설정 변경(VM 종료, 설정 적용, VM 전원 ON, 1GB page backing, ssh 로그인)이 30분 안에 끝나지 않으면 그 케이스는 등록되지 않는다. 메모리가 큰 VM 여러 대는 더 걸릴 수 있다. 그때는 설정 영역의 `설정 적용 N분 전` 을 늘린다.
@@ -753,6 +775,7 @@ tail -f ~/tcgen_log/tcrun-<실행 ID>-<ESX 호스트>.log        # 로그를 계
 - 명령에 `!`, 탭, 한글을 쓸 수 없다. csh 가 붙여넣는 글의 `!` 를 이전 명령 불러오기로, 탭을 자동 완성으로 처리하기 때문이다.
 - 이름(케이스, 호스트, VM, 명령어 명, 프로파일 이름)은 영문, 숫자, `.` `_` `-` 만 쓴다. 호스트와 VM 이름은 영문이나 숫자로 시작해야 한다.
 - VM 비밀번호는 점프 VM 작업 폴더의 `vmpw` 에만 저장한다(본인만 읽기). 생성기 파일, CSV, 블록에는 비밀번호가 들어가지 않는다. ESX 비밀번호는 저장하지 않는다. 비밀번호를 고칠 때는 점프 VM 에서 `sh ~/.tcgen/setpw` 를 실행한다.
+- `Operations 주소` 를 적은 생성의 P 블록과 S 블록에는 Operations 계정, 암호화한 암호, 그 암호를 푸는 키가 들어 있다(붙여넣는 글에서는 보이지 않지만 풀 수 있다). 블록을 메일이나 메신저로 넘기지 않는다. 테스트 기록 CSV 와 로그 CSV 에는 이 값이 들어가지 않는다.
 - 명령 목록과 테스트 케이스 파일은 화면에서만 고친다. 엑셀로 열어 저장하면 DRM 이 파일을 암호화해 생성기가 읽지 못할 수 있다.
 
 ## 11. 자주 나오는 출력
@@ -769,6 +792,7 @@ tail -f ~/tcgen_log/tcrun-<실행 ID>-<ESX 호스트>.log        # 로그를 계
 | `오류: ... 시작 시각을 <시각> 이후로 고칠 것. 설정이 앞 케이스와 달라 잡 시작 30분 전에 VM 을 종료하는데, ...` | 그 케이스의 시작 시각을 적힌 시각 이후로 늦춘다 |
 | `오류: ... 모니터링을 중지할 시각 <시각> 이(가) 잡 시작 <시각> 보다 빠르거나 같음. ...` | 다음 케이스의 시작 시각을 늦추거나 최대 대기를 늘린다 |
 | `오류: 설정: '설정 적용 N분 전'(10)은 '구성 스냅샷 N분 전'(10)보다 커야 함` | 설정 영역의 두 칸을 고친다 |
+| `오류: 설정: 'Operations 암호' 를 입력할 것 ('Operations 주소' 를 비우면 Operations 에 기록하지 않음)` | 설정 영역의 `Operations 암호` 칸에 암호를 적고 Enter 를 누른다. 기록하지 않으려면 `Operations 주소` 를 비운다 |
 | `알림: 마지막 케이스(<이름>)는 모니터링 중지 시각이 없음. ...` | 오류가 아니다. 정해진 때에 중지하려면 그 케이스의 `최대 대기` 칸에 시간을 적는다(7.5절) |
 | `경고: N번째 케이스 <이름>: 잡, 모니터링, 설정이 하나도 없고 전원을 끌 VM 도 없어 건너뜀` | 그 케이스는 생성에서 빠진다. 잡을 지정했는지 확인한다 |
 
@@ -777,7 +801,7 @@ tail -f ~/tcgen_log/tcrun-<실행 ID>-<ESX 호스트>.log        # 로그를 계
 | 출력 | 뜻과 할 일 |
 | :-- | :-- |
 | `FAILED  .../tcrun (sha256 differs. Paste block A again. ...)` | A 블록을 붙여넣는 중에 글자가 빠졌거나 작업 폴더에 쓸 수 없다. 작업 폴더의 여유 공간을 확인하고 A 블록을 다시 붙여넣는다 |
-| `==== tcrun 2.11, plan made by tcgen 2.12: paste block A again. Nothing started.` | 점프 VM 의 진행 스크립트가 예전 판이다. A 블록을 다시 붙여넣는다 |
+| `==== tcrun 2.12, plan made by tcgen 2.13: paste block A again. Nothing started.` | 점프 VM 의 진행 스크립트가 예전 판이다. A 블록을 다시 붙여넣는다 |
 | `1 MB cannot be written in ... (disk full or disk quota ...)` | 작업 폴더나 로그 폴더에 쓸 수 없다. 설정 영역에서 두 폴더를 고치고 A 블록을 다시 붙여넣은 뒤 다시 생성한다 |
 | `==== plan FAILED (sha256 differs)` | P 블록이나 S 블록을 붙여넣는 중에 글자가 빠졌다. 그 블록을 다시 붙여넣는다 |
 | `==== esx01: run ... was already started on this jump VM` | 같은 S 블록을 두 번 붙여넣었다. 다시 실행하려면 다시 생성한다 |
@@ -786,6 +810,8 @@ tail -f ~/tcgen_log/tcrun-<실행 ID>-<ESX 호스트>.log        # 로그를 계
 | `crontab lines of case <이름> NOT removed on: <VM> ...` | `tcrun cancel` 이 그 VM 에 접속하지 못했다. 그 VM 의 잡은 아직 시작할 수 있다. 접속이 되는 때에 `sh ~/.tcgen/tcrun cancel esx01` 을 다시 실행한다 |
 | `==== esx01: not started. run ... ended as paused and crontab lines of its case(s) are still on the hosts ...` | 앞 실행이 줄을 남긴 채 멈췄다. `sh ~/.tcgen/tcrun cancel esx01` 을 실행한 뒤 같은 S 블록을 다시 붙여넣는다 |
 | `ssh key login failed ... Permission denied` | ESX 호스트에 키가 없다. 6.2절 |
+| `[PROBLEM] VCF Operations: login to VCF Operations <주소> failed (account <계정>, curl exit N: ...)` | 주소, 계정, 암호를 확인한다. `curl exit 6` 이나 `7` 은 점프 VM 에서 그 주소로 접속하지 못한 것이다 |
+| `[PROBLEM] vm <이름>: VCF Operations has no VirtualMachine object with this name. ...` | Operations 에 그 이름의 VM 객체가 없다. VM 이름이 vCenter 의 이름과 같은지 확인한다. 그대로 실행하면 그 VM 의 설정만 기록되지 않는다 |
 | `[PROBLEM] case <이름>: its settings or VM power differ from the host, and the time to change them (...) has passed` | 첫 케이스의 잡 시작까지 30분이 남지 않았다. 시작 시각을 늦춰 다시 생성한다 |
 
 ## 12. 시험
@@ -803,6 +829,7 @@ Windows 에서는 셸이 필요한 시험을 건너뛴다. 전체 시험은 tcsh
 | `test_blocks_shell.py` | v1.4 에서 옮겨 온 시험. 대화형 tcsh 와 bash 에 블록을 붙여넣는다 |
 | `test_seq.py` | 생성기의 단위 시험. 프로파일 읽기, 검증 오류, 시작 시각과 `+간격`, plan, 타임라인, 블록의 글자 규칙, v1 데이터 가져오기 |
 | `test_apply.py` | `tcgen_apply.py` 를 가짜 `vim-cmd`, `esxcli`, vmx 폴더로 실행한다 |
+| `fake_ops.py` | 가짜 VCF Operations(토큰 발급, 객체 조회, 속성 기록). `test_tcrun.py` 의 `OpsTests` 가 쓴다 |
 | `test_tcrun.py` | `tcrun` 통합 시험. 가짜 ssh, crontab, cron, 가상 시계로 실행 전체를 진행한다. 적은 시각 그대로 등록하는지, 설정이 같은 케이스의 일괄 등록, 설정 변경 뒤 등록, 등록 기록, 잡 실행 중 VM 접속이 없는지, 구성 스냅샷, 모니터링, 실행 대기, 앞 실행이 남긴 줄, stop, cancel, check. 한 VM 의 접속이 느리거나 안 될 때 다른 VM 의 잡만 시작되지 않는지, cancel 이 줄을 지우지 못한 VM 을 다시 처리하는지도 본다 |
 | `test_seq_blocks_shell.py` | 대화형 tcsh 와 bash 에 블록 A, P, S 를 붙여넣는다(LF, CR+LF) |
 | `gui_smoke.py` | 화면을 띄워 버튼과 선택 창을 코드로 조작한다. 수동 실행: `python tests\gui_smoke.py [그림 저장 폴더]` |
@@ -835,6 +862,7 @@ Windows 에서는 셸이 필요한 시험을 건너뛴다. 전체 시험은 tcsh
 | 설정 변경에 걸리는 시간 | VM 종료, 설정 적용, VM 전원 ON(1GB page backing, ssh 로그인)이 30분(`설정 적용 N분 전`) 안에 끝난다. 메모리가 큰 VM 여러 대는 더 걸릴 수 있다 | 진행 로그의 `ssh login works, ready N s` 줄과 `registered:` 줄의 시각. 등록되지 않았으면 jobs.csv 의 `not registered` |
 | 터미널을 닫은 뒤의 진행 | `setsid` 로 시작한 진행은 터미널을 닫아도 계속된다. 점프 VM 이 로그아웃할 때 사용자 프로세스를 모두 끝내게 설정돼 있으면(systemd-logind 의 `KillUserProcesses=yes`) 끝난다 | S 블록을 붙여넣고 터미널을 닫은 뒤 다시 접속해 `sh ~/.tcgen/tcrun status` |
 | crontab 등록 뒤 잡의 시작 | 등록한 분에 cron 이 잡을 시작한다. 진행 스크립트는 잡이 시작됐는지 확인하지 않는다 | VM 의 잡 로그 |
+| VCF Operations 기록 | suite-api 의 토큰 발급, 객체 조회(`adapterKindKey=VMWARE`, `resourceKind=VirtualMachine` 과 `HostSystem`, `name`, `regex`), 속성 기록이 guest_config_push 가 쓰는 것과 같게 동작한다. 계정은 인증 소스 LOCAL 이다. 점프 VM 에 curl, openssl 1.1.1 이상, python3 나 jq 가 있다 | P 블록의 `VCF Operations ...: login works` 와 객체 줄. 실행 뒤 Operations 의 VM 객체 속성 `Custom Configuration\|VM` |
 | 300줄쯤 되는 A 블록 붙여넣기 | 터미널이 글자를 빠뜨리지 않는다. 빠뜨리면 `FAILED` 가 나온다 | A 블록의 `OK` 두 줄 |
 
 ## 13. v1.4 로 돌아가는 방법
@@ -866,7 +894,7 @@ v2 가 적용한 ESX 호스트 옵션과 vmx 의 키는 v1.4 로 돌아가도 �
 - 받기: GitHub 저장소 화면에서 `main` 버튼을 누르고 Tags 에서 판(예: `tcgen-v2.10`)을 고른 뒤 Code 의 Download ZIP 을 누른다. 주소로 받을 때는 저장소 주소 뒤에 `/archive/refs/tags/tcgen-v2.10.zip` 을 적는다.
 - 압축 파일에는 그 시점의 저장소 전체가 들어 있다. v2 는 `tcgen_v2` 폴더, v1 은 `tcgen` 폴더만 쓴다.
 - 이전 판으로 변경할 때는 그 판의 폴더로 다시 빌드하고(4절), 그 판의 A 블록을 점프 VM 에 다시 붙여넣는다. 생성기와 점프 VM 의 진행 스크립트는 판 번호가 같아야 한다.
-- 데이터 폴더(`tcgen2_data`)는 v2 의 모든 판이 같이 쓴다. v2.8 부터 v2.12 까지는 데이터 형식이 같아, 서로 저장한 데이터를 값 변경 없이 읽고 저장한다. v2.7 과 그 앞의 판은 저장할 때 적용 체크한 케이스의 고정 값(모니터링 중지)을 지운다. v2.7 과 그 앞의 판을 쓰기 전에는 [설정 백업] 으로 데이터 폴더를 복사해 둔다.
+- 데이터 폴더(`tcgen2_data`)는 v2 의 모든 판이 같이 쓴다. v2.8 부터 v2.13 까지는 데이터 형식이 같아, 서로 저장한 데이터를 값 변경 없이 읽고 저장한다(v2.12 와 그 앞의 판은 설정 파일의 Operations 값을 쓰지 않고 그대로 둔다). v2.7 과 그 앞의 판은 저장할 때 적용 체크한 케이스의 고정 값(모니터링 중지)을 지운다. v2.7 과 그 앞의 판을 쓰기 전에는 [설정 백업] 으로 데이터 폴더를 복사해 둔다.
 - 같은 번호로 여러 번 올린 판(v1.0, v2.3, v2.5)의 태그는 그 번호의 마지막 상태에 있다.
 - v2.12 에서 v2.11 과 그 앞의 판으로 돌아갈 때: 시작 시각의 `+간격` 은 그 판에서 같은 ESX 호스트의 앞 케이스 기준으로 계산된다. 설정 파일의 `설정 적용 N분 전`(30)은 그 판의 `시작 시각 준비` 값으로 읽힌다.
 
@@ -887,6 +915,8 @@ v2 가 적용한 ESX 호스트 옵션과 vmx 의 키는 v1.4 로 돌아가도 �
 | v2.10 | 스냅샷 때 VM 에서 실행할 명령(VCF Operations 기록). 적용 체크할 때 `+간격` 을 날짜 시각으로 고정. [기록 대조] |
 | v2.11 | 구성 스냅샷을 잡 시작 10분 전에 읽음 |
 | v2.12 | 진행 방식을 하나로 함(시작 시각에 잡 시작, 프로세스 확인 없음). `+간격` 의 기준을 바로 윗줄로 변경. `잡 시작 (환산)` 칸. 설정 변경이 없는 케이스는 S 블록 직후에 한꺼번에 등록, 설정 변경은 잡 시작 30분 전. 등록 기록 `jobs.csv`. 탭 5 의 타임라인. 오류와 알림을 한 줄로 줄임. 한 VM 에서 등록이 안 될 때 다른 VM 의 잡만 시작되지 않게 함. `tcrun cancel` 이 접속하지 못한 VM 을 출력하고 다시 실행하면 남은 줄을 지움(2절) |
+
+| v2.13 | 설정 영역에 Operations 주소, 계정, 암호. 구성 스냅샷 때 VM 설정과 호스트 옵션을 VCF Operations 에 기록(7.4절) |
 
 ## 16. 개발 자료
 

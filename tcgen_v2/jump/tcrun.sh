@@ -1,5 +1,5 @@
 #!/bin/sh
-# tcrun 2.12 - tcgen sequence runner. Runs on the jump VM (POSIX sh). tcgen block A installs it in the jump VM work folder
+# tcrun 2.13 - tcgen sequence runner. Runs on the jump VM (POSIX sh). tcgen block A installs it in the jump VM work folder
 # (setting of tcgen, ~/.tcgen when empty). tcrun uses the folder it is in as its work folder (D below).
 #
 #   sh <work folder>/tcrun check <plan>       read-only checks: ESX key login, tools, VMs, settings and power, VM login, clocks
@@ -34,7 +34,7 @@
 # first lines, or until "tcrun cancel".
 # Record of the registration: <log folder>/tcrun-<run id>-jobs.csv (case, esx, vm, job_start, crontab).
 
-TCRUN_VERSION=2.12
+TCRUN_VERSION=2.13
 case "$0" in        # the work folder is the folder of this file
   */tcrun) D=$(cd "${0%/tcrun}" 2>/dev/null && pwd) ;;
   tcrun) D=$(pwd) ;;
@@ -287,17 +287,20 @@ ssh_setup() {
   if setsid -w true >/dev/null 2>&1; then SETSID="setsid -w"; else SETSID=setsid; fi
   APPLY_SHA=$(sha "$D/tcgen_apply.py")
 }
-guard() {           # guard <pid> <seconds>: wait for the pid; end it when it runs longer (by the clock of this machine).
+guard() {           # guard <pid> <seconds> [<epoch>]: wait for the pid; end it when it runs longer than <seconds>, or when
+                    # the clock of this machine reaches <epoch> (a login that must end before a start time).
                     # 124 = ended by the time limit.
                     # G_STOP=1: end it too when the stop flag of this runner appears. 125 = ended by a stop request
   G_P=$1
   rm -f "$W/timedout" "$W/stopwait"
   (
-    G_END=$(($(now) + $2))
-    while [ "$(now)" -lt "$G_END" ]; do
+    G_I=0
+    while [ "$G_I" -lt "$2" ]; do
       sleep 1
       kill -0 "$G_P" 2>/dev/null || exit 0
       if [ -n "$G_STOP" ] && [ -n "$STOPF" ] && [ -f "$STOPF" ]; then : > "$W/stopwait"; break; fi
+      if [ -n "$3" ] && [ "$(now)" -ge "$3" ]; then break; fi
+      G_I=$((G_I + 1))
     done
     [ -f "$W/stopwait" ] || : > "$W/timedout"
     kill "$G_P" 2>/dev/null
@@ -314,13 +317,13 @@ guard() {           # guard <pid> <seconds>: wait for the pid; end it when it ru
   G_P=
   return $G_R
 }
-vmrun() {           # vmrun <ssh target> <script> <output> [seconds]: run the script with sh on a VM
+vmrun() {           # vmrun <ssh target> <script> <output> [seconds [epoch]]: run the script with sh on a VM (guard: time limit)
   $SETSID ssh $SO "$1" sh -s < "$2" > "$3" 2>&1 &
-  guard $! "${4:-90}"
+  guard $! "${4:-90}" "$5"
 }
-esxrun() {          # esxrun <script> <output> [seconds]: run the script with sh on the ESX host of this chain
+esxrun() {          # esxrun <script> <output> [seconds [epoch]]: run the script with sh on the ESX host of this chain
   sh "$D/esxssh" "$EADDR" sh -s < "$1" > "$2" 2>&1 &
-  guard $! "${3:-120}"
+  guard $! "${3:-120}" "$4"
 }
 tval() { grep "^$1 " "$2" 2>/dev/null | tail -n 1 | cut -d' ' -f2-; }
 numv() { case "$1" in ""|*[!0-9]*) say "$2" ;; *) say "$1" ;; esac; }     # numv <value> <default>: the value when it is a number
@@ -491,6 +494,200 @@ wait_until() {      # wait_until <epoch of this machine> [nostop]: 1 = the stop 
   done
 }
 
+# ---------------------------------------------------------------- VCF Operations (optional)
+# When the plan has OPS lines, tcrun writes at the config snapshot of every case:
+#   - the VM settings that the snapshot read on the ESX host (the rows "vm advanced config": the keys of config_snapshot
+#     without sched.mem.pin, and the vmx keys of the settings profiles of this run) as properties
+#     "Custom Configuration|VM|<key>" of the VirtualMachine object that has the name of the VM
+#   - the host options of the case (AH lines) as "Custom Configuration|Host|<Section.Option>" of the HostSystem object
+#     that has the name of the ESX host (or <name>.<domain>, or the address of the plan)
+# The REST calls are those of guest_config_push: token (suite-api/api/auth/token/acquire), object by name
+# (api/resources), properties (api/resources/<id>/properties). The guest OS settings are not written here: the command
+# at the snapshot (guest_config_push) writes them from inside the guest.
+# The password is in the plan as OPS ENC (openssl enc -aes-256-cbc -pbkdf2 -iter 100000 -base64 -A) with its key
+# OPS KEY, the way guest_config_push keeps it. It is decrypted only for the login; the key and the request body are
+# files of the work folder (mode 600) that are removed right after. The password and the token are not logged.
+# A failure is a warning in the log and a row of the snapshot csv: the case goes on.
+ops_on() { grep -q '^OPS HOST ' "$PLAN"; }
+ops_get() { grep "^OPS $1 " "$PLAN" | head -n 1 | cut -d' ' -f3-; }
+ops_ok() {          # the OPS lines of the plan are safe to use (the generator already checks them)
+  ops_get HOST | grep -q '^[A-Za-z0-9][A-Za-z0-9._:/-]*$' || return 1
+  ops_get USER | LC_ALL=C grep -q '^[!-~][!-~]*$' || return 1
+  ops_get ENC | grep -q '^[A-Za-z0-9+/=][A-Za-z0-9+/=]*$' || return 1
+  ops_get KEY | grep -q '^[A-Za-z0-9][A-Za-z0-9]*$' || return 1
+  return 0
+}
+ops_esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+ops_tool() {        # OPS_PY = a python of this jump VM that reads the JSON answers, else OPS_JQ = 1 (jq). 1 = neither
+  OPS_PY=; OPS_JQ=
+  for OT_C in python3 /usr/libexec/platform-python python; do
+    if command -v "$OT_C" >/dev/null 2>&1; then OPS_PY=$OT_C; return 0; fi
+  done
+  if command -v jq >/dev/null 2>&1; then OPS_JQ=1; return 0; fi
+  return 1
+}
+ops_token() {       # stdin: the answer of the token call. Prints the token
+  if [ -n "$OPS_PY" ]; then
+    "$OPS_PY" -c 'import sys, json
+try:
+    print(json.load(sys.stdin).get("token", ""))
+except Exception:
+    print("")'
+  else
+    jq -r '.token // ""' 2>/dev/null
+  fi
+}
+ops_pick() {        # ops_pick <name> <0|1>: stdin = answer of the resources call. Prints the identifier of the object
+                    # with exactly that name (1: or with a name that starts with "<name>.")
+  if [ -n "$OPS_PY" ]; then
+    "$OPS_PY" -c 'import sys, json
+name, pre = sys.argv[1].lower(), sys.argv[2] == "1"
+try:
+    rows = json.load(sys.stdin).get("resourceList") or []
+except Exception:
+    rows = []
+for r in rows:
+    n = ((r.get("resourceKey") or {}).get("name") or "").lower()
+    if n == name or (pre and n.startswith(name + ".")):
+        print(r.get("identifier", ""))
+        break' "$1" "$2"
+  else
+    jq -r --arg n "$1" --arg p "$2" '[.resourceList[]? | select((.resourceKey.name | ascii_downcase) as $x | $x == ($n | ascii_downcase) or ($p == "1" and ($x | startswith(($n | ascii_downcase) + "."))))][0].identifier // ""' 2>/dev/null
+  fi
+}
+ops_login() {       # 0 = logged in: OPS_BASE and OPS_TLS are set, and $W/ops.cfg holds the token for curl -K (the token is
+                    # not put on a command line, where other accounts of the jump VM could read it). 1 = not: $OPS_WHY
+  OPS_WHY=
+  rm -f "$W/ops.cfg"
+  ops_ok || { OPS_WHY="the plan holds a VCF Operations value that tcrun does not accept. Generate again in tcgen"; return 1; }
+  ops_tool || { OPS_WHY="python3 or jq is needed on the jump VM to read the answers of VCF Operations"; return 1; }
+  for OL_C in curl openssl; do
+    command -v $OL_C >/dev/null 2>&1 || { OPS_WHY="command not found on the jump VM: $OL_C"; return 1; }
+  done
+  OL_H=$(ops_get HOST)
+  case "$OL_H" in
+    http://*|https://*) OPS_BASE=${OL_H%/} ;;
+    *) OPS_BASE="https://$OL_H" ;;
+  esac
+  OPS_TLS=-k
+  [ "$(ops_get TLS)" = 1 ] && OPS_TLS=
+  ops_get KEY > "$W/ops.key"
+  OL_P=$(ops_get ENC | openssl enc -d -aes-256-cbc -pbkdf2 -iter 100000 -pass "file:$W/ops.key" -base64 -A 2>/dev/null)
+  rm -f "$W/ops.key"
+  if [ -z "$OL_P" ]; then
+    OPS_WHY="the password of VCF Operations could not be decrypted (openssl 1.1.1 or later is needed). Type the password again in tcgen and generate again"
+    return 1
+  fi
+  printf '{"username":"%s","password":"%s","authSource":"LOCAL"}' "$(ops_esc "$(ops_get USER)")" "$(ops_esc "$OL_P")" > "$W/ops.body"
+  OL_P=
+  curl -s $OPS_TLS --max-time 15 -X POST "$OPS_BASE/suite-api/api/auth/token/acquire" -H 'Content-Type: application/json' \
+    -H 'Accept: application/json' --data-binary "@$W/ops.body" > "$W/ops.out" 2>&1
+  OL_R=$?
+  rm -f "$W/ops.body"
+  OL_T=$(ops_token < "$W/ops.out")
+  if [ -z "$OL_T" ]; then
+    OPS_WHY="login to VCF Operations $OL_H failed (account $(ops_get USER), curl exit $OL_R: $(head -c 160 "$W/ops.out" | LC_ALL=C tr -cd '\40-\176'))"
+    rm -f "$W/ops.out"
+    return 1
+  fi
+  rm -f "$W/ops.out"                             # the answer holds the token
+  case "$OL_T" in
+    *[!A-Za-z0-9:._=+/-]*) OPS_WHY="VCF Operations $OL_H gave a token with characters that tcrun does not accept"; OL_T=; return 1 ;;
+  esac
+  for OL_S in OpsToken vRealizeOpsToken; do
+    printf 'header = "Authorization: %s %s"\n' "$OL_S" "$OL_T" > "$W/ops.cfg"
+    OL_C=$(curl -s $OPS_TLS -K "$W/ops.cfg" -o /dev/null -w '%{http_code}' --max-time 15 -G "$OPS_BASE/suite-api/api/resources" \
+      --data-urlencode "pageSize=1" --data-urlencode "_no_links=true" -H 'Accept: application/json' 2>/dev/null)
+    if [ "$OL_C" = 200 ]; then OL_T=; return 0; fi
+  done
+  OL_T=
+  rm -f "$W/ops.cfg"
+  OPS_WHY="VCF Operations $OL_H did not accept its token (HTTP $OL_C)"
+  return 1
+}
+ops_find() {        # ops_find <VirtualMachine|HostSystem> <name>: prints the identifier of that object ("" when there is none)
+  curl -s $OPS_TLS --max-time 20 -G "$OPS_BASE/suite-api/api/resources" --data-urlencode "adapterKindKey=VMWARE" \
+    --data-urlencode "resourceKind=$1" --data-urlencode "name=$2" --data-urlencode "_no_links=true" \
+    -K "$W/ops.cfg" -H 'Accept: application/json' > "$W/ops.out" 2>&1
+  OF_I=$(ops_pick "$2" 0 < "$W/ops.out")
+  if [ -z "$OF_I" ] && [ "$1" = HostSystem ]; then      # a host is often registered with its full name
+    curl -s $OPS_TLS --max-time 20 -G "$OPS_BASE/suite-api/api/resources" --data-urlencode "adapterKindKey=VMWARE" \
+      --data-urlencode "resourceKind=$1" --data-urlencode "regex=^$(bre "$2")\\..*" --data-urlencode "_no_links=true" \
+      -K "$W/ops.cfg" -H 'Accept: application/json' > "$W/ops.out" 2>&1
+    OF_I=$(ops_pick "$2" 1 < "$W/ops.out")
+  fi
+  say "$OF_I"
+}
+ops_put() {         # ops_put <identifier> <property root> <file of "key<TAB>value" lines>: 0 = written, OPS_N = how many
+  OPS_N=$(grep -c '[^ ]' "$3")
+  awk -F'\t' -v root="$2" -v ts="$(( $(now) * 1000 ))" '
+    function esc(s) { gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); return s }
+    BEGIN { printf "{\"property-content\":[" }
+    $1 != "" { printf "%s{\"statKey\":\"%s|%s\",\"timestamps\":[%s],\"values\":[\"%s\"]}", (n++ ? "," : ""), esc(root), esc($1), ts, esc($2) }
+    END { printf "]}" }' "$3" > "$W/ops.body"
+  OP_C=$(curl -s $OPS_TLS -o "$W/ops.out" -w '%{http_code}' --max-time 30 -X POST "$OPS_BASE/suite-api/api/resources/$1/properties" \
+    -K "$W/ops.cfg" -H 'Content-Type: application/json' -H 'Accept: application/json' --data-binary "@$W/ops.body" 2>/dev/null)
+  rm -f "$W/ops.body"
+  case "$OP_C" in 200|201|204) return 0 ;; esac
+  OPS_WHY="HTTP ${OP_C:-none}: $(head -c 160 "$W/ops.out" 2>/dev/null | LC_ALL=C tr -cd '\40-\176')"
+  return 1
+}
+ops_snapshot() {    # write the VM settings in $W/snap.rows and the host options of case $SEQ to VCF Operations.
+                    # Adds one row per VM to $W/snap.rows ("operations write") and sets SN_P (VMs written), SN_W
+  SN_P=0
+  if ! ops_login; then
+    SN_W="$SN_W VCF Operations: nothing written ($OPS_WHY);"
+    for OS_VM in $VMS; do printf '%s\tadv\toperations write\tfailed (no login)\n' "$OS_VM" >> "$W/snap.rows"; done
+    return 0
+  fi
+  OS_NONE=$(cfgl none '(none)')
+  OS_PIN=$(grep -i -c '^key sched\.mem\.pin$' "$W/snap.spec" 2>/dev/null)
+  for OS_VM in $VMS; do
+    awk -F'\t' -v vm="$OS_VM" -v none="$OS_NONE" -v pin="${OS_PIN:-0}" '
+      $1 == vm && $2 == "adv" && $3 != "operations write" && (pin > 0 || tolower($3) != "sched.mem.pin") { print $3 "\t" ($4 == "" ? none : $4) }' \
+      "$W/snap.rows" > "$W/ops.props"
+    if [ ! -s "$W/ops.props" ]; then
+      printf '%s\tadv\toperations write\tnot written (no VM settings were read)\n' "$OS_VM" >> "$W/snap.rows"
+      continue
+    fi
+    OS_ID=$(ops_find VirtualMachine "$OS_VM")
+    if [ -z "$OS_ID" ]; then
+      SN_W="$SN_W VCF Operations has no VirtualMachine object named $OS_VM;"
+      printf '%s\tadv\toperations write\tnot written (no VirtualMachine object with this name)\n' "$OS_VM" >> "$W/snap.rows"
+      continue
+    fi
+    if ops_put "$OS_ID" "Custom Configuration|VM" "$W/ops.props"; then
+      SN_P=$((SN_P + 1))
+      log "config snapshot: VCF Operations: vm $OS_VM: $OPS_N VM setting(s) written (Custom Configuration|VM)"
+      printf '%s\tadv\toperations write\tok: %s properties\n' "$OS_VM" "$OPS_N" >> "$W/snap.rows"
+    else
+      SN_W="$SN_W VCF Operations: properties of vm $OS_VM not written ($OPS_WHY);"
+      printf '%s\tadv\toperations write\tfailed (%s)\n' "$OS_VM" "$(say "$OPS_WHY" | tr '\t' ' ' | cut -c1-80)" >> "$W/snap.rows"
+    fi
+  done
+  if has AH; then
+    # the host options of the case: the values that the ESX host has now (read by the snapshot, TCGEN-HOPT lines)
+    grep '^TCGEN-HOPT ' "$W/snap.out" 2>/dev/null | cut -d' ' -f2- |
+      awk '{ i = index($0, "|"); k = substr($0, 1, i - 1); v = substr($0, i + 1); sub(/^\//, "", k); gsub(/\//, ".", k); print k "\t" v }' > "$W/ops.props"
+    OS_NH=$(clines AH | grep -c '[^ ]')
+    OS_NR=$(grep -c '[^ ]' "$W/ops.props")
+    [ "$OS_NR" -lt "$OS_NH" ] && SN_W="$SN_W $((OS_NH - OS_NR)) of $OS_NH host option(s) of the case not read on esx $CHF and not written to VCF Operations;"
+    if [ "$OS_NR" -gt 0 ]; then
+      OS_ID=$(ops_find HostSystem "$CH")
+      if [ -z "$OS_ID" ] && [ "$EADDR" != "$CH" ]; then OS_ID=$(ops_find HostSystem "$EADDR"); fi
+      if [ -z "$OS_ID" ]; then
+        SN_W="$SN_W VCF Operations has no HostSystem object named $CH;"
+      elif ops_put "$OS_ID" "Custom Configuration|Host" "$W/ops.props"; then
+        log "config snapshot: VCF Operations: esx $CHF: $OPS_N host option(s) written (Custom Configuration|Host)"
+      else
+        SN_W="$SN_W VCF Operations: properties of esx $CHF not written ($OPS_WHY);"
+      fi
+    fi
+  fi
+  rm -f "$W/ops.out" "$W/ops.props" "$W/ops.cfg"
+  return 0
+}
+
 # ---------------------------------------------------------------- configuration snapshot (config snapshot)
 # Before the job of every case tcrun records the configuration of the VMs of the case: the VM settings (.vmx values,
 # read on the ESX host by "tcgen_apply.py snapshot") and the guest OS settings (read on each VM of the case that is
@@ -540,7 +737,7 @@ snapshot() {        # snapshot: write the config snapshot of the VMs of this cas
     wait_until $((T_ON + 60)) || return 0
   fi
   SN_F=$LOGDIR/tcrun-$RUNID-$CHF-config-$SEQ-$CNAME.csv
-  SN_T=$(stamp); SN_W=; SN_V=0; SN_G=0
+  SN_T=$(stamp); SN_W=; SN_V=0; SN_G=0; SN_P=
   : > "$W/snap.rows"
   # the command at the snapshot is not started later than 2 min before the job start
   SN_DL=$((AT / 60 * 60 - 120))
@@ -548,6 +745,7 @@ snapshot() {        # snapshot: write the config snapshot of the VMs of this cas
     {
       for SN_VM in $VMS; do say "vm $SN_VM"; done
       grep '^AV [0-9]* ' "$PLAN" | cut -d' ' -f4- | sed 's/=.*//' | sort -u | sed 's/^/key /'
+      if ops_on; then clines AH | sed 's/=.*//' | sed 's/^/host /'; fi      # read for VCF Operations (ops_snapshot)
     } > "$W/snap.spec"
     MA_SPEC=$W/snap.spec
     mk_apply "$W/snap.sh" snapshot
@@ -565,6 +763,7 @@ snapshot() {        # snapshot: write the config snapshot of the VMs of this cas
       SN_R=$(tval TCGEN-RESULT "$W/snap.out")
       SN_W="$SN_W VM settings not read on the ESX host (${SN_R:-ssh exit $SN_X: $(first "$W/snap.out")});"
     fi
+    if ops_on; then ops_snapshot; fi
   fi
   mk_guestcfg "$W/gcfg.sh"           # guest OS settings: read on each VM that is powered on
   SN_C=$(gcmd); SN_O=0
@@ -638,7 +837,7 @@ snapshot() {        # snapshot: write the config snapshot of the VMs of this cas
       }'
   } > "$SN_F.new" 2>> "$LOG"
   if [ -s "$SN_F.new" ] && mv -f "$SN_F.new" "$SN_F"; then
-    log "config snapshot ($SN_WHY): $SN_F  (VM settings of $SN_V VM(s), guest OS settings of $SN_G VM(s)${SN_C:+, command at the snapshot ok on $SN_O VM(s)})"
+    log "config snapshot ($SN_WHY): $SN_F  (VM settings of $SN_V VM(s), guest OS settings of $SN_G VM(s)${SN_P:+, VM settings written to VCF Operations for $SN_P VM(s)}${SN_C:+, command at the snapshot ok on $SN_O VM(s)})"
   else
     rm -f "$SN_F.new"
     SN_W="$SN_W the csv could not be written: $SN_F;"
@@ -1054,7 +1253,7 @@ register_case() {   # register the crontab lines of case $SEQ (ctx loaded) at th
     fi
     [ "$RG_L" -gt 60 ] && RG_L=60
     mk_vmcron "$RG_VM" "$W/reg.sh" ${TMON:+MS:$TMON} "JOB:$TJOB" ${MSTOP:+MX:$MSTOP}
-    vmrun "$(target "$RG_VM")" "$W/reg.sh" "$W/reg.out" "$RG_L"
+    vmrun "$(target "$RG_VM")" "$W/reg.sh" "$W/reg.out" "$RG_L" $((RG_F - 15))
     RG_R=$?
     RG_C=$(tval TCGEN-CRON "$W/reg.out")
     if [ "$RG_C" = ok ]; then
@@ -1093,7 +1292,7 @@ register_case() {   # register the crontab lines of case $SEQ (ctx loaded) at th
     else
       [ "$RG_L" -gt 60 ] && RG_L=60
       mk_esxcron "$W/ereg.sh" "EMS:$TMON" ${MSTOP:+EMX:$MSTOP}
-      esxrun "$W/ereg.sh" "$W/ereg.out" "$RG_L"
+      esxrun "$W/ereg.sh" "$W/ereg.out" "$RG_L" $((RG_F - 15))
       RG_R=$?
       RG_C=$(tval TCGEN-CRON "$W/ereg.out")
       case "$RG_C" in
@@ -2116,6 +2315,18 @@ check_body() {
   else
     ck_ok "command at the config snapshot: none (the guest settings are not recorded in VCF Operations by the run)"
   fi
+  CB_OPS=
+  : > "$W/done.ops"
+  if ops_on; then
+    if ops_login; then
+      CB_OPS=1
+      ck_ok "VCF Operations $(ops_get HOST): login works (account $(ops_get USER)). At the config snapshot of every case the VM settings and the host options of the case are written as properties of the VM and host objects"
+    else
+      ck_bad "VCF Operations: $OPS_WHY"
+    fi
+  else
+    ck_ok "VCF Operations: no address in the settings of tcgen. The VM settings are not written to VCF Operations"
+  fi
   for CH in $(chains); do
     CHF=$(chfile "$CH"); EADDR=$(esxaddr "$CH")
     say ""
@@ -2236,6 +2447,27 @@ check_body() {
           ck_bad "settings and VM power of case $CNAME not checked (no ESX login)"
         fi
       fi
+      if [ -n "$CB_OPS" ] && [ "$CH" != "-" ]; then      # the objects that the properties are written to
+        for CB_VM in $VMS; do
+          grep -qx "vm $CB_VM" "$W/done.ops" && continue
+          say "vm $CB_VM" >> "$W/done.ops"
+          if [ -n "$(ops_find VirtualMachine "$CB_VM")" ]; then
+            ck_ok "vm $CB_VM: VCF Operations has a VirtualMachine object with this name"
+          else
+            ck_bad "vm $CB_VM: VCF Operations has no VirtualMachine object with this name. Its VM settings would not be written"
+          fi
+        done
+        if has AH && ! grep -qx "esx $CH" "$W/done.ops"; then
+          say "esx $CH" >> "$W/done.ops"
+          CB_I=$(ops_find HostSystem "$CH")
+          if [ -z "$CB_I" ] && [ "$EADDR" != "$CH" ]; then CB_I=$(ops_find HostSystem "$EADDR"); fi
+          if [ -n "$CB_I" ]; then
+            ck_ok "esx $CHF: VCF Operations has a HostSystem object for this host"
+          else
+            ck_bad "esx $CHF: VCF Operations has no HostSystem object named $CH (or $CH.<domain>). The host options would not be written"
+          fi
+        fi
+      fi
       for CB_VM in $VMS; do
         if grep -q "^OFF $SEQ $(bre "$CB_VM")\$" "$PLAN"; then
           ck_ok "vm $CB_VM: the case wants it powered off. No login."
@@ -2253,6 +2485,7 @@ check_body() {
       done
     done
   done
+  rm -f "$W/ops.out" "$W/ops.props" "$W/ops.cfg"
   if [ -s "$W/clocks" ]; then
     CB_MIN=$(sort -n "$W/clocks" | head -n 1); CB_MAX=$(sort -n "$W/clocks" | tail -n 1)
     if [ $((CB_MAX - CB_MIN)) -gt 30 ]; then

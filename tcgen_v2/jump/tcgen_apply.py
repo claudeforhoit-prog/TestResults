@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-tcgen_apply.py 2.12 - apply ESXi host advanced options and VM configuration (.vmx) keys for one test case.
+tcgen_apply.py 2.13 - apply ESXi host advanced options and VM configuration (.vmx) keys for one test case.
 
 Runs ON THE ESXi HOST with the python3 that ships with ESXi. Standard library only, Python 3.5 syntax.
 The tcgen sequence runner (tcrun, on the jump VM) uploads this file to /tmp/tcgen on the host and runs it over ssh.
@@ -18,7 +18,8 @@ Usage (the settings come on standard input, see "spec" below):
   python3 tcgen_apply.py lpagewait <vm> [secs] wait until the 1GB page backing of a powered-on VM is complete (default 5400).
                                                Complete when the number of 1GB page
                                                backings reaches memSize / 1024; no increase in 6 readings (15 s apart) = stopped.
-  python3 tcgen_apply.py snapshot              read only: the settings of VMs for the configuration snapshot (config snapshot).
+  python3 tcgen_apply.py snapshot              read only: the settings of VMs for the configuration snapshot (config snapshot),
+                                               and the values of the host options that the spec names.
                                                Standard input: "vm <name>" lines, and "key <.vmx key>" lines for more keys.
                                                Prints "TCGEN-CFG <vm>|<group>|<item>|<value>": group basic (power state, cpu,
                                                memory, shares), adv (advanced keys of the .vmx), aff (CPU affinity keys).
@@ -50,7 +51,7 @@ import subprocess
 import sys
 import time
 
-VERSION = "2.12"
+VERSION = "2.13"
 VMFS_ROOT = os.environ.get("TCGEN_VMFS_ROOT", "/vmfs/volumes")
 TMP = os.environ.get("TCGEN_TMP", "/tmp/tcgen")
 POLL = float(os.environ.get("TCGEN_POLL_SEC", "5"))
@@ -650,7 +651,7 @@ SNAP_AFF_RE = re.compile(r"^sched\.(vcpu|node)(\d+)\.affinity$")
 
 
 def read_snap_spec(data):
-    vms, keys = [], []
+    vms, keys, hosts = [], [], []
     for raw in data.decode("ascii", "replace").split("\n"):
         line = raw.rstrip("\r").strip()
         if not line or line.startswith("#"):
@@ -663,11 +664,14 @@ def read_snap_spec(data):
         elif word == "key" and rest:
             if rest.lower() not in [k.lower() for k in keys]:
                 keys.append(rest)
+        elif word == "host" and rest:
+            if rest not in hosts:
+                hosts.append(rest)
         else:
             raise Fail("snapshot spec: unknown line: %r" % line)
     if not vms:
         raise Fail("snapshot spec: no vm line")
-    return vms, keys
+    return vms, keys, hosts
 
 
 def snap_number(values):
@@ -718,8 +722,9 @@ def snap_vm(name, lines, state, keys):
     return rows
 
 
-def cmd_snapshot(vms, keys):
-    """Read only: the settings of each VM as lines TCGEN-CFG <vm>|<group>|<item>|<value>."""
+def cmd_snapshot(vms, keys, hosts=()):
+    """Read only: the settings of each VM as lines TCGEN-CFG <vm>|<group>|<item>|<value>, and the value that each host
+    option of the spec (host </Section/Option>) has now as a line TCGEN-HOPT </Section/Option>|<value>."""
     table = all_vms()
     n = 0
     for name in vms:
@@ -734,6 +739,13 @@ def cmd_snapshot(vms, keys):
         for group, item, value in snap_vm(name, lines, state, keys):
             out("TCGEN-CFG %s|%s|%s|%s" % (name, group, item, value.replace("\t", " ")))
         n += 1
+    for path in hosts:
+        try:
+            value = host_get(path)[1]
+        except Fail as e:
+            out("host option %s: not read: %s" % (path, e))
+            continue
+        out("TCGEN-HOPT %s|%s" % (path, value.replace("\t", " ")))
     result("snapshot", "%d of %d VM(s) read" % (n, len(vms)))
 
 

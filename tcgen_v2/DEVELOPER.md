@@ -86,7 +86,7 @@ v2.11 까지의 규칙(프로세스 확인, 변경 작업 뒤 대기, 스냅샷 
 - [리포트용 CSV 저장] 의 잡 시작은 환산한 시각이다("+10:00 헀으면 리포트용 csv 저장하면 +10 시간 반영해서 적용이 되어야"). `seq_report_sched`.
 - 스냅샷 때 VM 에서 실행할 명령은 칸 하나다. VM 과 BM 서버가 같은 경로의 같은 파일을 쓴다(`--target auto`). 폴더와 파일 이름으로 칸을 나누지 않는다("그냥 guest config 실행ㅇ하는 명령어로 넣을꼐").
 - 오류와 경고는 한 줄로 쓰고 화면의 칸 이름을 쓴다. 대상이 없는 경고는 내지 않는다(3.7절).
-- VM 설정과 호스트 옵션을 점프 VM 에서 VCF Operations 로 보내는 기능과 Operations 주소, 계정, 암호 칸은 다음 단계다(사용자 결정 2026-11-18. 이 판에는 없다).
+- VCF Operations 기록(v2.13. 사용자 결정 2026-11-18 "ops 주소 랑 계정 암호 등은 guest config 에 방식하고 똑같이하고싶은데 암호화해서... 생성기에서입력하고 싶어", "설정 프로파일에 있는 내용 을 ops 에 등록하고싶어 경로 config snashopt 내용과 동일하게", "Host 의 vm config 는 A로 해야하고 Guest config 는 B로 해야지"): 설정 영역의 Operations 주소, 계정, 암호. 구성 스냅샷 때 `tcrun` 이 점프 VM 에서 VM 설정(`Custom Configuration|VM|<키>`: config_snapshot 의 11개 키와 설정 프로파일의 키)과 케이스의 호스트 옵션(`Custom Configuration|Host|<구역.옵션>`)을 기록한다. Guest OS 설정은 게스트와 BM 서버 안에서 guest_config_push 가 기록한다(스냅샷 때 VM 에서 실행할 명령). 암호는 guest_config_push 와 같은 방식(`openssl enc -aes-256-cbc -pbkdf2 -iter 100000`, 암호화한 글과 키를 함께 보관)으로 저장한다. 암호 자체는 저장하지 않는다. 기록하지 못해도 케이스는 진행한다.
 
 v2.11 에서 이어지는 규칙은 다음과 같다.
 
@@ -123,11 +123,12 @@ v2.11 에서 이어지는 규칙은 다음과 같다.
 - `tcrun` 은 plan 의 글을 `eval` 하지 않고 이 장비의 셸에 넘기지 않는다. `grep`, `sed`, `cut` 으로 꺼내 파일에 쓰고, 원격에서는 따옴표로 감싼 here-document 로 넘긴다(`test_tcrun_does_not_eval_the_plan`).
 - `tcrun` 과 `tcgen_apply.py` 에 시험용 코드를 넣지 않는다. 시험은 가짜 `date`, `sleep` 과 경로 환경 변수(`TCGEN_TMP`, `TCGEN_CRON_DIR`, `TCGEN_VMFS_ROOT`)만 쓴다. 이 변수들은 실제 장비에서는 설정되지 않는다.
 - `tcrun` 은 POSIX sh 로 쓴다. `local`, 배열, `[[ ]]` 를 쓰지 않는다. dash 에서도 실행한다.
+- Operations 암호의 암호화는 `tcgen_core.py` 의 `ops_encrypt` 에 있다(표준 라이브러리에 AES 가 없어 FIPS 197 의 암호화를 직접 구현했다. `test_aes_block_matches_fips197`, `test_encrypted_password_is_decrypted_by_openssl` 이 확인한다). PC 에는 푸는 코드를 두지 않는다. `tcrun` 은 키와 요청 본문을 작업 폴더의 파일(권한 600)로 넘기고 바로 지운다. 토큰은 curl 설정 파일(`ops.cfg`, `curl -K`)로 넘겨 명령줄 인자에 싣지 않는다(다른 계정이 `ps` 로 볼 수 없게. `OpsTests` 가 curl 의 인자를 기록해 확인한다). 암호와 토큰을 로그에 쓰지 않는다. 호스트 옵션의 값은 plan 의 목표 값이 아니라 스냅샷 때 `tcgen_apply.py snapshot` 이 읽은 값이다(스냅샷 spec 의 `host </구역/옵션>` 줄, 출력 `TCGEN-HOPT </구역/옵션>|<값>`). Operations 주소를 적지 않은 실행은 호스트 옵션을 읽지 않는다.
 - `tcgen_apply.py` 는 Python 3.5 문법으로 쓴다. f-string, 변수 주석, `subprocess.run` 을 쓰지 않는다.
 - `tcgen_apply.py` 는 무엇이든 바꾸기 전에 대상을 모두 확인한다(VM 을 찾고, vmx 를 읽고, 호스트 옵션을 읽는다). 하나라도 안 되면 아무것도 바꾸지 않는다.
 - crontab 등록은 v1.4 의 B 블록, C 블록과 같은 방법이다: 그 케이스의 표식 줄을 지우고 새 줄을 넣는다.
 - 한 케이스의 줄은 모든 호스트에 첫 실행 시각 15초 전까지 들어가거나, 어느 호스트에도 없어야 한다(`register_case`). 시각을 뒤로 옮겨 다시 등록하지 않는다. 구현은 다음과 같다(2026-11-18. 느린 VM 하나 때문에 다른 VM 의 잡만 시작된 뒤에 줄을 지우던 결함을 시험으로 재현하고 고침).
-  - 접속 하나의 시간 제한은 첫 실행 시각 15초 전까지 남은 시간이다(최대 60초, 5초가 남지 않으면 접속하지 않는다). `guard` 의 제한은 반복 횟수가 아니라 시계로 센다.
+  - 접속 하나의 시간 제한은 첫 실행 시각 15초 전까지 남은 시간이다(최대 60초, 5초가 남지 않으면 접속하지 않는다). `guard` 는 초 수 제한에 더해 그 시각(시계 기준)이 되면 접속을 끝낸다.
   - 등록 셸 글은 줄을 넣기 직전에 그 호스트의 시계가 `CRON_DL`(첫 실행 시각 15초 전)을 지났으면 넣지 않고 `TCGEN-CRON late` 를 낸다. 접속이 느린 VM 과 시계가 빠른 VM 이 이 경우다.
   - 등록 셸 글과 삭제 셸 글은 `TCGEN-HAD <수>`(그 호스트에 있던 그 케이스의 줄 수)를 맨 먼저 낸다. 이 줄이 출력에 있으면 셸 글이 실행되기 시작한 것이다.
   - 실패하면 줄을 받은 VM(`RG_HAVE`), 늦게 받은 VM(`RG_SLOW`), 결과가 없는 VM(`RG_UNK`) 순서로 지운다. 줄을 받지 않았다고 답한 VM 과 접속이 안 된 VM 에는 다시 접속하지 않는다.
@@ -235,6 +236,7 @@ plan 은 UTF-8 글 파일이고 줄 단위다. 첫 낱말이 종류, 둘째 낱�
 | `CHAIN <ESX 호스트>` | 진행 하나. ESX 호스트를 적지 않은 케이스는 `-` |
 | `RPTH <CSV 한 줄>` | 리포트용 CSV 의 머리글 |
 | `CFGL <이름> <글>` | 구성 스냅샷 csv 의 머리글과 구간 이름(`h1`, `h2`, `time`, `basic`, `adv`, `guest`, `aff`, `ref_esx`, `ref_guest`, `none`). 없으면 `tcrun` 이 영어 글을 쓴다 |
+| `OPS HOST <주소>`, `OPS USER <계정>`, `OPS ENC <암호화한 암호>`, `OPS KEY <키>`, `OPS TLS <0 또는 1>` | VCF Operations 기록(설정값 `ops_host`, `ops_user`, `ops_pass_enc`, `ops_enc_key`, `ops_verify_tls`). 주소를 적었을 때만 있다. `tcrun` 의 `ops_login`, `ops_find`, `ops_put`, `ops_snapshot` 이 쓴다 |
 | `GCMD <명령>` | 구성 스냅샷 때 케이스의 켜져 있는 VM 마다 실행할 명령(설정값 `seq_guest_cmd`). 줄 끝까지가 명령이다. 없으면 실행하지 않는다 |
 
 케이스 부분은 `CASE` 줄로 시작하고 `END` 줄로 끝난다.
@@ -275,7 +277,8 @@ python -m unittest discover -s tests -v
 | `test_v14_compat.py` | 시각 지정의 블록을 v1.4 의 결과와 바이트 단위로 비교한다. 기준 자료는 `fixtures/v14_blocks.json` 이고 `make_v14_fixture.py` 가 v1.4 소스로 만든다. 옆 폴더(`../tcgen`)에 v1.4 소스가 있으면 그 코드도 직접 실행해 비교한다 |
 | `test_seq.py` | 생성기의 단위 시험. 도우미 `with_starts` 가 시작 시각을 적지 않은 잡 케이스에 시각을 넣는다 |
 | `test_apply.py` | `tcgen_apply.py` 시험 |
-| `test_tcrun.py` | `tcrun` 통합 시험. 가짜 환경의 기본 설정은 모니터링 시작 1분 전, 설정 적용 10분 전, 구성 스냅샷 3분 전, 부팅 대기 5분, 종료 대기 1분이다(시험 시간을 줄이려고). 등록 동작은 `RegisterTests`, 초 단위로 시점을 맞추는 시험(느린 접속, 멈춘 `crontab` 명령, 등록 중 cancel)은 6배속으로 실행하는 `SlowClockTests`. 가짜 환경의 `login_slow` 는 다음 접속 한 번을, `crontab_slow` 는 다음 `crontab` 명령 한 번을 느리게 한다 |
+| `fake_ops.py` | 가짜 VCF Operations(http). `OpsTests` 가 쓴다. `tcrun` 은 주소에 `http://` 를 적으면 그대로 쓰므로 시험용 코드가 필요 없다(guest_config_push 와 같다) |
+| `test_tcrun.py` | `tcrun` 통합 시험. 가짜 환경의 기본 설정은 모니터링 시작 1분 전, 설정 적용 10분 전, 구성 스냅샷 3분 전, 부팅 대기 5분, 종료 대기 1분이다(시험 시간을 줄이려고). 등록 동작은 `RegisterTests`. 초 단위로 시점을 맞추는 시험은 배속을 낮춘 묶음에서 실행한다: 줄 등록이 첫 시작 시각 가까이에서 일어나는 경우(느린 접속, 멈춘 `crontab` 명령, 시계가 다른 VM, 등록 중 cancel)는 3배속의 `SlowRegistrationTests`, 구성 스냅샷의 시점은 6배속의 `SlowClockTests`. 이 시험들은 진행을 시작한 시점이 전제와 다르면 건너뛴다(skip). 가짜 환경의 `login_slow` 는 다음 접속 한 번을, `crontab_slow` 는 다음 `crontab` 명령 한 번을 느리게 한다. VCF Operations 기록은 `OpsTests`(가짜 Operations `fake_ops.py`, curl 을 감싸 인자를 기록) |
 | `test_seq_blocks_shell.py` | 대화형 tcsh, bash 에 블록 A, P, S 를 붙여넣는 시험 |
 | `fakeenv.py` | 위 세 시험이 쓰는 가짜 환경 |
 | `gui_smoke.py` | 화면 점검(수동 실행). Tk 8.6 이상의 Python 으로 실행한다. `TCGEN_SOFT=1` 을 주면 틀린 점검에서 멈추지 않는다 |
@@ -284,7 +287,7 @@ python -m unittest discover -s tests -v
 가짜 환경(`fakeenv.py`)은 시험 폴더 하나에 점프 VM, VM, ESX 호스트를 폴더로 만들고 가짜 명령을 `PATH` 앞에 둔다.
 
 - 가짜 `ssh`: VM 대상은 제어 터미널이 없는지와 askpass 비밀번호를 확인한다. ESX 대상(`-i`, `-l root`)은 키 파일과 `authorized` 파일이 있을 때만 접속한다. VM 이 꺼져 있으면 접속을 거절한다.
-- 가짜 `date`, `sleep`: 가상 시계. 시험에서는 시간이 30배 빨리 간다(`TCGEN_TEST_SPEED`). `tcrun` 은 시간을 `date` 와 `sleep` 으로만 다루므로 시험용 코드가 필요 없다.
+- 가짜 `date`, `sleep`: 가상 시계. 시험에서는 시간이 30배 빨리 간다(`TCGEN_TEST_SPEED`). 장비가 느리거나 다른 작업이 함께 실행 중이면 시점을 보는 시험이 틀릴 수 있다. 그때는 `TCGEN_TEST_SPEED=20` 처럼 배속을 낮춰 실행한다(시험 시간은 그만큼 늘어난다). `tcrun` 은 시간을 `date` 와 `sleep` 으로만 다루므로 시험용 코드가 필요 없다.
 - `CronSim`: 등록된 crontab 줄을 가상 시계의 그 분에 실행한다. VM 은 cronie 의 `%` 처리를, ESX 는 `cron.update` 가 있을 때만 다시 읽는 동작을 흉내 낸다.
 - 가짜 `vim-cmd`, `esxcli`: Broadcom KB 343248, 320877, 310338 의 출력 형식을 따른다. 실제 ESX 의 출력이 이 가짜와 다르면 시험으로는 찾지 못한다. `README.md` 12절의 '실제 장비에서 확인할 것' 을 참조한다.
 - dash 시험(`DashTests`): `PATH` 앞에 `sh` 를 dash 로 두어 `tcrun`, VM 과 ESX 에 보내는 글, cron 이 실행하는 줄을 모두 dash 로 실행한다.

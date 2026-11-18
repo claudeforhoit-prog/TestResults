@@ -40,7 +40,7 @@ import shutil
 import sys
 import time
 
-VERSION = "2.12"
+VERSION = "2.13"
 KST_TO_UTC = dt.timedelta(hours=9)
 CHUNK = 100            # 붙여넣는 글 한 줄에 담는 명령 조각 길이(문자 수)
 NONE_JOB = "(없음)"
@@ -89,6 +89,11 @@ DEFAULT_SETTINGS = {
     "seq_snap_lead_min": 10,   # 순서 실행: 구성 스냅샷을 잡 시작 N분 전에 읽는다 (0 = 케이스의 준비가 끝나는 대로. v2.10 까지의 동작)
     "seq_guest_cmd": "",       # 순서 실행: 구성 스냅샷 때 케이스의 켜져 있는 VM 마다 실행할 명령(게스트 구성을 VCF Operations 에
                                # 기록하는 스크립트). 비우면 실행하지 않는다
+    "ops_host": "",            # VCF Operations 주소(이름이나 IP). 비우면 Operations 에 기록하지 않는다
+    "ops_user": "",            # Operations 계정
+    "ops_pass_enc": "",        # Operations 암호를 암호화한 글(ops_encrypt). 암호 자체는 어디에도 저장하지 않는다
+    "ops_enc_key": "",         # 위 글을 푸는 키(guest_config_push 의 OPS_PASS_ENC, OPS_ENC_KEY 와 같은 방식)
+    "ops_verify_tls": False,   # True: Operations 의 인증서를 확인한다. 기본은 확인하지 않음(guest_config_push 의 기본과 같다)
     "seq_gap_min": 30,         # 순서 실행: 앞 케이스의 잡이 끝난 뒤 다음 케이스의 잡을 시작하기까지 최소 N분 (0 = 기다리지 않음)
     "seq_start_spacing_min": 5,    # 순서 실행: 모든 잡 시작은 서로 N분 이상 떨어진다(ESX 호스트가 달라도, 이 점프 VM 의 다른 실행과도)
     "seq_prep_lead_min": 30,   # 설정이나 VM 전원이 호스트와 다른 케이스는 잡 시작 N분 전에 변경한다(VM 종료, 설정 적용, VM 전원 ON).
@@ -197,8 +202,10 @@ def load_settings(base):
             s[k] = int(s[k])
         except (TypeError, ValueError):
             s[k] = DEFAULT_SETTINGS[k]
-    for k in ("record_csv", "log_dir", "vm_user", "vm_prefix", "jump_log_dir", "esx_addr", "seq_guest_cmd"):
+    for k in ("record_csv", "log_dir", "vm_user", "vm_prefix", "jump_log_dir", "esx_addr", "seq_guest_cmd",
+              "ops_host", "ops_user", "ops_pass_enc", "ops_enc_key"):
         s[k] = "" if s.get(k) is None else str(s[k])
+    s["ops_verify_tls"] = bool(s.get("ops_verify_tls"))
     # v2.10 (사용자 2026-11-17 "변경작업은 30분혹은 그 이상 이전에 수행"): 예전 판이 저장한 파일에 예전 기본값 10분이 그대로 있으면
     # 30분으로 올린다. 한 번만 한다(그 뒤에 사용자가 고친 값은 그대로 둔다)
     if old_rev is not None and old_rev < 1 and s["seq_settle_min"] == 10:
@@ -1013,10 +1020,10 @@ def table_starts(cases, now=None, record_rows=None, generate=False):
     return out
 
 
-def timeline_table(prep, snaplead, lead, has_mon, has_gcmd, has_stop=False):
+def timeline_table(prep, snaplead, lead, has_mon, has_gcmd, has_stop=False, has_ops=False):
     """타임라인(사용자 2026-11-18: 설정 변경이 없는 케이스와 있는 케이스로 나눠, 잡 시작 몇 분 전에 무엇을 하는지)을 표로 돌려준다.
     {"cols": [시점, ...], "rows": [(묶음 제목, [그 시점에 하는 일 또는 "", ...]), ...]}. T 는 케이스의 잡 시작 시각이고, 열은 시간 순서다."""
-    snap = "구성 스냅샷" + (", VM 에서 명령 실행" if has_gcmd else "")
+    snap = "구성 스냅샷" + (", VM 설정을 Operations 에 기록" if has_ops else "") + (", VM 에서 명령 실행" if has_gcmd else "")
     before = {snaplead: [snap]}                    # 잡 시작 N분 전에 두 묶음이 똑같이 하는 일
     if has_mon:
         before.setdefault(lead, []).append("모니터링 시작")
@@ -1048,9 +1055,9 @@ def timeline_table(prep, snaplead, lead, has_mon, has_gcmd, has_stop=False):
     return {"cols": cols, "rows": [("설정 변경이 없는 케이스", same), ("설정 변경이 있는 케이스", change)]}
 
 
-def timeline_lines(prep, snaplead, lead, has_mon, has_gcmd, has_stop=False):
+def timeline_lines(prep, snaplead, lead, has_mon, has_gcmd, has_stop=False, has_ops=False):
     """타임라인을 글 줄로 돌려준다(실행 계획 글의 앞부분). 묶음마다 '시점 : 하는 일' 을 시간 순서로 적는다."""
-    tb = timeline_table(prep, snaplead, lead, has_mon, has_gcmd, has_stop)
+    tb = timeline_table(prep, snaplead, lead, has_mon, has_gcmd, has_stop, has_ops)
     out = ["[타임라인]  T = 케이스의 잡 시작 시각"]
     for title, cells in tb["rows"]:
         out.append(title)
@@ -1978,6 +1985,114 @@ def format_case_profiles(c):
 # ------------------------------------------------------------------ 순서 실행 (seq): 검증, plan, 블록
 # 순서 실행에서 PC 는 시각을 정하지 않는다. 케이스의 내용을 plan 한 파일로 만들어 블록에 넣고,
 # 점프 VM 의 ~/.tcgen/tcrun 이 plan 을 읽어 ESX 호스트별로 케이스를 표의 순서대로 진행한다. plan 형식은 DEVELOPER.md 5절.
+# ------------------------------------------------------------------ VCF Operations 암호의 암호화
+# 사용자 결정 2026-11-18: Operations 주소, 계정, 암호를 생성기에서 입력하고 guest_config_push 와 같은 방식으로 암호화한다.
+# 형식은 openssl enc -aes-256-cbc -pbkdf2 -iter 100000 -salt -pass pass:<키> -base64 -A 의 출력과 같다. 점프 VM 의 tcrun 이
+# openssl enc -d 로 푼다. Python 표준 라이브러리에 AES 가 없어 암호화(FIPS 197)를 여기에 둔다. 푸는 코드는 두지 않는다.
+OPS_PBKDF2_ITER = 100000
+OPS_HOST_RE = re.compile(r"^(https?://)?[A-Za-z0-9][A-Za-z0-9._:-]*/?$")
+_AES_SBOX = []
+
+
+def _aes_sbox():
+    if not _AES_SBOX:
+        # GF(2^8) 의 곱셈 역원과 affine 변환으로 S-box 를 계산한다(FIPS 197 5.1.1)
+        p, q, box = 1, 1, [0] * 256
+        while True:
+            p = p ^ ((p << 1) & 0xFF) ^ (0x1B if p & 0x80 else 0)
+            q ^= q << 1
+            q ^= q << 2
+            q ^= q << 4
+            q &= 0xFF
+            if q & 0x80:
+                q ^= 0x09
+            x = q ^ (((q << 1) | (q >> 7)) & 0xFF) ^ (((q << 2) | (q >> 6)) & 0xFF) ^ (((q << 3) | (q >> 5)) & 0xFF) \
+                ^ (((q << 4) | (q >> 4)) & 0xFF)
+            box[p] = (x ^ 0x63) & 0xFF
+            if p == 1:
+                break
+        box[0] = 0x63
+        _AES_SBOX.extend(box)
+    return _AES_SBOX
+
+
+def _aes_xtime(a):
+    return ((a << 1) ^ 0x1B) & 0xFF if a & 0x80 else (a << 1)
+
+
+def _aes_round_keys(key):
+    """AES-256 의 round key 15개(FIPS 197 5.2)."""
+    sbox = _aes_sbox()
+    w = [list(key[4 * i:4 * i + 4]) for i in range(8)]
+    rcon = 1
+    for i in range(8, 60):
+        t = list(w[i - 1])
+        if i % 8 == 0:
+            t = [sbox[b] for b in t[1:] + t[:1]]
+            t[0] ^= rcon
+            rcon = _aes_xtime(rcon)
+        elif i % 8 == 4:
+            t = [sbox[b] for b in t]
+        w.append([a ^ b for a, b in zip(w[i - 8], t)])
+    return [sum((w[4 * r + c] for c in range(4)), []) for r in range(15)]
+
+
+def _aes_encrypt_block(block, rkeys):
+    sbox = _aes_sbox()
+    s = [b ^ k for b, k in zip(block, rkeys[0])]
+    for rnd in range(1, 15):
+        s = [sbox[b] for b in s]
+        s = [s[(i + 4 * (i % 4)) % 16] for i in range(16)]
+        if rnd != 14:
+            out = []
+            for c in range(4):
+                a = s[4 * c:4 * c + 4]
+                t = a[0] ^ a[1] ^ a[2] ^ a[3]
+                out += [a[0] ^ t ^ _aes_xtime(a[0] ^ a[1]), a[1] ^ t ^ _aes_xtime(a[1] ^ a[2]),
+                        a[2] ^ t ^ _aes_xtime(a[2] ^ a[3]), a[3] ^ t ^ _aes_xtime(a[3] ^ a[0])]
+            s = out
+        s = [b ^ k for b, k in zip(s, rkeys[rnd])]
+    return s
+
+
+def ops_encrypt(password, key=None, salt=None):
+    """Operations 암호를 암호화한다. (암호화한 글, 키) 반환. 키를 주지 않으면 새로 만든다(영문 소문자와 숫자 32자).
+    암호화한 글은 openssl enc -d -aes-256-cbc -pbkdf2 -iter 100000 -pass pass:<키> -base64 -A 로 풀린다."""
+    key = key or os.urandom(16).hex()
+    salt = os.urandom(8) if salt is None else salt
+    km = hashlib.pbkdf2_hmac("sha256", key.encode("utf-8"), salt, OPS_PBKDF2_ITER, 48)
+    data = list(password.encode("utf-8"))
+    pad = 16 - len(data) % 16
+    data += [pad] * pad
+    rkeys = _aes_round_keys(km[:32])
+    out, prev = [], list(km[32:])
+    for i in range(0, len(data), 16):
+        prev = _aes_encrypt_block([a ^ b for a, b in zip(data[i:i + 16], prev)], rkeys)
+        out += prev
+    return base64.b64encode(b"Salted__" + salt + bytes(bytearray(out))).decode("ascii"), key
+
+
+def ops_settings(settings):
+    """설정의 Operations 값. (값 사전 또는 None, 오류 목록). 주소가 비어 있으면 기록하지 않는다(None, 오류 없음)."""
+    host = (settings.get("ops_host") or "").strip()
+    if not host:
+        return None, []
+    errors = []
+    user = (settings.get("ops_user") or "").strip()
+    enc, key = (settings.get("ops_pass_enc") or "").strip(), (settings.get("ops_enc_key") or "").strip()
+    if not OPS_HOST_RE.match(host):
+        errors.append("설정: 'Operations 주소' 는 이름이나 IP 로 적을 것 (영문, 숫자, . - : 만 사용): '%s'" % host)
+    if not user:
+        errors.append("설정: 'Operations 계정' 을 적을 것 ('Operations 주소' 를 비우면 Operations 에 기록하지 않음)")
+    elif any(ord(ch) < 33 or ord(ch) > 126 for ch in user) or len(user) > 100:
+        errors.append("설정: 'Operations 계정' 에는 공백과 한글을 쓸 수 없음: '%s'" % user)
+    if not enc or not key:
+        errors.append("설정: 'Operations 암호' 를 입력할 것 ('Operations 주소' 를 비우면 Operations 에 기록하지 않음)")
+    elif not re.match(r"^[A-Za-z0-9+/=]+$", enc) or not re.match(r"^[A-Za-z0-9]+$", key):
+        errors.append("설정: 저장된 'Operations 암호' 를 읽을 수 없음. 암호를 다시 입력할 것")
+    return {"host": host, "user": user, "enc": enc, "key": key, "tls": bool(settings.get("ops_verify_tls"))}, errors
+
+
 PLAN_FORMAT = "TCGEN-PLAN 2"
 DEFAULT_JUMP_LOG = "~/tcgen_log"
 DEFAULT_JUMP_DIR = "~/.tcgen"
@@ -2106,7 +2221,9 @@ def build_seq(cases, run_cmds, mon_cmds, profiles, settings, now=None, record_ro
             errors += check_command(gcmd, glabel)
         if len(gcmd) > 500:
             errors.append("%s: 500자를 넘음 (%d자). 긴 명령은 스크립트 파일로 만들어 그 경로를 적을 것" % (glabel, len(gcmd)))
-    common = {"sets": sets, "logdir": logdir, "addr": addr, "user": user, "lead": lead, "jdir": jdir, "gcmd": gcmd}
+    ops, ops_errors = ops_settings(settings)
+    errors += ops_errors
+    common = {"sets": sets, "logdir": logdir, "addr": addr, "user": user, "lead": lead, "jdir": jdir, "gcmd": gcmd, "ops": ops}
     if errors:
         return plan, errors, warnings, common
     run_by = {r["name"].strip(): r for r in run_cmds if (r.get("name") or "").strip()}
@@ -2409,6 +2526,10 @@ def plan_text(plan, common, run_id, now):
     out += ["CFGL %s %s" % kv for kv in SNAPSHOT_LABELS]
     if common.get("gcmd"):              # 구성 스냅샷 때 케이스의 켜져 있는 VM 마다 실행할 명령
         out.append("GCMD " + common["gcmd"])
+    if common.get("ops"):               # VCF Operations: 구성 스냅샷 때 VM 설정과 호스트 옵션을 객체의 속성으로 기록한다
+        o = common["ops"]
+        out += ["OPS HOST " + o["host"], "OPS USER " + o["user"], "OPS ENC " + o["enc"], "OPS KEY " + o["key"],
+                "OPS TLS %d" % (1 if o["tls"] else 0)]
     for pc in plan:
         s = pc["seq"]
         out.append("CASE %s %s %s" % (s, pc["chain"], pc["name"]))
@@ -2459,9 +2580,13 @@ def plan_view(plan, common, run_id):
            "등록 기록 %s/tcrun-%s-jobs.csv (케이스, ESX 호스트, VM, 잡 시작, crontab 등록 여부)" % (common["logdir"], run_id),
            "진행 확인 sh %s/tcrun status, 멈추기 sh %s/tcrun stop, 취소 sh %s/tcrun cancel" % (jdir, jdir, jdir),
            ""]
-    out += timeline_lines(prep, snaplead, lead, any(pc["has_mon"] for pc in plan), bool(gcmd), plan_has_stop(plan))
+    out += timeline_lines(prep, snaplead, lead, any(pc["has_mon"] for pc in plan), bool(gcmd), plan_has_stop(plan),
+                          bool(common.get("ops")))
     if gcmd:
         out.append("스냅샷 때 VM 에서 실행할 명령: %s" % gcmd)
+    if common.get("ops"):
+        out.append("Operations 기록: %s (계정 %s). 구성 스냅샷 때 VM 설정은 VM 객체에, 케이스의 호스트 옵션은 호스트 객체에 기록"
+                   % (common["ops"]["host"], common["ops"]["user"]))
     chains = []
     for pc in plan:
         if pc["chain"] not in chains:
@@ -2998,7 +3123,7 @@ def generate_seq(cases, run_cmds, mon_cmds, profiles, settings, now=None, write=
     res["plan_view"] = plan_view(plan, common, run_id)
     sets = dict(common["sets"])
     tl = (sets.get("PREP_LEAD_MIN", 30), sets.get("SNAP_LEAD_MIN", 10), sets["MON_LEAD_MIN"],
-          any(pc["has_mon"] for pc in plan), bool(common.get("gcmd")), plan_has_stop(plan))
+          any(pc["has_mon"] for pc in plan), bool(common.get("gcmd")), plan_has_stop(plan), bool(common.get("ops")))
     res["timeline"] = timeline_lines(*tl)
     res["timeline_table"] = timeline_table(*tl)
     # 설정이나 VM 전원을 호스트와 비교하는 케이스(seg 1)와 변경 시각. ESX 호스트의 첫 케이스는 실행을 시작할 때 비교하고,

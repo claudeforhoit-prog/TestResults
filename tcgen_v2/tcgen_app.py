@@ -431,13 +431,18 @@ class App(object):
         self.v_prep = tk.StringVar(value=str(self.settings["seq_prep_lead_min"]))          # 설정 적용: 잡 시작 N분 전
         self.v_snaplead = tk.StringVar(value=str(self.settings["seq_snap_lead_min"]))      # 구성 스냅샷: 잡 시작 N분 전
         self.v_gcmd = tk.StringVar(value=self.settings.get("seq_guest_cmd", ""))           # 스냅샷 때 VM 에서 실행할 명령
+        # VCF Operations: 주소와 계정은 그대로 저장하고, 암호는 암호화한 글과 키만 저장한다(칸의 글은 저장하지 않는다)
+        self.v_ohost = tk.StringVar(value=self.settings.get("ops_host", ""))
+        self.v_ouser = tk.StringVar(value=self.settings.get("ops_user", ""))
+        self.v_opw = tk.StringVar()
+        self.v_opw_state = tk.StringVar()
         self.v_cfile = tk.StringVar()           # 지금 쓰는 테스트 케이스 파일 (보여 주기만 한다)
         self.v_status = tk.StringVar()
         self.v_esx_host = tk.StringVar()
         self.build()
         self.apply_mode()
         for v in (self.v_record, self.v_log, self.v_user, self.v_mon, self.v_stop, self.v_jlog, self.v_addr,
-                  self.v_spacing, self.v_prep, self.v_jdir, self.v_gcmd, self.v_snaplead):
+                  self.v_spacing, self.v_prep, self.v_jdir, self.v_gcmd, self.v_snaplead, self.v_ohost, self.v_ouser):
             v.trace_add("write", self._settings_changed) if hasattr(v, "trace_add") else v.trace("w", self._settings_changed)
         self.update_status()
         for m in self.start_msgs:
@@ -563,6 +568,10 @@ class App(object):
             self.v_prep.set(str(self.settings["seq_prep_lead_min"]))
             self.v_snaplead.set(str(self.settings["seq_snap_lead_min"]))
             self.v_gcmd.set(self.settings.get("seq_guest_cmd", ""))
+            self.v_ohost.set(self.settings.get("ops_host", ""))
+            self.v_ouser.set(self.settings.get("ops_user", ""))
+            self.v_opw.set("")
+            self.show_ops_state()
             self.refresh_case_file_box()
         finally:
             self.loading = False
@@ -797,6 +806,23 @@ class App(object):
         ttk.Label(self.row_seq, text="비우면 실행하지 않음. 게스트 구성을 VCF Operations 에 기록하는 스크립트를 VM 안의 경로로 적는다. "
                                      "예: bash <스크립트 폴더>/guest_config_push.sh --target auto",
                   style="Hint.TLabel").grid(row=2, column=3, columnspan=3, sticky="w", pady=(px(6), 0))
+        # VCF Operations (사용자 결정 2026-11-18 "생성기에서입력하고 싶어 ops 주소 계정 암호"): 구성 스냅샷 때 점프 VM 이
+        # VM 설정과 호스트 옵션을 Operations 에 기록한다. 암호는 guest_config_push 와 같은 방식으로 암호화해 저장한다
+        ops = ttk.Frame(self.row_seq)
+        ops.grid(row=3, column=0, columnspan=6, sticky="ew", pady=(px(6), 0))
+        ttk.Label(ops, text="Operations 주소").pack(side="left")
+        ttk.Entry(ops, textvariable=self.v_ohost, width=26).pack(side="left", padx=(px(6), px(14)))
+        ttk.Label(ops, text="Operations 계정").pack(side="left")
+        ttk.Entry(ops, textvariable=self.v_ouser, width=14).pack(side="left", padx=(px(6), px(14)))
+        ttk.Label(ops, text="Operations 암호").pack(side="left")
+        self.e_opw = ttk.Entry(ops, textvariable=self.v_opw, width=14, show="*")
+        self.e_opw.pack(side="left", padx=(px(6), px(6)))
+        self.e_opw.bind("<Return>", lambda e: self.commit_ops_password())
+        self.e_opw.bind("<FocusOut>", lambda e: self.commit_ops_password())
+        ttk.Label(ops, textvariable=self.v_opw_state, style="Bold.TLabel").pack(side="left", padx=(0, px(14)))
+        ttk.Label(ops, text="주소를 비우면 기록하지 않음. 구성 스냅샷 때 VM 설정과 호스트 옵션을 Operations 에 기록한다. 암호는 암호화해 저장",
+                  style="Hint.TLabel").pack(side="left")
+        self.show_ops_state()
         self.row_seq.columnconfigure(1, weight=2)
         self.row_seq.columnconfigure(4, weight=3)
         row3 = ttk.Frame(sf)
@@ -949,7 +975,9 @@ class App(object):
         "등록 결과: 점프 VM 로그 폴더의 tcrun-<실행 ID>-jobs.csv 에 케이스, ESX 호스트, VM, 잡 시작, crontab 등록 여부가 남는다. "
         "등록하지 못한 케이스는 not registered 와 이유가 적힌다(예: 설정 변경이 잡 시작 전에 끝나지 않음).",
         "구성 스냅샷: 모든 케이스에서 잡 시작 N분 전(설정 영역의 '구성 스냅샷 N분 전')에 VM 설정과 Guest OS 설정을 "
-        "csv 로 남긴다. '스냅샷 때 VM 에서 실행할 명령' 을 적었으면 이때 켜져 있는 VM 마다 실행한다.",
+        "csv 로 남긴다. '스냅샷 때 VM 에서 실행할 명령' 을 적었으면 이때 켜져 있는 VM 마다 실행한다. 설정 영역의 "
+        "'Operations 주소' 를 적었으면 이때 VM 설정과 케이스의 호스트 옵션을 VCF Operations 에 기록한다. P 블록이 Operations "
+        "로그인과 VM, 호스트 객체가 있는지 미리 확인한다.",
         "잡이 실행되는 동안에는 VM 에 접속하지 않는다. 잡이 끝났는지 확인하지 않는다.",
         "진행은 마지막 잡 시작 1분 뒤에 끝난다(done). 등록한 crontab 줄은 그대로 남고, 같은 ESX 호스트의 다음 실행이 첫 잡 시작 "
         "N분 전에 지운다. 바로 지우려면 sh {D}/tcrun cancel 을 실행한다.",
@@ -1294,7 +1322,7 @@ class App(object):
                     for m in list(c.get("esx_monitors") or []) + [x for v in (c.get("vms") or []) for x in (v.get("monitors") or [])]]
             tb = core.timeline_table(int(st.get("seq_prep_lead_min", 30)), int(st.get("seq_snap_lead_min", 10)),
                                      int(st.get("mon_lead_min", 5)), bool(used), bool((st.get("seq_guest_cmd") or "").strip()),
-                                     any(m in stops for m in used))
+                                     any(m in stops for m in used), bool((st.get("ops_host") or "").strip()))
             ch = {}
         for w in self.tl_grid.winfo_children():
             w.destroy()
@@ -1521,6 +1549,26 @@ class App(object):
             if t is not None:
                 t.finish_edit()
 
+    def show_ops_state(self):
+        """Operations 암호 칸 옆의 글: 암호화한 암호가 저장돼 있는지."""
+        has = bool(self.settings.get("ops_pass_enc") and self.settings.get("ops_enc_key"))
+        self.v_opw_state.set("저장됨" if has else "없음")
+
+    def commit_ops_password(self):
+        """Operations 암호 칸에 글을 적고 Enter 를 누르거나 다른 칸으로 가면: 암호화해 저장하고 칸을 비운다. 칸의 글은
+        저장하지 않는다. 빈 칸은 아무것도 하지 않는다(저장해 둔 암호를 그대로 둔다)."""
+        pw = self.v_opw.get()
+        if not pw or self.loading:
+            return
+        if any(ord(ch) < 32 for ch in pw):
+            messagebox.showerror(TITLE, "Operations 암호에 줄바꿈이나 탭을 쓸 수 없음", parent=self.root)
+            return
+        enc, key = core.ops_encrypt(pw)
+        self.v_opw.set("")
+        self.settings["ops_pass_enc"], self.settings["ops_enc_key"] = enc, key
+        self.autosave("settings")
+        self.show_ops_state()
+
     def jump_dir_text(self):
         """점프 VM 작업 폴더(화면의 칸, 비우면 ~/.tcgen)."""
         return core.jump_dir({"jump_dir": self.v_jdir.get()})
@@ -1547,7 +1595,10 @@ class App(object):
         s.update(record_csv=self.v_record.get().strip(), log_dir=self.v_log.get().strip(), vm_user=self.v_user.get().strip(),
                  mon_lead_min=ld[0], stop_lead_min=ld[1], run_mode=self.mode(), jump_log_dir=self.v_jlog.get().strip(),
                  esx_addr=self.v_addr.get().strip(), jump_dir=self.v_jdir.get().strip(),
-                 seq_guest_cmd=" ".join(self.v_gcmd.get().split()))
+                 seq_guest_cmd=" ".join(self.v_gcmd.get().split()),
+                 ops_host=self.v_ohost.get().strip(), ops_user=self.v_ouser.get().strip())
+        if not s["ops_host"] and not s["ops_user"] and (self.settings.get("ops_host") or self.settings.get("ops_user")):
+            s["ops_pass_enc"] = s["ops_enc_key"] = ""     # 적어 둔 주소와 계정을 모두 지우면 저장해 둔 암호도 지운다
         s.update(vals)
         return s
 
@@ -2978,6 +3029,7 @@ class App(object):
         """[명령어 생성]: 블록에 넣을 케이스를 고르는 창을 연다. 창의 [생성] 이 generate_picked 를 부른다.
         처음에는 적용 체크하지 않은 케이스가 골라져 있다."""
         self.finish_all_edits()
+        self.commit_ops_password()          # 암호 칸에 적고 바로 이 단추를 누른 경우(칸을 떠나지 않았을 때)에도 저장한다
         if not self.cases:
             messagebox.showinfo(TITLE, "탭 4 에 테스트 케이스를 먼저 추가할 것", parent=self.root)
             return
@@ -3260,6 +3312,7 @@ class App(object):
 
     # ------------------------------------------------------------ 끝내기
     def on_close(self):
+        self.commit_ops_password()          # 암호 칸에 적어 둔 글이 있으면 암호화해 저장하고 끝낸다
         if not self.save_everything():
             failed = [name for name, key in self.SAVE_NAMES if self.dirty[key]]
             if not messagebox.askokcancel(TITLE, "저장하지 못한 항목이 있음: %s\n끝내면 이 변경은 사라진다. 끝낼까요?"

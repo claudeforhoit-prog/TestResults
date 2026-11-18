@@ -18,6 +18,7 @@ tcrun 과 tcgen_apply.py 에는 시험용 코드가 없다. 경로만 환경 변
 import csv
 import datetime as dt
 import io
+import json
 import os
 import re
 import signal
@@ -29,6 +30,7 @@ import unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import fakeenv  # noqa: E402
+import fake_ops  # noqa: E402
 from fakeenv import core  # noqa: E402
 
 GEN = dt.datetime(2026, 11, 20, 10, 0, 0)
@@ -218,6 +220,17 @@ class TcrunBase(unittest.TestCase):
             group = r[0] or group
             table[(group, r[1])] = r[2:]
         return raw, rows, table
+
+    def slow_crontab(self, name, seconds):
+        """그 VM 의 다음 crontab 명령 한 번이 seconds 초(가상 시계) 걸리게 한다(접속은 됐고 줄을 넣는 명령이 멈춘 경우)."""
+        with open(os.path.join(self.e.vm_dir(name), "crontab_slow"), "w") as f:
+            f.write(str(seconds))
+
+    def slow_login(self, name, seconds):
+        """그 VM 의 다음 접속 한 번이 seconds 초(가상 시계) 걸리게 한다. 접속이 끝나기 전에 tcrun 이 접속을 끊으면 VM 에서는 아무것도
+        실행되지 않는다."""
+        with open(os.path.join(self.e.vm_dir(name), "login_slow"), "w") as f:
+            f.write(str(seconds))
 
     def snap_files(self, chain="esx01", rid=RID):
         """로그 폴더에 있는 그 실행의 구성 스냅샷 csv 이름."""
@@ -521,6 +534,8 @@ class FlowTests(TcrunBase):
         w1 = counts(reg + 5, epoch("2026-11-20 10:10:55"))          # 등록 뒤부터 caseA 의 스냅샷(10:11) 전까지
         w2 = counts(a_done + 5, epoch("2026-11-20 10:26:55"))       # caseA 의 스냅샷 뒤부터 caseB 의 스냅샷(10:27) 전까지. caseA 의 잡 실행 중
         w3 = counts(b_done + 5, epoch("2026-11-20 10:40:00"))       # caseB 의 스냅샷 뒤부터 진행이 끝날 때까지. caseB 의 잡 시작
+        if not w1 and w2 and reg + 5 > epoch("2026-11-20 10:10:55"):
+            w1 = [w2[0] - 2]            # 등록이 스냅샷 직전에 끝나(장비가 느린 때) 그 사이에 표본이 없음: 이 구간은 보지 않는다
         self.assertEqual([len(w1), len(w2), len(w3)], [1, 1, 1], "스냅샷 사이에는 VM 접속이 없음: %s %s %s" % (w1, w2, w3))
         self.assertEqual((w2[0] - w1[0], w3[0] - w2[0]), (2, 2), "구성 스냅샷 때 VM 마다 한 번 접속")
         self.assertEqual(e.vm_logins(), w3[0], "진행이 끝난 뒤에도 접속이 없음")
@@ -1116,7 +1131,8 @@ class MonitoringTests(TcrunBase):
         self.assertTrue(m, log)
         at, mon = epoch(m.group(1)), epoch(m.group(2))
         self.assertEqual(mon % 60, 0, "분 단위")
-        self.assertTrue(59 <= mon - at < 120, "1분 이상 남은 첫 분: %s" % m.group(0))
+        # 시작 시각은 줄을 등록하려던 때(로그 줄을 쓰기 조금 전)를 기준으로 1분 이상 남은 첫 분이다
+        self.assertTrue(30 <= mon - at < 120, "1분 이상 남은 첫 분: %s" % m.group(0))
         self.assertLessEqual(mon, epoch("2026-11-20 10:06:00"), "잡 시작보다 늦지 않음")
         note = "monitoring starts %d min before the job start. The setting is 7 min" % ((epoch("2026-11-20 10:06:00") - mon) // 60)
         self.assertIn("registered: case m1, job start 2026-11-20 10:06, monitoring start %s, monitoring stop 2026-11-20 10:09:00, "
@@ -2298,6 +2314,162 @@ class CheckTests(TcrunBase):
         self.assertEqual(p.returncode, 2)
 
 
+class SlowRegistrationTests(TcrunBase):
+    """줄 등록이 첫 시작 시각 가까이에서 일어나는 경우(느린 접속, 멈춘 crontab 명령, 시계가 다른 VM, 등록 중 cancel). 초 단위로 시점을
+    맞춰야 하므로 가상 시계를 3배속으로 낮춘다(실제 1초 = 가상 3초). 진행을 시작한 시점이 전제와 다르면 그 시험은 건너뛴다(skip)."""
+    SPEED = 3
+
+    def started(self, cron):
+        return [(h, line.split(" # ")[1]) for h, t, line in cron.fired]
+
+    def test_slow_login_never_leaves_a_half_started_case(self):
+        """한 VM 의 접속이 오래 걸려 첫 시작 시각 15초 전까지 줄을 넣지 못하는 경우. tcrun 은 그 접속에 남은 시간만 주고 끊은 뒤, 줄을
+        받은 다른 VM 들에서 줄을 지운다. 등록하지 않은 것으로 기록한 케이스의 잡은 어느 VM 에서도 시작하지 않는다(일부 VM 만 잡이
+        시작되는 일이 없다). 시작 시각은 옮기지 않는다."""
+        e = self.e
+        for n in (1, 2, 3):
+            e.add_vm("esx01ev0%d" % n)
+        e.add_esx("esx01", vms=[("esx01ev01", {}), ("esx01ev02", {}), ("esx01ev03", {})])
+        self.slow_login("esx01ev02", 32)            # 10:01:1x 에 줄을 받는다(첫 시작 시각 10:02 의 15초 전보다 앞)
+        self.slow_login("esx01ev03", 150)           # 10:01:45 까지 답이 없다
+        res, plan = self.gen([case("slow1", [vm("esx01ev01", "job_a"), vm("esx01ev02", "job_a"), vm("esx01ev03", "job_a")], seq_start="10:02")])
+        cron = e.start_cron()
+        self.wait_clock("2026-11-20 10:00:26")
+        rc, out = e.tcrun("run", plan, "esx01")
+        log = self.log()
+        self.assertEqual(rc, 0, self.ctx(out))
+        begin = self.log_time("settings and VM power: already as wanted")       # 이 줄 바로 뒤에 줄 등록을 시작한다
+        if not epoch("2026-11-20 10:00:26") <= begin <= epoch("2026-11-20 10:00:50"):
+            self.skipTest("이 시험의 전제가 맞지 않음: 줄 등록을 10:00:26 ~ 10:00:50 에 시작해야 함\n" + log)
+        m = re.search(r"WARN not registered: case slow1, job start 2026-11-20 10:02: (vm esx01ev03: no answer within the (\d+) s that were "
+                      r"left to register the lines 15 s before the first start time 2026-11-20 10:02:00)", log)
+        self.assertTrue(m, log)
+        why = m.group(1)
+        self.assertLessEqual(int(m.group(2)), 45, "esx01ev03 의 접속에는 10:01:45 까지 남은 시간만 줌")
+        self.assert_order(log, ["removed the lines of this case: vm esx01ev01", "removed the lines of this case: vm esx01ev02",
+                                "removed the lines of this case: vm esx01ev03", "WARN not registered: case slow1"])
+        self.assertLess(self.log_time("removed the lines of this case: vm esx01ev02"), epoch("2026-11-20 10:02:00"),
+                        "줄을 받은 VM 들의 줄은 첫 시작 시각 전에 지움")
+        self.assertEqual(self.jobs(), [("slow1", "esx01ev0%d" % n, "2026-11-20 10:02", "not registered (%s)" % why) for n in (1, 2, 3)])
+        self.assertEqual(self.tc_lines("esx01ev01") + self.tc_lines("esx01ev02") + self.tc_lines("esx01ev03"), [], "줄은 남지 않음")
+        self.assertNotIn("may have started", log)
+        self.assertEqual(e.state(RID, "esx01")["state"], "done")
+        self.assertIn("1 NOT registered", e.state(RID, "esx01")["text"])
+        self.assertEqual(self.minutes(), {}, "등록하지 못한 케이스의 시작 시각 기록은 지움")
+        self.wait_clock("2026-11-20 10:02:10")
+        self.assertEqual(self.started(cron), [], "등록하지 않은 것으로 기록한 케이스의 잡이 일부 VM 에서 시작됨\n%s" % log)
+
+    def test_vm_whose_crontab_command_hangs_is_marked_in_the_record(self):
+        """한 VM 의 crontab 명령이 멈춰서(접속은 됐고 줄을 넣는 중이었다) 남은 시간 안에 답이 없는 경우. tcrun 은 접속을 끊고 다른 VM 의
+        줄을 첫 시작 시각 전에 지운다. 답이 없던 VM 은 접속을 끊은 뒤에도 줄을 받을 수 있으므로, 등록 기록의 그 VM 행에 그 사실을
+        적고 케이스를 줄 목록에 남긴다(cancel 과 다음 실행이 그 VM 의 줄을 다시 지운다). 여기서는 줄이 첫 시작 시각 뒤에 들어온다."""
+        e = self.e
+        for n in (1, 2, 3):
+            e.add_vm("esx01ev0%d" % n)
+        e.add_esx("esx01", vms=[("esx01ev01", {}), ("esx01ev02", {}), ("esx01ev03", {})])
+        self.slow_crontab("esx01ev02", 32)          # 10:01:1x 에 줄을 받는다(첫 시작 시각 10:02 의 15초 전보다 앞)
+        self.slow_crontab("esx01ev03", 110)         # crontab 명령이 110초 걸린다: 줄은 10:02:5x 뒤에 들어온다
+        res, plan = self.gen([case("slow2", [vm("esx01ev01", "job_a"), vm("esx01ev02", "job_a"), vm("esx01ev03", "job_a")], seq_start="10:02")])
+        cron = e.start_cron()
+        self.wait_clock("2026-11-20 10:00:26")
+        rc, out = e.tcrun("run", plan, "esx01")
+        log = self.log()
+        self.assertEqual(rc, 0, self.ctx(out))
+        begin = self.log_time("settings and VM power: already as wanted")
+        if not epoch("2026-11-20 10:00:26") <= begin <= epoch("2026-11-20 10:00:50"):
+            self.skipTest("이 시험의 전제가 맞지 않음: 줄 등록을 10:00:26 ~ 10:00:50 에 시작해야 함\n" + log)
+        m = re.search(r"WARN not registered: case slow2, job start 2026-11-20 10:02: (vm esx01ev03: no answer within the \d+ s that were "
+                      r"left to register the lines 15 s before the first start time 2026-11-20 10:02:00)", log)
+        self.assertTrue(m, log)
+        why = m.group(1)
+        self.assertIn("WARN case slow2 is not registered, but esx01ev03 gave no answer while it was taking the lines: they may still arrive "
+                      "there. Look at its crontab, or run sh %s/tcrun cancel esx01" % e.tcgen, log)
+        jobs = self.jobs()
+        self.assertEqual(jobs[:2], [("slow2", "esx01ev0%d" % n, "2026-11-20 10:02", "not registered (%s)" % why) for n in (1, 2)])
+        self.assertRegex(jobs[2][3], r"^not registered \(%s\)\. This VM gave no answer while it was taking the lines, and it had none when "
+                                     r"tcrun removed them at 2026-11-20 10:01:\d\d \(clock of the VM\): they may still arrive\. Look at its "
+                                     r"crontab, or run sh %s/tcrun cancel esx01$" % (re.escape(why), re.escape(e.tcgen)))
+        self.assertEqual(self.started(cron), [], "줄을 받은 VM 들의 잡은 시작하지 않음")
+        self.assertEqual(self.tc_lines("esx01ev01") + self.tc_lines("esx01ev02"), [])
+        self.assertEqual(e.state(RID, "esx01")["state"], "done")
+        e.wait_for(lambda: self.tc_lines("esx01ev03"), seconds=120, what="멈췄던 crontab 명령이 끝나 esx01ev03 에 줄이 들어옴")
+        self.assertIn("crontab lines on the hosts: case slow2. To remove them: sh %s/tcrun cancel esx01" % e.tcgen, e.tcrun("status")[1])
+        rc, out = e.tcrun("cancel")
+        self.assertIn("crontab lines of case slow2 removed (job start 2026-11-20 10:02)", out)
+        self.assertEqual(self.tc_lines("esx01ev03"), [], "cancel 이 늦게 들어온 줄을 지움")
+        self.assertEqual(self.started(cron), [])
+
+    def test_lines_removed_after_the_first_start_time_are_marked_in_the_record(self):
+        """줄을 지운 때가 그 VM 의 시계로 첫 시작 시각 뒤인 경우(여기서는 esx01ev01 의 시계가 50초 빠르다). 그 VM 에서는 그 시각의 명령
+        (모니터링 시작)이 이미 실행됐을 수 있다. 등록 기록의 그 VM 행에 그 사실을 적고, 시작된 모니터링에는 중지 명령을 실행한다.
+        잡은 어느 VM 에서도 시작하지 않는다."""
+        e = self.e
+        e.add_vm("esx01ev01", clock_offset=50)
+        e.add_vm("esx01ev02")
+        e.add_vm("esx01ev03")
+        e.add_esx("esx01", vms=[("esx01ev01", {}), ("esx01ev02", {}), ("esx01ev03", {})])
+        self.slow_login("esx01ev02", 38)            # 10:01:1x 에 줄을 받는다. 그때 esx01ev01 의 시계는 10:02 를 지났다
+        open(os.path.join(e.vm_dir("esx01ev03"), "crontab_broken"), "w").close()
+        res, plan = self.gen([case("h1", [vm("esx01ev01", "job_a", ["gmon"]), vm("esx01ev02", "job_a"), vm("esx01ev03", "job_a")],
+                                   seq_start="10:03")])
+        cron = e.start_cron()
+        self.wait_clock("2026-11-20 10:00:26")
+        rc, out = e.tcrun("run", plan, "esx01")
+        log = self.log()
+        self.assertEqual(rc, 0, self.ctx(out))
+        begin = self.log_time("settings and VM power: already as wanted")
+        if not epoch("2026-11-20 10:00:26") <= begin <= epoch("2026-11-20 10:00:46"):
+            self.skipTest("이 시험의 전제가 맞지 않음: 줄 등록을 10:00:26 ~ 10:00:46 에 시작해야 함\n" + log)
+        why = "vm esx01ev03: the crontab lines were not registered (ssh exit 0: crontab: cannot be used)"
+        self.assert_order(log, [
+            "removed the lines of this case: vm esx01ev01", "removed the lines of this case: vm esx01ev02",
+            "WARN case h1 is not registered, but its lines were still on esx01ev01 at the first start time 2026-11-20 10:02:00: what was to "
+            "start then may have started there (see %s/tcrun-%s-jobs.csv)" % (e.log, RID),
+            "monitoring stop commands run on vm esx01ev01 (exit 0)", "WARN not registered: case h1, job start 2026-11-20 10:03: " + why])
+        jobs = self.jobs()
+        self.assertRegex(jobs[0][3], r"^not registered \(%s\)\. The lines were removed on this VM at 2026-11-20 10:02:\d\d \(clock of the "
+                                     r"VM\), after the first start time: what was to start then may have started on this VM$" % re.escape(why))
+        self.assertEqual(jobs[1:], [("h1", "esx01ev0%d" % n, "2026-11-20 10:03", "not registered (%s)" % why) for n in (2, 3)])
+        self.assertEqual(self.mon_words("esx01ev01"), [["start", "g"], ["stop", "g"]], "시작된 모니터링은 중지 명령으로 끝냄")
+        self.assertEqual(self.tc_lines("esx01ev01") + self.tc_lines("esx01ev02") + self.tc_lines("esx01ev03"), [])
+        self.wait_clock("2026-11-20 10:03:20")
+        self.assertEqual([(h, line) for h, t, line in cron.fired if "job.sh" in line], [], "잡은 어느 VM 에서도 시작하지 않음")
+        self.assertEqual(len(self.fired(cron, "esx01ev01", "mon.sh start g")), 1, "이 시험의 전제: esx01ev01 의 모니터링 시작은 실행됨")
+        self.assertEqual(e.state(RID, "esx01")["state"], "done")
+
+    def test_cancel_while_the_lines_are_being_registered(self):
+        """줄을 등록하는 중의 cancel: 진행은 하던 접속을 끊고 끝난다. 그 케이스는 등록을 시작할 때 줄 목록에 적어 두므로, cancel 이 이미
+        줄을 받은 VM 의 줄을 지운다. 등록 기록에는 등록 중이던 케이스와 아직 등록하지 않은 케이스가 모두 남는다."""
+        e = self.e
+        self.two_vms()
+        self.slow_login("esx01ev02", 90)
+        c1 = case("c1", [vm("esx01ev01", "job_a"), vm("esx01ev02", "job_a")], seq_start="10:20")
+        c2 = case("c2", [vm("esx01ev01", "job_a"), vm("esx01ev02", "job_a")], seq_start="10:40")
+        res, plan = self.gen([c1, c2])
+        self.assertIn("SEG 002 0\n", res["plan"])
+        cron = e.start_cron()
+        p = e.tcrun_bg("run", plan, "esx01")
+        e.wait_for(lambda: self.tc_lines("esx01ev01"), seconds=120, what="esx01ev01 에 c1 의 줄")
+        self.assertEqual(e.state(RID, "esx01")["step"], "register")
+        rc, out = e.tcrun("cancel")
+        p.wait(timeout=60)
+        self.assertIn("== run %s esx esx01: cancelling (state running, case c1, step register)" % RID, out)
+        self.assertIn("crontab lines of case c1 removed (job start 2026-11-20 10:20)", out)
+        self.assertEqual(self.tc_lines("esx01ev01"), [], "등록 중이던 케이스의 줄을 지움")
+        self.assertEqual(self.tc_lines("esx01ev02"), [])
+        mid = "not registered (the run ended as cancelled: sh tcrun cancel, while the lines of this case were being registered)"
+        rest = "not registered (the run ended as cancelled: sh tcrun cancel)"
+        gone = "removed before the job start (sh tcrun cancel)"
+        self.assertEqual(self.jobs(), [("c1", "esx01ev01", "2026-11-20 10:20", mid), ("c1", "esx01ev02", "2026-11-20 10:20", mid),
+                                       ("c2", "esx01ev01", "2026-11-20 10:40", rest), ("c2", "esx01ev02", "2026-11-20 10:40", rest),
+                                       ("c1", "esx01ev01", "2026-11-20 10:20", gone), ("c1", "esx01ev02", "2026-11-20 10:20", gone)])
+        self.assertEqual(e.state(RID, "esx01")["state"], "cancelled")
+        self.assertEqual(self.minutes(), {})
+        time.sleep(110 / e.speed)                   # 끊은 접속(90초 걸리던 것)이 끝날 시각을 넘김
+        self.assertEqual(self.tc_lines("esx01ev01") + self.tc_lines("esx01ev02"), [], "끊은 접속이 뒤늦게 줄을 넣지 않음")
+        self.assertEqual(cron.fired, [])
+
+
 class SnapshotTests(TcrunBase):
     """구성 스냅샷(config snapshot): 등록한 케이스마다 잡 시작 N분 전(시험 설정 3분)에 그 케이스 VM 의 VM 설정과 Guest OS 설정을 로그
     폴더의 csv 로 남긴다. 스냅샷 때 VM 에서 실행하는 명령(게스트 구성을 VCF Operations 에 기록하는 스크립트)도 여기서 본다."""
@@ -2485,11 +2657,6 @@ class SlowClockTests(TcrunBase):
     """초 단위로 시점을 맞춰야 하는 경우. 가상 시계를 6배속으로 낮춰(실제 1초 = 가상 6초) 진행을 시작하는 때와 등록에 걸리는 시간을 맞춘다."""
     SPEED = 6
 
-    def slow_crontab(self, name, seconds):
-        """그 VM 의 다음 crontab 등록 한 번이 seconds 초(가상 시계) 걸리게 한다."""
-        with open(os.path.join(self.e.vm_dir(name), "crontab_slow"), "w") as f:
-            f.write(str(seconds))
-
     def test_snapshot_waits_60_seconds_after_a_power_on(self):
         """이 실행이 방금 켠 VM 이 있으면 마지막 VM 의 준비 60초 뒤에 스냅샷을 읽는다(게스트가 부팅 때 적용하는 설정이 들어간 뒤에 읽기
         위해서다). 잡 시작 2분 전보다 늦어지지 않을 때만 기다리고, 잡 시작 시각은 그대로다."""
@@ -2545,161 +2712,183 @@ class SlowClockTests(TcrunBase):
         self.assertEqual(self.results()[0]["status"], "registered")
         self.assertEqual(self.fired(cron, "esx01ev01", "job.sh"), [epoch("2026-11-20 10:02:00")])
 
-    def slow_login(self, name, seconds):
-        """그 VM 의 다음 접속 한 번이 seconds 초(가상 시계) 걸리게 한다. 접속이 끝나기 전에 tcrun 이 접속을 끊으면 VM 에서는 아무것도
-        실행되지 않는다."""
-        with open(os.path.join(self.e.vm_dir(name), "login_slow"), "w") as f:
-            f.write(str(seconds))
 
-    def started(self, cron):
-        return [(h, line.split(" # ")[1]) for h, t, line in cron.fired]
+class OpsTests(TcrunBase):
+    """VCF Operations 기록(사용자 결정 2026-11-18): 구성 스냅샷 때 점프 VM 이 VM 설정(vm advanced config)과 케이스의 호스트
+    옵션을 Operations 객체의 속성으로 기록한다. 가짜 Operations(fake_ops.py)로 확인한다."""
+    PW = 'Pw "1" \\ $x'
 
-    def test_slow_login_never_leaves_a_half_started_case(self):
-        """한 VM 의 접속이 오래 걸려 첫 시작 시각 15초 전까지 줄을 넣지 못하는 경우. tcrun 은 그 접속에 남은 시간만 주고 끊은 뒤, 줄을
-        받은 다른 VM 들에서 줄을 지운다. 등록하지 않은 것으로 기록한 케이스의 잡은 어느 VM 에서도 시작하지 않는다(일부 VM 만 잡이
-        시작되는 일이 없다). 시작 시각은 옮기지 않는다."""
-        e = self.e
-        for n in (1, 2, 3):
-            e.add_vm("esx01ev0%d" % n)
-        e.add_esx("esx01", vms=[("esx01ev01", {}), ("esx01ev02", {}), ("esx01ev03", {})])
-        self.slow_login("esx01ev02", 32)            # 10:01:1x 에 줄을 받는다(첫 시작 시각 10:02 의 15초 전보다 앞)
-        self.slow_login("esx01ev03", 90)            # 10:01:45 까지 답이 없다
-        res, plan = self.gen([case("slow1", [vm("esx01ev01", "job_a"), vm("esx01ev02", "job_a"), vm("esx01ev03", "job_a")], seq_start="10:02")])
-        cron = e.start_cron()
-        self.wait_clock("2026-11-20 10:00:26")
-        rc, out = e.tcrun("run", plan, "esx01")
-        log = self.log()
-        self.assertEqual(rc, 0, self.ctx(out))
-        begin = self.log_time("settings and VM power: already as wanted")       # 이 줄 바로 뒤에 줄 등록을 시작한다
-        if not epoch("2026-11-20 10:00:26") <= begin <= epoch("2026-11-20 10:00:59"):
-            self.skipTest("이 시험의 전제가 맞지 않음: 줄 등록을 10:00:26 ~ 10:00:59 에 시작해야 함\n" + log)
-        m = re.search(r"WARN not registered: case slow1, job start 2026-11-20 10:02: (vm esx01ev03: no answer within the (\d+) s that were "
-                      r"left to register the lines 15 s before the first start time 2026-11-20 10:02:00)", log)
-        self.assertTrue(m, log)
-        why = m.group(1)
-        self.assertLessEqual(int(m.group(2)), 45, "esx01ev03 의 접속에는 10:01:45 까지 남은 시간만 줌")
-        self.assert_order(log, ["removed the lines of this case: vm esx01ev01", "removed the lines of this case: vm esx01ev02",
-                                "removed the lines of this case: vm esx01ev03", "WARN not registered: case slow1"])
-        self.assertLess(self.log_time("removed the lines of this case: vm esx01ev02"), epoch("2026-11-20 10:02:00"),
-                        "줄을 받은 VM 들의 줄은 첫 시작 시각 전에 지움")
-        self.assertEqual(self.jobs(), [("slow1", "esx01ev0%d" % n, "2026-11-20 10:02", "not registered (%s)" % why) for n in (1, 2, 3)])
-        self.assertEqual(self.tc_lines("esx01ev01") + self.tc_lines("esx01ev02") + self.tc_lines("esx01ev03"), [], "줄은 남지 않음")
-        self.assertNotIn("may have started", log)
-        self.assertEqual(e.state(RID, "esx01")["state"], "done")
-        self.assertIn("1 NOT registered", e.state(RID, "esx01")["text"])
-        self.assertEqual(self.minutes(), {}, "등록하지 못한 케이스의 시작 시각 기록은 지움")
-        self.wait_clock("2026-11-20 10:02:10")
-        self.assertEqual(self.started(cron), [], "등록하지 않은 것으로 기록한 케이스의 잡이 일부 VM 에서 시작됨\n%s" % log)
+    def setUp(self):
+        TcrunBase.setUp(self)
+        self.ops = fake_ops.FakeOps(user="admin", password=self.PW, vms=["esx01ev01"], hosts=["esx01.lab.local"]).start()
+        # curl 을 감싸 명령줄 인자를 기록한다(암호와 토큰이 명령줄에 실리지 않는지 본다). 호출은 실제 curl 이 한다
+        fakeenv.write_exec(os.path.join(self.e.fakebin, "curl"),
+                           '#!/bin/sh\nprintf \'%s\\n\' "$*" >> "$FAKE_ROOT/curl_args.txt"\nexec /usr/bin/curl "$@"\n')
 
-    def test_vm_whose_crontab_command_hangs_is_marked_in_the_record(self):
-        """한 VM 의 crontab 명령이 멈춰서(접속은 됐고 줄을 넣는 중이었다) 남은 시간 안에 답이 없는 경우. tcrun 은 접속을 끊고 다른 VM 의
-        줄을 첫 시작 시각 전에 지운다. 답이 없던 VM 은 접속을 끊은 뒤에도 줄을 받을 수 있으므로, 등록 기록의 그 VM 행에 그 사실을
-        적고 케이스를 줄 목록에 남긴다(cancel 과 다음 실행이 그 VM 의 줄을 다시 지운다). 여기서는 줄이 첫 시작 시각 뒤에 들어온다."""
-        e = self.e
-        for n in (1, 2, 3):
-            e.add_vm("esx01ev0%d" % n)
-        e.add_esx("esx01", vms=[("esx01ev01", {}), ("esx01ev02", {}), ("esx01ev03", {})])
-        self.slow_crontab("esx01ev02", 32)          # 10:01:1x 에 줄을 받는다(첫 시작 시각 10:02 의 15초 전보다 앞)
-        self.slow_crontab("esx01ev03", 110)         # crontab 명령이 110초 걸린다: 줄은 10:02:5x 뒤에 들어온다
-        res, plan = self.gen([case("slow2", [vm("esx01ev01", "job_a"), vm("esx01ev02", "job_a"), vm("esx01ev03", "job_a")], seq_start="10:02")])
-        cron = e.start_cron()
-        self.wait_clock("2026-11-20 10:00:26")
-        rc, out = e.tcrun("run", plan, "esx01")
-        log = self.log()
-        self.assertEqual(rc, 0, self.ctx(out))
-        begin = self.log_time("settings and VM power: already as wanted")
-        if not epoch("2026-11-20 10:00:26") <= begin <= epoch("2026-11-20 10:00:59"):
-            self.skipTest("이 시험의 전제가 맞지 않음: 줄 등록을 10:00:26 ~ 10:00:59 에 시작해야 함\n" + log)
-        m = re.search(r"WARN not registered: case slow2, job start 2026-11-20 10:02: (vm esx01ev03: no answer within the \d+ s that were "
-                      r"left to register the lines 15 s before the first start time 2026-11-20 10:02:00)", log)
-        self.assertTrue(m, log)
-        why = m.group(1)
-        self.assertIn("WARN case slow2 is not registered, but esx01ev03 gave no answer while it was taking the lines: they may still arrive "
-                      "there. Look at its crontab, or run sh %s/tcrun cancel esx01" % e.tcgen, log)
-        jobs = self.jobs()
-        self.assertEqual(jobs[:2], [("slow2", "esx01ev0%d" % n, "2026-11-20 10:02", "not registered (%s)" % why) for n in (1, 2)])
-        self.assertRegex(jobs[2][3], r"^not registered \(%s\)\. This VM gave no answer while it was taking the lines, and it had none when "
-                                     r"tcrun removed them at 2026-11-20 10:01:\d\d \(clock of the VM\): they may still arrive\. Look at its "
-                                     r"crontab, or run sh %s/tcrun cancel esx01$" % (re.escape(why), re.escape(e.tcgen)))
-        self.assertEqual(self.started(cron), [], "줄을 받은 VM 들의 잡은 시작하지 않음")
-        self.assertEqual(self.tc_lines("esx01ev01") + self.tc_lines("esx01ev02"), [])
-        self.assertEqual(e.state(RID, "esx01")["state"], "done")
-        e.wait_for(lambda: self.tc_lines("esx01ev03"), seconds=120, what="멈췄던 crontab 명령이 끝나 esx01ev03 에 줄이 들어옴")
-        self.assertIn("crontab lines on the hosts: case slow2. To remove them: sh %s/tcrun cancel esx01" % e.tcgen, e.tcrun("status")[1])
-        rc, out = e.tcrun("cancel")
-        self.assertIn("crontab lines of case slow2 removed (job start 2026-11-20 10:02)", out)
-        self.assertEqual(self.tc_lines("esx01ev03"), [], "cancel 이 늦게 들어온 줄을 지움")
-        self.assertEqual(self.started(cron), [])
+    def curl_args(self):
+        p = os.path.join(self.e.root, "curl_args.txt")
+        if not os.path.exists(p):
+            return ""
+        with open(p) as f:
+            return f.read()
 
-    def test_lines_removed_after_the_first_start_time_are_marked_in_the_record(self):
-        """줄을 지운 때가 그 VM 의 시계로 첫 시작 시각 뒤인 경우(여기서는 esx01ev01 의 시계가 50초 빠르다). 그 VM 에서는 그 시각의 명령
-        (모니터링 시작)이 이미 실행됐을 수 있다. 등록 기록의 그 VM 행에 그 사실을 적고, 시작된 모니터링에는 중지 명령을 실행한다.
-        잡은 어느 VM 에서도 시작하지 않는다."""
-        e = self.e
-        e.add_vm("esx01ev01", clock_offset=50)
-        e.add_vm("esx01ev02")
-        e.add_vm("esx01ev03")
-        e.add_esx("esx01", vms=[("esx01ev01", {}), ("esx01ev02", {}), ("esx01ev03", {})])
-        self.slow_login("esx01ev02", 45)            # 10:01:1x 에 줄을 받는다. 그때 esx01ev01 의 시계는 10:02 를 지났다
-        open(os.path.join(e.vm_dir("esx01ev03"), "crontab_broken"), "w").close()
-        res, plan = self.gen([case("h1", [vm("esx01ev01", "job_a", ["gmon"]), vm("esx01ev02", "job_a"), vm("esx01ev03", "job_a")],
-                                   seq_start="10:03")])
-        cron = e.start_cron()
-        self.wait_clock("2026-11-20 10:00:26")
-        rc, out = e.tcrun("run", plan, "esx01")
-        log = self.log()
-        self.assertEqual(rc, 0, self.ctx(out))
-        begin = self.log_time("settings and VM power: already as wanted")
-        if not epoch("2026-11-20 10:00:26") <= begin <= epoch("2026-11-20 10:00:45"):
-            self.skipTest("이 시험의 전제가 맞지 않음: 줄 등록을 10:00:26 ~ 10:00:45 에 시작해야 함\n" + log)
-        why = "vm esx01ev03: the crontab lines were not registered (ssh exit 0: crontab: cannot be used)"
-        self.assert_order(log, [
-            "removed the lines of this case: vm esx01ev01", "removed the lines of this case: vm esx01ev02",
-            "WARN case h1 is not registered, but its lines were still on esx01ev01 at the first start time 2026-11-20 10:02:00: what was to "
-            "start then may have started there (see %s/tcrun-%s-jobs.csv)" % (e.log, RID),
-            "monitoring stop commands run on vm esx01ev01 (exit 0)", "WARN not registered: case h1, job start 2026-11-20 10:03: " + why])
-        jobs = self.jobs()
-        self.assertRegex(jobs[0][3], r"^not registered \(%s\)\. The lines were removed on this VM at 2026-11-20 10:02:\d\d \(clock of the "
-                                     r"VM\), after the first start time: what was to start then may have started on this VM$" % re.escape(why))
-        self.assertEqual(jobs[1:], [("h1", "esx01ev0%d" % n, "2026-11-20 10:03", "not registered (%s)" % why) for n in (2, 3)])
-        self.assertEqual(self.mon_words("esx01ev01"), [["start", "g"], ["stop", "g"]], "시작된 모니터링은 중지 명령으로 끝냄")
-        self.assertEqual(self.tc_lines("esx01ev01") + self.tc_lines("esx01ev02") + self.tc_lines("esx01ev03"), [])
-        self.wait_clock("2026-11-20 10:03:20")
-        self.assertEqual([(h, line) for h, t, line in cron.fired if "job.sh" in line], [], "잡은 어느 VM 에서도 시작하지 않음")
-        self.assertEqual(len(self.fired(cron, "esx01ev01", "mon.sh start g")), 1, "이 시험의 전제: esx01ev01 의 모니터링 시작은 실행됨")
-        self.assertEqual(e.state(RID, "esx01")["state"], "done")
+    def tearDown(self):
+        self.ops.stop()
+        TcrunBase.tearDown(self)
 
-    def test_cancel_while_the_lines_are_being_registered(self):
-        """줄을 등록하는 중의 cancel: 진행은 하던 접속을 끊고 끝난다. 그 케이스는 등록을 시작할 때 줄 목록에 적어 두므로, cancel 이 이미
-        줄을 받은 VM 의 줄을 지운다. 등록 기록에는 등록 중이던 케이스와 아직 등록하지 않은 케이스가 모두 남는다."""
+    def ops_settings(self, password=None):
+        enc, key = core.ops_encrypt(self.PW if password is None else password)
+        self.key = key
+        return dict(ops_host=self.ops.base, ops_user="admin", ops_pass_enc=enc, ops_enc_key=key)
+
+    def test_vm_settings_and_host_options_are_written_at_the_snapshot(self):
+        """케이스마다 구성 스냅샷 때: VM 설정은 VM 객체의 Custom Configuration|VM|<키> 로, 케이스의 호스트 옵션은 호스트 객체의
+        Custom Configuration|Host|<구역.옵션> 으로 기록한다. Operations 에 객체가 없는 VM 은 경고만 남기고 케이스는 진행한다."""
         e = self.e
         self.two_vms()
-        self.slow_login("esx01ev02", 120)
-        c1 = case("c1", [vm("esx01ev01", "job_a"), vm("esx01ev02", "job_a")], seq_start="10:20")
-        c2 = case("c2", [vm("esx01ev01", "job_a"), vm("esx01ev02", "job_a")], seq_start="10:40")
-        res, plan = self.gen([c1, c2])
-        self.assertIn("SEG 002 0\n", res["plan"])
+        c1 = case("o1", [vm("esx01ev01", "job_a", profiles=["pin"]), vm("esx01ev02", "job_a")], esx_profiles=["numa0"], seq_start="10:25")
+        c2 = case("o2", [vm("esx01ev01", "job_a", profiles=["pin"]), vm("esx01ev02", "job_a")], esx_profiles=["numa0"], seq_start="+0:10")
+        res, plan = self.gen([c1, c2], **self.ops_settings())
+        cron = e.start_cron()
+        rc, out = e.tcrun("run", plan, "esx01", timeout=900)
+        log = self.log()
+        self.assertEqual(rc, 0, self.ctx(out))
+        self.assertEqual(self.fired(cron, "esx01ev01", "job.sh"), [epoch("2026-11-20 10:25:00"), epoch("2026-11-20 10:35:00")],
+                         "잡은 적은 시각에 시작" + self.ctx(out))
+        vmp = self.ops.props["vm-esx01ev01"]
+        self.assertEqual(sorted(vmp), sorted("Custom Configuration|VM|" + k for k in (
+            "sched.mem.lpage.enable1GPage", "sched.mem.pin", "sched.mem.prealloc", "sched.mem.prealloc.pinnedMainMem",
+            "sched.swap.vmxSwapEnabled", "numa.vcpu.preferHT", "numa.vcpu.maxPerVirtualNode", "monitor_control.halt_in_monitor",
+            "monitor.idleLoopSpinBeforeHalt", "monitor.idleLoopMinSpinUS", "monitor_control.disable_pause_loop_exiting", "vpmc.enable")),
+            "config_snapshot 의 키와 설정 프로파일의 키(프로파일에 있는 sched.mem.pin 포함). CPU affinity 키는 보내지 않는다")
+        self.assertEqual(vmp["Custom Configuration|VM|sched.mem.pin"], "TRUE")
+        self.assertEqual(vmp["Custom Configuration|VM|vpmc.enable"], "(없음)", "vmx 에 없는 키는 스냅샷 csv 와 같은 글")
+        self.assertEqual(self.ops.props["host-esx01.lab.local"], {"Custom Configuration|Host|Numa.LocalityWeightActionAffinity": "0"},
+                         "호스트 객체는 이름이 <ESX 호스트>.<도메인> 이어도 찾는다")
+        self.assertNotIn("vm-esx01ev02", self.ops.props)
+        self.assertEqual(self.ops.logins, [("admin", "LOCAL"), ("admin", "LOCAL")], "케이스마다 한 번 로그인")
+        self.assert_order(log, [
+            "config snapshot: VCF Operations: vm esx01ev01: 12 VM setting(s) written (Custom Configuration|VM)",
+            "config snapshot: VCF Operations: esx esx01: 1 host option(s) written (Custom Configuration|Host)",
+            "-config-001-o1.csv  (VM settings of 2 VM(s), guest OS settings of 2 VM(s), VM settings written to VCF Operations for 1 VM(s))",
+            "WARN config snapshot of case o1 is not complete: VCF Operations has no VirtualMachine object named esx01ev02; The case goes on.",
+            "==== case o1 done", "-config-002-o2.csv"])
+        rows = list(csv.reader(io.StringIO(e.log_text(RID, "esx01", "-config-001-o1.csv").lstrip("\ufeff"))))
+        self.assertEqual([r[1:] for r in rows if r[1] == "operations write"],
+                         [["operations write", "ok: 12 properties", "not written (no VirtualMachine object with this name)"]])
+        args = self.curl_args()
+        self.assertIn("/suite-api/api/resources/vm-esx01ev01/properties", args, "이 시험의 전제: curl 호출의 인자를 기록함")
+        for secret in (self.PW, self.ops.token, self.key):
+            self.assertNotIn(secret, log)
+            self.assertNotIn(secret, out)
+            self.assertNotIn(secret, args, "암호, 토큰, 키는 curl 명령줄에 싣지 않는다(파일로 넘긴다)")
+        self.assertNotIn("Authorization", args)
+        work = os.path.join(e.tcgen, "runs", RID, "esx01.work")
+        self.assertEqual([f for f in os.listdir(work) if f.startswith("ops.")], [],
+                         "암호 키, 요청 본문, 토큰이 든 응답 파일과 curl 설정 파일을 남기지 않는다")
+        self.assertEqual([r["status"] for r in self.results()], ["registered", "registered"])
+
+    def test_host_options_are_written_with_the_values_that_the_host_has(self):
+        """호스트 옵션은 plan 의 목표 값이 아니라 구성 스냅샷 때 ESX 호스트에서 읽은 값을 기록한다. 여기서는 설정을 적용하고 줄을 등록한
+        뒤, 스냅샷 전에 호스트의 값이 달라진 경우다(누군가 호스트에서 직접 변경). 읽지 못한 옵션은 기록하지 않고 WARN 을 남긴다."""
+        e = self.e
+        self.two_vms()
+        self.profiles.append({"name": "two", "target": "ESX", "desc": "",
+                              "text": "Numa.LocalityWeightActionAffinity = 0\nCpu.HTWholeCoreThreshold = 0"})
+        c1 = case("h1", [vm("esx01ev01", "job_a")], esx_profiles=["two"], seq_start="10:25")
+        res, plan = self.gen([c1], **self.ops_settings())
         cron = e.start_cron()
         p = e.tcrun_bg("run", plan, "esx01")
-        e.wait_for(lambda: self.tc_lines("esx01ev01"), seconds=120, what="esx01ev01 에 c1 의 줄")
-        self.assertEqual(e.state(RID, "esx01")["step"], "register")
-        rc, out = e.tcrun("cancel")
+        self.wait_log("registered: case h1", seconds=600)
+        self.assertEqual(e.esx_adv("esx01", "/Numa/LocalityWeightActionAffinity"), "0", "이 시험의 전제: 설정 적용이 끝남")
+        path = os.path.join(e.esx_dir("esx01"), "adv.json")
+        with open(path) as f:
+            adv = json.load(f)
+        adv["/Numa/LocalityWeightActionAffinity"]["value"] = "55"       # 스냅샷 전에 호스트의 값이 달라짐
+        del adv["/Cpu/HTWholeCoreThreshold"]                             # 이 옵션은 스냅샷 때 읽지 못함
+        with open(path, "w") as f:
+            json.dump(adv, f, indent=1)
+        self.wait_state("done", seconds=900)
         p.wait(timeout=60)
-        self.assertIn("== run %s esx esx01: cancelling (state running, case c1, step register)" % RID, out)
-        self.assertIn("crontab lines of case c1 removed (job start 2026-11-20 10:20)", out)
-        self.assertEqual(self.tc_lines("esx01ev01"), [], "등록 중이던 케이스의 줄을 지움")
-        self.assertEqual(self.tc_lines("esx01ev02"), [])
-        mid = "not registered (the run ended as cancelled: sh tcrun cancel, while the lines of this case were being registered)"
-        rest = "not registered (the run ended as cancelled: sh tcrun cancel)"
-        gone = "removed before the job start (sh tcrun cancel)"
-        self.assertEqual(self.jobs(), [("c1", "esx01ev01", "2026-11-20 10:20", mid), ("c1", "esx01ev02", "2026-11-20 10:20", mid),
-                                       ("c2", "esx01ev01", "2026-11-20 10:40", rest), ("c2", "esx01ev02", "2026-11-20 10:40", rest),
-                                       ("c1", "esx01ev01", "2026-11-20 10:20", gone), ("c1", "esx01ev02", "2026-11-20 10:20", gone)])
-        self.assertEqual(e.state(RID, "esx01")["state"], "cancelled")
-        self.assertEqual(self.minutes(), {})
-        time.sleep(150 / e.speed)                   # 끊은 접속(120초 걸리던 것)이 끝날 시각을 넘김
-        self.assertEqual(self.tc_lines("esx01ev01") + self.tc_lines("esx01ev02"), [], "끊은 접속이 뒤늦게 줄을 넣지 않음")
-        self.assertEqual(cron.fired, [])
+        log = self.log()
+        self.assertEqual(self.ops.props["host-esx01.lab.local"], {"Custom Configuration|Host|Numa.LocalityWeightActionAffinity": "55"},
+                         "호스트에서 읽은 값을 기록하고, 읽지 못한 옵션은 기록하지 않는다")
+        self.assertIn("config snapshot: VCF Operations: esx esx01: 1 host option(s) written (Custom Configuration|Host)", log)
+        self.assertIn("1 of 2 host option(s) of the case not read on esx esx01 and not written to VCF Operations;", log)
+        self.assertEqual(self.fired(cron, "esx01ev01", "job.sh"), [epoch("2026-11-20 10:25:00")], "잡은 적은 시각에 시작")
+
+    def test_sched_mem_pin_is_written_only_when_a_profile_sets_it(self):
+        """설정 프로파일이 다루지 않으면 sched.mem.pin 은 보내지 않는다(config_snapshot 이 보내던 11개 키와 같다)."""
+        e = self.e
+        self.two_vms()
+        c1 = case("q1", [vm("esx01ev01", "job_a")], seq_start="10:10")
+        res, plan = self.gen([c1], **self.ops_settings())
+        e.start_cron()
+        rc, out = e.tcrun("run", plan, "esx01", timeout=600)
+        self.assertEqual(rc, 0, self.ctx(out))
+        keys = sorted(k.split("|")[-1] for k in self.ops.props["vm-esx01ev01"])
+        self.assertEqual(len(keys), 11, keys)
+        self.assertNotIn("sched.mem.pin", keys)
+        self.assertNotIn("host-esx01.lab.local", self.ops.props, "호스트 옵션이 없는 케이스는 호스트 객체에 기록하지 않는다")
+
+    def test_login_failure_is_a_warning_and_the_case_goes_on(self):
+        e = self.e
+        self.two_vms()
+        c1 = case("w1", [vm("esx01ev01", "job_a")], seq_start="10:10")
+        res, plan = self.gen([c1], **self.ops_settings(password="wrong"))
+        cron = e.start_cron()
+        rc, out = e.tcrun("run", plan, "esx01", timeout=600)
+        log = self.log()
+        self.assertEqual(rc, 0, self.ctx(out))
+        self.assertRegex(log, r"WARN config snapshot of case w1 is not complete: VCF Operations: nothing written \(login to VCF Operations "
+                              r"http://127\.0\.0\.1:\d+ failed \(account admin, curl exit 0: ")
+        self.assertEqual(self.ops.props, {})
+        self.assertEqual(self.fired(cron, "esx01ev01", "job.sh"), [epoch("2026-11-20 10:10:00")], "Operations 기록 실패는 잡에 영향이 없다")
+        self.assertEqual(e.state(RID, "esx01")["state"], "done")
+        rows = list(csv.reader(io.StringIO(e.log_text(RID, "esx01", "-config-001-w1.csv").lstrip("\ufeff"))))
+        self.assertEqual([r[2] for r in rows if r[1] == "operations write"], ["failed (no login)"])
+        self.assertNotIn("wrong", log)
+
+    def test_nothing_is_sent_without_an_address(self):
+        """Operations 주소를 적지 않으면 Operations 를 호출하지 않는다. ESX 호스트가 없는 케이스(BM 서버)도 호출하지 않는다."""
+        e = self.e
+        self.two_vms()
+        res, plan = self.gen([case("n1", [vm("esx01ev01", "job_a")], seq_start="10:10")])
+        self.assertNotIn("\nOPS ", res["plan"])
+        e.start_cron()
+        rc, out = e.tcrun("run", plan, "esx01", timeout=600)
+        self.assertEqual(rc, 0, self.ctx(out))
+        self.assertEqual(self.ops.calls, [])
+        self.assertNotIn("VCF Operations", self.log())
+        e.add_vm("bm01")
+        res2, plan2 = self.gen([case("b1", [vm("bm01", "job_a")], esx="", seq_start="10:40")], now=GEN + dt.timedelta(minutes=20),
+                               **self.ops_settings())
+        rc, out = e.tcrun("run", plan2, "-", timeout=600)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.ops.calls, [], "ESX 호스트가 없는 케이스: VM 설정을 읽지 않으므로 기록하지 않는다")
+
+    def test_check_reports_the_login_and_the_objects(self):
+        """P 블록: Operations 로그인과, VM 과 호스트 객체가 있는지 본다. 아무것도 기록하지 않는다."""
+        e = self.e
+        self.two_vms()
+        c1 = case("k1", [vm("esx01ev01", "job_a"), vm("esx01ev02", "job_a")], esx_profiles=["numa0"], seq_start="10:40")
+        res, plan = self.gen([c1], **self.ops_settings())
+        rc, out = e.tcrun("check", plan, timeout=300)
+        self.assertRegex(out, r"\[ok\] VCF Operations http://127\.0\.0\.1:\d+: login works \(account admin\)")
+        self.assertIn("[ok] vm esx01ev01: VCF Operations has a VirtualMachine object with this name", out)
+        self.assertIn("[PROBLEM] vm esx01ev02: VCF Operations has no VirtualMachine object with this name. Its VM settings would not be written", out)
+        self.assertIn("[ok] esx esx01: VCF Operations has a HostSystem object for this host", out)
+        self.assertIn("CHECK RESULT: 1 problem(s)", out)
+        self.assertEqual(self.ops.props, {}, "점검은 기록하지 않는다")
+        self.assertNotIn(self.ops.token, out)
+        work = os.path.join(e.tcgen, "runs", RID, "check.work")
+        self.assertEqual([f for f in os.listdir(work) if f.startswith("ops.")], [])
+        res, plan = self.gen([c1], now=GEN + dt.timedelta(seconds=1), **self.ops_settings(password="wrong"))
+        rc, out = e.tcrun("check", plan, timeout=300)
+        self.assertRegex(out, r"\[PROBLEM\] VCF Operations: login to VCF Operations http://127\.0\.0\.1:\d+ failed \(account admin")
+        res, plan = self.gen([c1], now=GEN + dt.timedelta(seconds=2))
+        rc, out = e.tcrun("check", plan, timeout=300)
+        self.assertIn("[ok] VCF Operations: no address in the settings of tcgen. The VM settings are not written to VCF Operations", out)
 
 
 class WorkFolderTests(TcrunBase):

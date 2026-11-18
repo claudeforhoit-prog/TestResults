@@ -468,7 +468,7 @@ class PlanTests(unittest.TestCase):
         t2 = int(time.mktime(dt.datetime(2026, 11, 16, 18, 0).timetuple()))
         tx = int(time.mktime(dt.datetime(2026, 11, 17, 4, 0).timetuple()))      # 잡 시작 16:00 + 최대 대기 12:00
         want = """TCGEN-PLAN 2
-VER 2.12
+VER 2.13
 RUNID 20261116-143000
 LOGDIR /data/log
 GEN 2026-11-16 14:30:00
@@ -705,7 +705,7 @@ class SettingsAndDataTests(unittest.TestCase):
         return snap
 
     def test_names_differ_from_v1(self):
-        self.assertEqual(core.VERSION, "2.12")
+        self.assertEqual(core.VERSION, "2.13")
         for k in self.keys:
             os.environ.pop(k, None)
         self.assertEqual(os.path.basename(core.default_data_dir()), "tcgen2_data")
@@ -1132,6 +1132,101 @@ class SeqStartTests(unittest.TestCase):
         self.assertEqual(core.new_case("esx01", "", 1)["seq_start"], "")
         self.assertEqual(core._clean_case({"name": "x", "vms": []})["seq_start"], "", "예전 파일에는 이 칸이 없음")
         self.assertEqual(core._clean_case({"name": "x", "vms": [], "seq_start": None})["seq_start"], "")
+
+
+
+class OpsSettingsTests(unittest.TestCase):
+    """VCF Operations 주소, 계정, 암호(사용자 결정 2026-11-18 "생성기에서입력하고 싶어 ops 주소 계정 암호", 암호는
+    guest_config_push 와 같은 방식으로 암호화). plan 의 OPS 줄과 타임라인."""
+
+    @unittest.skipUnless(shutil.which("openssl"), "openssl 필요")
+    def test_encrypted_password_is_decrypted_by_openssl(self):
+        """암호화한 글은 guest_config_push 와 tcrun 이 쓰는 openssl 명령으로 풀린다."""
+        for pw in ("a", "Pw-12345_!@#$%^&*()", "x" * 16, "p" * 77, "따옴표 \" 역슬래시 \\ 작은따옴표 ' 달러 $"):
+            enc, key = core.ops_encrypt(pw)
+            self.assertRegex(enc, r"^[A-Za-z0-9+/=]+$")
+            self.assertRegex(key, r"^[0-9a-f]{32}$")
+            p = subprocess.run(["openssl", "enc", "-d", "-aes-256-cbc", "-pbkdf2", "-iter", "100000", "-pass", "pass:" + key,
+                                "-base64", "-A"], input=enc.encode("ascii"), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            self.assertEqual((p.returncode, p.stdout.decode("utf-8")), (0, pw), p.stderr)
+        a, b = core.ops_encrypt("same"), core.ops_encrypt("same")
+        self.assertNotEqual(a, b, "암호화할 때마다 키와 salt 가 새로 정해진다")
+
+    def test_aes_block_matches_fips197(self):
+        """AES-256 한 블록: FIPS 197 부록 C.3 의 값."""
+        key = bytes(bytearray(range(32)))
+        block = list(bytearray.fromhex("00112233445566778899aabbccddeeff"))
+        out = bytes(bytearray(core._aes_encrypt_block(block, core._aes_round_keys(key))))
+        self.assertEqual(out.hex(), "8ea2b7ca516745bfeafc49904b496089")
+
+    def test_plan_lines_and_timeline(self):
+        enc, key = core.ops_encrypt("pw")
+        st = settings(ops_host=" ops.lab.local ", ops_user="admin", ops_pass_enc=enc, ops_enc_key=key)
+        res = gen([case("c1", vms=[vm("esx01ev01", "job_a", [], ["pin"])])], st=st)
+        self.assertEqual(res["errors"], [])
+        lines = res["plan"].split("\n")
+        self.assertEqual([x for x in lines if x.startswith("OPS ")],
+                         ["OPS HOST ops.lab.local", "OPS USER admin", "OPS ENC " + enc, "OPS KEY " + key, "OPS TLS 0"])
+        self.assertLess(lines.index("OPS HOST ops.lab.local"), lines.index("CASE 001 esx01 c1"))
+        self.assertIn("  T-10분 : 구성 스냅샷, VM 설정을 Operations 에 기록\n", res["plan_view"])
+        self.assertIn("Operations 기록: ops.lab.local (계정 admin). 구성 스냅샷 때 VM 설정은 VM 객체에, 케이스의 호스트 옵션은 호스트 객체에 기록",
+                      res["plan_view"])
+        self.assertEqual(res["timeline_table"]["rows"][0][1][2], "구성 스냅샷, VM 설정을 Operations 에 기록")
+        self.assertNotIn("pw\n", res["plan"])
+        self.assertIn("OPS TLS 1", gen([case("c1")], st=dict(st, ops_verify_tls=True))["plan"])
+        # 주소를 비우면 기록하지 않는다: OPS 줄이 없고 다른 값은 보지 않는다
+        off = gen([case("c1")], st=settings(ops_host="", ops_user="admin", ops_pass_enc="", ops_enc_key=""))
+        self.assertEqual(off["errors"], [])
+        self.assertNotIn("\nOPS ", off["plan"])
+        self.assertNotIn("Operations", off["plan_view"])
+
+    def test_errors_name_the_fields_of_the_screen(self):
+        enc, key = core.ops_encrypt("pw")
+        ok = dict(ops_host="ops.lab.local", ops_user="admin", ops_pass_enc=enc, ops_enc_key=key)
+        for over, want in ((dict(ops_host="bad host"), "설정: 'Operations 주소' 는 이름이나 IP 로 적을 것 (영문, 숫자, . - : 만 사용): 'bad host'"),
+                           (dict(ops_host="ops;rm"), "설정: 'Operations 주소' 는 이름이나 IP 로 적을 것 (영문, 숫자, . - : 만 사용): 'ops;rm'"),
+                           (dict(ops_user=""), "설정: 'Operations 계정' 을 적을 것 ('Operations 주소' 를 비우면 Operations 에 기록하지 않음)"),
+                           (dict(ops_user="a b"), "설정: 'Operations 계정' 에는 공백과 한글을 쓸 수 없음: 'a b'"),
+                           (dict(ops_pass_enc=""), "설정: 'Operations 암호' 를 입력할 것 ('Operations 주소' 를 비우면 Operations 에 기록하지 않음)"),
+                           (dict(ops_enc_key="k y"), "설정: 저장된 'Operations 암호' 를 읽을 수 없음. 암호를 다시 입력할 것")):
+            res = gen([case("c1")], st=settings(**dict(ok, **over)))
+            self.assertEqual(res["errors"], [want], over)
+            self.assertEqual(res["plan"], "")
+        for host in ("10.0.0.5", "ops.lab.local:8443", "https://ops.lab.local", "http://127.0.0.1:8080"):
+            self.assertEqual(gen([case("c1")], st=settings(**dict(ok, ops_host=host)))["errors"], [], host)
+
+    def test_settings_file_keeps_only_the_encrypted_password(self):
+        d = tempfile.mkdtemp(prefix="tcgen_ops_")
+        try:
+            s = core.load_settings(d)
+            self.assertEqual((s["ops_host"], s["ops_user"], s["ops_pass_enc"], s["ops_enc_key"], s["ops_verify_tls"]), ("", "", "", "", False))
+            enc, key = core.ops_encrypt("Secret-Pw-1")
+            s.update(ops_host="ops.lab.local", ops_user="admin", ops_pass_enc=enc, ops_enc_key=key)
+            core.save_settings(d, core.resolve_paths(d, s))
+            with open(os.path.join(d, core.SETTINGS_FILE), encoding="utf-8") as f:
+                text = f.read()
+            self.assertNotIn("Secret-Pw-1", text)
+            s2 = core.load_settings(d)
+            self.assertEqual((s2["ops_host"], s2["ops_user"], s2["ops_pass_enc"], s2["ops_enc_key"]), ("ops.lab.local", "admin", enc, key))
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_records_do_not_hold_the_operations_values(self):
+        """테스트 기록 CSV 와 로그 CSV 에는 Operations 주소, 계정, 암호가 들어가지 않는다."""
+        d = tempfile.mkdtemp(prefix="tcgen_ops_")
+        try:
+            enc, key = core.ops_encrypt("pw")
+            st = settings(record_csv=os.path.join(d, "rec.csv"), log_dir=d, ops_host="ops.lab.local", ops_user="opsadmin",
+                          ops_pass_enc=enc, ops_enc_key=key)
+            res = core.generate(with_starts([case("c1")]), RUN, MON, st, now=NOW, write=True, profiles=PROF, backup_dir=os.path.join(d, "bk"))
+            self.assertEqual(res["errors"], [])
+            for p in (st["record_csv"], res["log"]):
+                with open(p, encoding="utf-8-sig") as f:
+                    text = f.read()
+                for word in ("ops.lab.local", "opsadmin", enc, key):
+                    self.assertNotIn(word, text, p)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
 
 
 class CaseFileTests(unittest.TestCase):

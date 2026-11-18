@@ -1203,6 +1203,59 @@ def main():
     press(app.cmp_win, "기준 값으로 되돌리기")
     root.update()
     check(app.cases[2]["seq_start"] == want, "기록의 잡 시작으로 되돌림")
+    # ---- VCF Operations 주소, 계정, 암호 (사용자 결정 2026-11-18 "생성기에서입력하고 싶어 ops 주소 계정 암호", 암호는 암호화해 저장)
+    labels = [w.cget("text") for w in walk(root) if isinstance(w, ttk.Label)]
+    check(all(x in labels for x in ("Operations 주소", "Operations 계정", "Operations 암호")) and app.v_opw_state.get() == "없음"
+          and app.e_opw.cget("show") == "*", "설정 영역에 Operations 주소, 계정, 암호 칸. 암호 칸의 글자는 보이지 않음")
+    sfile = os.path.join(BASE, core.SETTINGS_FILE)
+    app.v_opw.set("Secret-Pw-1")
+    app.commit_ops_password()                                     # 암호를 주소와 계정보다 먼저 적어도 남는다
+    st = core.load_settings(BASE)
+    with open(sfile, encoding="utf-8") as f:
+        raw = f.read()
+    check(app.v_opw.get() == "" and app.v_opw_state.get() == "저장됨" and st["ops_pass_enc"] and st["ops_enc_key"]
+          and "Secret-Pw-1" not in raw, "암호를 적으면 암호화한 글과 키만 저장하고 칸을 비운다(암호 자체는 저장하지 않음)")
+    app.commit_ops_password()
+    check(core.load_settings(BASE)["ops_pass_enc"] == st["ops_pass_enc"], "빈 칸은 저장해 둔 암호를 그대로 둔다")
+    app.v_opw.set("Secret-Pw-2")
+    app.generate()                                                # 암호 칸을 떠나지 않고 [명령어 생성] 을 누른 경우
+    root.update()
+    st_b = core.load_settings(BASE)
+    check(app.v_opw.get() == "" and st_b["ops_pass_enc"] and st_b["ops_pass_enc"] != st["ops_pass_enc"],
+          "암호를 적고 칸을 떠나지 않은 채 [명령어 생성] 을 눌러도 암호화해 저장한다")
+    app.gen_pick_win.destroy()
+    root.update()
+    st = st_b
+    app.v_ohost.set("bad host")
+    app.v_ouser.set("admin")
+    n_log = len(LOG)
+    app.generate_picked([1])
+    root.update()
+    shown = app.res_text.get("1.0", "end-1c").split("\n")
+    check(app.result is None and shown[1] == "오류: 설정: 'Operations 주소' 는 이름이나 IP 로 적을 것 (영문, 숫자, . - : 만 사용): 'bad host'",
+          "Operations 주소가 맞지 않으면 한 줄로 알림 %s" % shown[:2])
+    app.v_ohost.set("ops.lab.local")
+    st2 = core.load_settings(BASE)
+    check((st2["ops_host"], st2["ops_user"], st2["ops_pass_enc"]) == ("ops.lab.local", "admin", st["ops_pass_enc"]), "주소와 계정은 그대로 저장")
+    app.commit_case("c1", "seq_start", "+8")
+    gen(app, root, [1])
+    res = app.result
+    tl = [[w.cget("text") for w in sorted(app.tl_grid.grid_slaves(row=r), key=lambda w: int(w.grid_info()["column"]))] for r in range(2)]
+    check(res is not None and "OPS HOST ops.lab.local\nOPS USER admin\nOPS ENC %s\nOPS KEY %s\nOPS TLS 0\n" % (st["ops_pass_enc"], st["ops_enc_key"])
+          in res["plan"] and any("VM 설정을 Operations 에 기록" in x for x in tl[1])
+          and "Operations 기록: ops.lab.local (계정 admin)." in res["plan_view"], "생성: plan 에 OPS 줄, 타임라인과 실행 계획에 Operations 기록")
+    check("Secret-Pw-1" not in res["plan"] and "Secret-Pw-1" not in res["run"] and st["ops_enc_key"] not in app.res_text.get("1.0", "end"),
+          "암호는 plan 과 블록에 들어가지 않는다(암호화한 글과 키만 plan 에 들어간다)")
+    with open(rec, encoding="utf-8-sig") as f:
+        check("ops.lab.local" not in f.read(), "테스트 기록 CSV 에는 Operations 값이 들어가지 않는다")
+    shot(root, app, 4, "tcgen_seq_tab5_ops.png")
+    app.v_ohost.set("")
+    app.v_ouser.set("")
+    st3 = core.load_settings(BASE)
+    check((st3["ops_host"], st3["ops_pass_enc"], st3["ops_enc_key"]) == ("", "", "") and app.settings["ops_pass_enc"] == "",
+          "주소와 계정을 모두 지우면 저장해 둔 암호도 지운다")
+    app.show_ops_state()
+    check(app.v_opw_state.get() == "없음", "암호 상태 글도 '없음' 으로")
     app.cases[:] = seq_saved                                      # 뒤의 점검을 위해 표와 설정을 되돌린다
     app.v_gcmd.set("")
     app.mark_cases()
