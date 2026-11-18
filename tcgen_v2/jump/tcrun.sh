@@ -1,5 +1,5 @@
 #!/bin/sh
-# tcrun 2.10 - tcgen sequence runner. Runs on the jump VM (POSIX sh). tcgen block A installs it in the jump VM work folder
+# tcrun 2.11 - tcgen sequence runner. Runs on the jump VM (POSIX sh). tcgen block A installs it in the jump VM work folder
 # (setting of tcgen, ~/.tcgen when empty). tcrun uses the folder it is in as its work folder (D below).
 #
 #   sh <work folder>/tcrun check <plan>       read-only checks: ESX key login, tools, VMs, settings and power, VM login, clocks
@@ -31,7 +31,7 @@
 # the plan (NOCHK line) is not checked: no login to its VMs while the job runs. It ends at a time (2 min before the next
 # case is prepared, or when its maximum wait ends) and its monitoring stop is registered together with its start lines.
 
-TCRUN_VERSION=2.10
+TCRUN_VERSION=2.11
 case "$0" in        # the work folder is the folder of this file
   */tcrun) D=$(cd "${0%/tcrun}" 2>/dev/null && pwd) ;;
   tcrun) D=$(pwd) ;;
@@ -111,6 +111,7 @@ load_plan() {
   SHUT_WAIT=$(sget SHUTDOWN_WAIT_MIN 10)
   SETTLE=$(sget SETTLE_MIN 30)
   SNAPGAP=$(sget SNAP_GAP_MIN 5)
+  SNAPLEAD=$(sget SNAP_LEAD_MIN 10)
   GAP=$(sget GAP_MIN 0)
   FIRST=$(sget FIRST_CHECK_SEC 60)
   SPACING=$(sget SPACING_MIN 5)
@@ -493,16 +494,41 @@ wait_until() {      # wait_until <epoch of this machine> [nostop]: 1 = the stop 
 # powered on; the items of guest_config_push). One csv per case in the log folder, laid out like the VM table of
 # config_snapshot: columns group, item, one column per VM. The labels of the csv come from the plan (CFGL lines;
 # tcrun itself is ASCII only).
-# When: in the preparation of the case, after the settings and the VM power and before the crontab lines are
-# registered. A case with a start time is prepared PREP_LEAD_MIN minutes before that time (60 by default), so the
-# snapshot is taken well before the job starts. A case without a job (settings only) has no snapshot.
+# When: SNAP_LEAD_MIN minutes before the job start (10 by default; user decision 2026-11-18), after the settings and
+# the VM power of the case and before its crontab lines are registered. The case is prepared first (a case with a
+# start time: PREP_LEAD_MIN minutes before that time), then tcrun waits for the snapshot time (snap_wait). The job
+# start that counts is the one expected at that moment: the start time of the plan, or later when the wait after a
+# change (SETTLE_MIN) needs it. A case without a start time: the earliest start that the waits after a change and
+# after the previous job allow; when nothing makes it wait, the snapshot is taken right away and the job starts
+# SNAP_GAP_MIN or more after it. SNAP_LEAD_MIN 0: taken as soon as the case is prepared (as in 2.10).
+# A case without a job (settings only) has no snapshot.
 # Read only. A snapshot that cannot be taken is a warning in the log: the case goes on.
 # The guest OS settings are those at the time of the snapshot. What a job command changes when it starts is not in it.
 # Command at the snapshot (GCMD line of the plan, optional): tcrun runs it on every VM of the case that is powered on,
 # after the guest OS settings were read (one more login). It is meant for the script that records the guest settings
 # in VCF Operations (guest_config_push). Its result is one row of the csv ("snapshot command") and one line of the log.
-# A command that fails is a warning: the case goes on.
+# A command that fails is a warning: the case goes on. A case with a start time: the command is not run on a VM
+# when there is no time left to register the lines of the case in time (SN_DL); that is a warning too.
 # SNAP_END = when the snapshot was complete. register starts the job SNAP_GAP_MIN or more after it.
+snap_wait() {       # wait for the time of the config snapshot. JOB_EST = the job start that is expected now (empty:
+                    # as soon as the lines are registered). 1 = the stop flag appeared
+  JOB_EST=
+  [ -n "$AT" ] && JOB_EST=$((AT / 60 * 60))
+  if [ -n "$T_CHG" ] && [ "$SETTLE" -gt 0 ]; then
+    SW_X=$((T_CHG + SETTLE * 60))
+    [ -z "$JOB_EST" ] || [ "$SW_X" -gt "$JOB_EST" ] && JOB_EST=$SW_X
+  fi
+  if [ -z "$AT" ] && [ -n "$PREV_END" ] && [ "$GAP" -gt 0 ]; then
+    SW_X=$((PREV_END + GAP * 60))
+    [ -z "$JOB_EST" ] || [ "$SW_X" -gt "$JOB_EST" ] && JOB_EST=$SW_X
+  fi
+  [ "$SNAPLEAD" -gt 0 ] && [ -n "$JOB_EST" ] || return 0
+  SW_W=$((JOB_EST - SNAPLEAD * 60))
+  [ "$(now)" -lt "$SW_W" ] || return 0
+  log "config snapshot: taken at $(tstr "$SW_W"), $SNAPLEAD min before the job start that is expected now ($(tstr "$JOB_EST"))"
+  STEP=wait-snapshot; setstate running "waiting until $(tstr "$SW_W") to take the config snapshot ($SNAPLEAD min before the job start)"
+  wait_until "$SW_W"
+}
 cfgl() {            # cfgl <code> <text when the plan has no such label>
   CL_T=$(grep "^CFGL $1 " "$PLAN" | head -n 1 | cut -d' ' -f3-)
   say "${CL_T:-$2}"
@@ -537,6 +563,14 @@ snapshot() {        # snapshot: write the config snapshot of the VMs of this cas
   SN_F=$LOGDIR/tcrun-$RUNID-$CHF-config-$SEQ-$CNAME.csv
   SN_T=$(stamp); SN_W=; SN_V=0; SN_G=0
   : > "$W/snap.rows"
+  # a case with a start time: the command at the snapshot is not started after SN_DL, so that the crontab lines are
+  # registered in time (the monitoring start or the job start, minus the time that the registration needs)
+  SN_DL=
+  if [ -n "$AT" ] && [ -n "$JOB_EST" ]; then
+    SN_M=$SNAPGAP
+    [ "$HASMON" = 1 ] && [ "$LEAD" -gt "$SN_M" ] && SN_M=$LEAD
+    SN_DL=$((JOB_EST - SN_M * 60 - 150))
+  fi
   if [ "$CH" != "-" ]; then          # VM settings: read on the ESX host
     {
       for SN_VM in $VMS; do say "vm $SN_VM"; done
@@ -575,6 +609,11 @@ snapshot() {        # snapshot: write the config snapshot of the VMs of this cas
       SN_W="$SN_W guest OS settings of $SN_VM not read (ssh exit $SN_X: $(first "$W/gcfg.out"));"
     fi
     [ -n "$SN_C" ] || continue
+    if [ -n "$SN_DL" ] && [ "$(now)" -gt "$SN_DL" ]; then
+      SN_W="$SN_W command on vm $SN_VM not run (no time left before the job start);"
+      printf '%s\tguest\tsnapshot command\tnot run (no time left before the job start)\n' "$SN_VM" >> "$W/snap.rows"
+      continue
+    fi
     # command at the snapshot (records the guest settings in VCF Operations): its last line goes into the log and the csv
     vmrun "$(target "$SN_VM")" "$W/gcmd.sh" "$W/gcmd.out" 150
     SN_X=$?
@@ -1338,7 +1377,7 @@ run_case() {
   STEP=begin
   R_DONE=; R_APPLY=none; R_BEGIN=$(stamp); R_VMSON=; R_MON=; R_JOB=; R_SEEN=; R_END=; R_STOP=; R_STATUS=
   ME="run $RUNID, esx $CHF, case $CNAME"          # owner of the job start time of this case (claim_start)
-  TMON=; TJOB=; T_ON=; T_CHG=; SNAP_END=; OFF=0; MINOFF=0; WHY=; PV_NEW=; PV_OFFED=
+  TMON=; TJOB=; T_ON=; T_CHG=; SNAP_END=; JOB_EST=; OFF=0; MINOFF=0; WHY=; PV_NEW=; PV_OFFED=
   rm -f "$W"/seen.* "$W"/zero.* "$W"/gone.*
   if ! names_ok; then
     VMS=; OFFVMS=; ONVMS=; REGVMS=; JOBVMS=
@@ -1416,6 +1455,10 @@ run_case() {
     [ "$R_APPLY" = changed ] && SN_WHY="$SN_WHY. Settings changed by this case"
     [ -n "$PV_NEW" ] && SN_WHY="$SN_WHY. Powered on by this case:$PV_NEW"
     [ -n "$PV_OFFED" ] && SN_WHY="$SN_WHY. Powered off by this case:$PV_OFFED"
+    if ! snap_wait; then
+      stopped "before the config snapshot of case $CNAME (its lines were not registered)"
+      return 1
+    fi
     snapshot
     if [ -f "$STOPF" ]; then
       stopped "before the lines of case $CNAME were registered"
@@ -1507,7 +1550,7 @@ cmd_run() {
     TAKE=$(open_runs done)
     [ -n "$TAKE" ] && log "run(s) $(say $TAKE) left a case open on this ESX host (not checked, no end time). It is closed right before the first case of this run is prepared"
   fi
-  log "settings: job starts $LEAD min after the monitoring start, first check $FIRST s after the job start and then every $POLL s, ended after $GONE checks without the process, start wait $START_WAIT min, power on wait $PON_WAIT min, boot wait $BOOT_WAIT min, shutdown wait $SHUT_WAIT min, job $SETTLE min or more after the last change of this run on the ESX host (settings applied, VM shut down, VM powered on and ready), job $SNAPGAP min or more after the config snapshot of the case was complete, $GAP min or more between the end of a job and the start of the next job (cases without a start time), job starts $SPACING min or more apart on this jump VM, preparation $PREP min before a start time of the plan"
+  log "settings: job starts $LEAD min after the monitoring start, first check $FIRST s after the job start and then every $POLL s, ended after $GONE checks without the process, start wait $START_WAIT min, power on wait $PON_WAIT min, boot wait $BOOT_WAIT min, shutdown wait $SHUT_WAIT min, job $SETTLE min or more after the last change of this run on the ESX host (settings applied, VM shut down, VM powered on and ready), job $SNAPGAP min or more after the config snapshot of the case was complete, config snapshot $SNAPLEAD min before the job start, $GAP min or more between the end of a job and the start of the next job (cases without a start time), job starts $SPACING min or more apart on this jump VM, preparation $PREP min before a start time of the plan"
   [ -n "$CR_GO" ] && setstate running "started"
   for SEQ in ${CR_GO:+$SEQS}; do
     IDX=$((IDX + 1))
@@ -2042,6 +2085,11 @@ check_body() {
   mk_probe "$W/probe.sh"
   : > "$W/done.vm"; : > "$W/clocks"
   ck_ok "times before a job: $SETTLE min or more after the last change of the run on the ESX host (settings applied, VM shut down, VM powered on and ready), $SNAPGAP min or more after the config snapshot of the case was complete"
+  if [ "$SNAPLEAD" -gt 0 ]; then
+    ck_ok "config snapshot: taken $SNAPLEAD min before the job start of a case"
+  else
+    ck_ok "config snapshot: taken as soon as a case is prepared"
+  fi
   if [ -n "$(gcmd)" ]; then
     ck_ok "command at the config snapshot (run on every VM of a case that is powered on, before the job): $(gcmd)"
   else

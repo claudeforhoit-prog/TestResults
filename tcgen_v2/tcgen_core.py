@@ -40,7 +40,7 @@ import shutil
 import sys
 import time
 
-VERSION = "2.10"
+VERSION = "2.11"
 KST_TO_UTC = dt.timedelta(hours=9)
 CHUNK = 100            # 붙여넣는 글 한 줄에 담는 명령 조각 길이(문자 수)
 NONE_JOB = "(없음)"
@@ -86,6 +86,7 @@ DEFAULT_SETTINGS = {
     "seq_settle_min": 30,      # 순서 실행: 이번 실행이 그 ESX 호스트에서 변경 작업(설정 적용, VM 끄기, VM 켜기)을 했으면 마지막 변경이 끝나고
                                # N분 뒤부터 잡 시작 (0 = 기다리지 않음). v2.9 까지는 기본 10분이고 VM 을 켠 경우만 기다렸다
     "seq_snap_gap_min": 5,     # 순서 실행: 구성 스냅샷이 끝나고 N분 뒤부터 잡 시작 (0 = 기다리지 않음)
+    "seq_snap_lead_min": 10,   # 순서 실행: 구성 스냅샷을 잡 시작 N분 전에 읽는다 (0 = 케이스의 준비가 끝나는 대로. v2.10 까지의 동작)
     "seq_guest_cmd": "",       # 순서 실행: 구성 스냅샷 때 케이스의 켜져 있는 VM 마다 실행할 명령(게스트 구성을 VCF Operations 에
                                # 기록하는 스크립트). 비우면 실행하지 않는다
     "seq_gap_min": 30,         # 순서 실행: 앞 케이스의 잡이 끝난 뒤 다음 케이스의 잡을 시작하기까지 최소 N분 (0 = 기다리지 않음)
@@ -102,7 +103,7 @@ DEFAULT_SETTINGS = {
 RUN_MODES = ("seq", "time")
 SETTINGS_REV = 1                        # 설정 파일의 판. 1 = v2.10: seq_settle_min 의 예전 기본값 10 을 30 으로 올린다(load_settings)
 SEQ_INT_SETTINGS = (("seq_settle_min", "변경 작업 뒤 잡 시작까지 최소 분", 0), ("seq_snap_gap_min", "스냅샷 뒤 잡 시작까지 최소 분", 0),
-                    ("seq_gap_min", "케이스 사이 간격 분", 0),
+                    ("seq_snap_lead_min", "구성 스냅샷 시점(잡 시작 전) 분", 0), ("seq_gap_min", "케이스 사이 간격 분", 0),
                     ("seq_start_spacing_min", "잡 시작 최소 간격 분", 1), ("seq_prep_lead_min", "시작 시각 준비 분", 0),
                     ("seq_poll_sec", "잡 종료 확인 간격(초)", 5), ("seq_first_check_sec", "잡 시작 뒤 첫 확인(초)", 1),
                     ("seq_gone_count", "연속 없음 횟수", 1), ("seq_start_wait_min", "시작 대기 분", 1),
@@ -1871,7 +1872,8 @@ ADDR_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
 USER_RE = re.compile(r"^[A-Za-z0-9._][A-Za-z0-9._-]*$")
 HOST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 PROC_MAX = 80
-SEQ_PLAN_NAMES = {"seq_settle_min": "SETTLE_MIN", "seq_snap_gap_min": "SNAP_GAP_MIN", "seq_gap_min": "GAP_MIN",
+SEQ_PLAN_NAMES = {"seq_settle_min": "SETTLE_MIN", "seq_snap_gap_min": "SNAP_GAP_MIN", "seq_snap_lead_min": "SNAP_LEAD_MIN",
+                  "seq_gap_min": "GAP_MIN",
                   "seq_start_spacing_min": "SPACING_MIN",
                   "seq_prep_lead_min": "PREP_LEAD_MIN", "seq_poll_sec": "POLL_SEC",
                   "seq_first_check_sec": "FIRST_CHECK_SEC", "seq_gone_count": "GONE_COUNT",
@@ -2256,6 +2258,16 @@ def build_seq(cases, run_cmds, mon_cmds, profiles, settings, now=None):
     prep = dict(sets).get("PREP_LEAD_MIN", DEFAULT_SETTINGS["seq_prep_lead_min"])
     settle = dict(sets).get("SETTLE_MIN", DEFAULT_SETTINGS["seq_settle_min"])
     snapgap = dict(sets).get("SNAP_GAP_MIN", DEFAULT_SETTINGS["seq_snap_gap_min"])
+    snaplead = dict(sets).get("SNAP_LEAD_MIN", DEFAULT_SETTINGS["seq_snap_lead_min"])
+    # 구성 스냅샷 시점(사용자 결정 2026-11-18 "네 10분전 스냅샷으로"): 스냅샷은 잡 시작 snaplead 분 전에 읽는다. 스냅샷을 읽은 뒤에
+    # crontab 줄을 등록하므로, 스냅샷 시점은 '스냅샷 뒤 잡 시작까지 최소' 와 모니터링 시작(잡 시작 lead 분 전)보다 3분 이상 앞이어야
+    # 한다(스냅샷을 읽고 줄을 등록하는 시간). 모자라면 시작 시각을 적은 케이스마다 잡 시작이 늦어지므로 오류로 알린다
+    if snaplead > 0 and any(any(vm["job"] for vm in pc["vms"]) for pc in plan):
+        need = max(snapgap, lead if any(pc["has_mon"] for pc in plan) else 0) + 3
+        if snaplead < need:
+            errors.append("설정: '구성 스냅샷 시점' %d분은 %d분 이상이어야 함('스냅샷 뒤 잡 시작까지 최소' %d분%s보다 3분 이상 길게. "
+                          "스냅샷을 읽고 줄을 등록하는 시간). 0 으로 두면 케이스의 준비가 끝나는 대로 읽음"
+                          % (snaplead, need, snapgap, (", 모니터링 시작 %d분" % lead) if any(pc["has_mon"] for pc in plan) else ""))
     # 잡 시작 전의 시간 규칙(사용자 2026-11-17 "잡 시작 최소 5분전에 config 스냅샷 부분이 완료되면 좋겠으니 변경 작업 포함해서 시간
     # 조정해줘 변경작업은 30분혹은 그 이상 이전에 수행"): 잡은 변경 작업이 끝나고 settle 분, 구성 스냅샷이 끝나고 snapgap 분 뒤부터
     # 시작한다(tcrun 의 register). 시작 시각을 적은 케이스의 준비가 이보다 늦게 시작하면 잡 시작이 적은 시각보다 늦어지므로 알린다
@@ -2267,6 +2279,9 @@ def build_seq(cases, run_cmds, mon_cmds, profiles, settings, now=None):
         if snapgap > 0 and prep < snapgap + 5:
             warnings.append("설정: '시작 시각 준비' %d분이 '스냅샷 뒤 잡 시작까지 최소' %d분보다 5분 이상 길지 않음. 잡 시작이 적은 "
                             "시각보다 늦어질 수 있음. '시작 시각 준비' 를 늘릴 것" % (prep, snapgap))
+        if snaplead > 0 and prep < snaplead + 5:
+            warnings.append("설정: '시작 시각 준비' %d분이 '구성 스냅샷 시점' %d분보다 5분 이상 길지 않음. 준비가 그때까지 끝나지 않으면 "
+                            "구성 스냅샷이 잡 시작 %d분 전보다 늦게 남음. '시작 시각 준비' 를 늘릴 것" % (prep, snaplead, snaplead))
     by_chain, no_proc = {}, []
     for pc in plan:
         by_chain.setdefault(pc["chain"], []).append(pc)
@@ -2279,8 +2294,9 @@ def build_seq(cases, run_cmds, mon_cmds, profiles, settings, now=None):
                 pc["nocheck"] = True
                 if nxt is not None:
                     # 다음 케이스 준비를 시작하는 시각. 그 2분 전에 이 케이스의 모니터링을 중지한다. 준비는 적어도 다음 케이스의
-                    # 모니터링 시작과 '스냅샷 뒤 잡 시작까지 최소' 가운데 긴 쪽보다 5분 앞에 시작한다(로그인 확인, 스냅샷, 줄 등록)
-                    lead_n = max(prep, max(lead if nxt["has_mon"] else 0, snapgap) + 5)
+                    # 모니터링 시작, '스냅샷 뒤 잡 시작까지 최소', '구성 스냅샷 시점' 가운데 가장 긴 것보다 5분 앞에 시작한다
+                    # (로그인 확인, 스냅샷, 줄 등록)
+                    lead_n = max(prep, max(lead if nxt["has_mon"] else 0, snapgap, snaplead) + 5)
                     pc["handover"] = nxt["start_at"] - dt.timedelta(minutes=lead_n)
                     if pc["handover"] - dt.timedelta(minutes=2) <= pc["start_at"] + dt.timedelta(minutes=1):
                         errors.append("%s: 다음 케이스 %s 의 준비 시작 %s 이(가) 이 케이스의 잡 시작 %s 보다 빠르거나 3분 안임. 시작 시각을 적은 "
@@ -2366,7 +2382,7 @@ def plan_view(plan, common, run_id):
     """화면에 보이는 실행 계획. 공통 규칙을 맨 위에 한 번 적고, 케이스마다 그 케이스에만 해당하는 값을 항목별로 적는다."""
     sets = dict(common["sets"])
     lead, settle, gap = sets["MON_LEAD_MIN"], sets["SETTLE_MIN"], sets.get("GAP_MIN", 0)
-    snapgap, gcmd = sets.get("SNAP_GAP_MIN", 5), common.get("gcmd") or ""
+    snapgap, gcmd, snaplead = sets.get("SNAP_GAP_MIN", 5), common.get("gcmd") or "", sets.get("SNAP_LEAD_MIN", 10)
     spacing, prep, shut = sets.get("SPACING_MIN", 5), sets.get("PREP_LEAD_MIN", 60), sets.get("SHUTDOWN_WAIT_MIN", 10)
     poll, first, gone = sets["POLL_SEC"], sets.get("FIRST_CHECK_SEC", 60), sets["GONE_COUNT"]
     every = ("%d분" % (poll // 60)) if poll % 60 == 0 else ("%d초" % poll)
@@ -2391,11 +2407,16 @@ def plan_view(plan, common, run_id):
                    "%d분 뒤부터 잡을 시작한다. 변경한 것이 없으면 기다리지 않는다." % settle)
     else:
         out.append("- 변경 작업 뒤 대기: 없음(설정값 0분).")
+    if snaplead > 0:
+        when = ("잡 시작 %d분 전에 읽는다. 케이스의 준비(설정 적용, VM 전원 맞추기)를 먼저 마치고 그 시각까지 기다린 뒤 읽고, 그 뒤에 줄을 "
+                "등록한다. 변경 작업 뒤 대기 때문에 잡 시작이 늦어지면 늦어진 잡 시작의 %d분 전에 읽는다. 시작 시각이 자동인 케이스는 "
+                "기다릴 대기(변경 작업 뒤 대기, 케이스 사이 간격)가 없으면 준비가 끝나는 대로 읽는다" % (snaplead, snaplead))
+    else:
+        when = ("케이스의 준비 때(%s) 설정 적용과 VM 전원 맞추기를 마친 뒤, 줄을 등록하기 전에 읽는다"
+                % (("시작 시각을 적은 케이스는 그 시각 %d분 전" % prep) if prep > 0 else "시작 시각을 적은 케이스도 차례가 오는 대로"))
     out.append("- 구성 스냅샷: 잡이 있는 케이스마다 잡 시작 전에 그 케이스 VM 의 VM 설정(ESX 호스트에서 읽은 vmx 값)과 Guest OS 설정(THP "
-               "등)을 로그 폴더의 tcrun-%s-<ESX 호스트>-config-<케이스 번호>-<케이스>.csv 에 기록한다. 케이스의 준비 때(%s) 설정 적용과 "
-               "VM 전원 맞추기를 마친 뒤, 줄을 등록하기 전에 읽는다(켜져 있는 VM 마다 접속 1번. 읽기만 한다. 방금 켠 VM 이 있으면 마지막 "
-               "VM 의 준비 60초 뒤)." % (run_id, ("시작 시각을 적은 케이스는 그 시각 %d분 전" % prep) if prep > 0
-                                    else "시작 시각을 적은 케이스도 차례가 오는 대로"))
+               "등)을 로그 폴더의 tcrun-%s-<ESX 호스트>-config-<케이스 번호>-<케이스>.csv 에 기록한다. %s(켜져 있는 VM 마다 접속 1번. "
+               "읽기만 한다. 방금 켠 VM 이 있으면 마지막 VM 의 준비 60초 뒤부터)." % (run_id, when))
     if snapgap > 0:
         out.append("- 스냅샷 뒤 대기: 잡은 구성 스냅샷이 끝나고 %d분 뒤부터 시작한다." % snapgap)
     else:
@@ -2414,7 +2435,7 @@ def plan_view(plan, common, run_id):
                % (("그 시각 %d분 전에 시작한다" % prep) if prep > 0 else "차례가 오는 대로 한다", gap))
     if any(pc.get("nocheck") for pc in plan):
         out.append("- 잡 확인 안 함: 시작 시각을 적은 케이스는 잡 프로세스를 확인하지 않는다. 잡이 실행되는 동안 VM 에 접속하지 않는다"
-                   "(VM 접속은 준비 때 VM 마다 3~4번, 그 가운데 1번이 구성 스냅샷. 케이스가 끝난 뒤 1번). 케이스는 정해진 시각에 끝난다: 다음 케이스 준비 2분 전에 "
+                   "(VM 접속은 잡 시작 전에 VM 마다 3~4번, 그 가운데 1번이 구성 스냅샷. 케이스가 끝난 뒤 1번). 케이스는 정해진 시각에 끝난다: 다음 케이스 준비 2분 전에 "
                    "모니터링을 중지하고 넘어간다. 최대 대기를 적었으면 잡 시작 + 최대 대기가 더 이를 때 그 시각에 끝낸다.")
     if any(jobs_in(pc) and not pc.get("nocheck") for pc in plan):
         out.append("- 잡 확인 함: 시작 시각이 자동인 케이스와 바로 다음 케이스가 자동인 케이스는 잡 종료를 알아야 하므로 확인한다. "

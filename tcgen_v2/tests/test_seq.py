@@ -415,13 +415,14 @@ class PlanTests(unittest.TestCase):
         res = gen(self.two(), st=settings(vm_user="tester", esx_addr="esx01=10.0.0.11;esx09=10.0.0.19", jump_log_dir="/data/log"))
         self.assertEqual(res["errors"], [])
         want = """TCGEN-PLAN 2
-VER 2.10
+VER 2.11
 RUNID 20261116-143000
 LOGDIR /data/log
 GEN 2026-11-16 14:30:00
 SET MON_LEAD_MIN 5
 SET SETTLE_MIN 30
 SET SNAP_GAP_MIN 5
+SET SNAP_LEAD_MIN 10
 SET GAP_MIN 30
 SET SPACING_MIN 5
 SET PREP_LEAD_MIN 60
@@ -601,6 +602,33 @@ END 002
         errs = gen(self.two(), st=settings(seq_snap_gap_min=-1))["errors"]
         self.assertTrue(any("스냅샷 뒤 잡 시작까지 최소 분" in e for e in errs), errs)
 
+    def test_snapshot_time_goes_into_the_plan(self):
+        """구성 스냅샷 시점(사용자 결정 2026-11-18 "네 10분전 스냅샷으로"): 잡 시작 N분 전에 읽는다. plan 의 SNAP_LEAD_MIN."""
+        self.assertEqual(core.DEFAULT_SETTINGS["seq_snap_lead_min"], 10)
+        res = gen(self.two())
+        self.assertIn("SET SNAP_LEAD_MIN 10\n", res["plan"])
+        self.assertIn("- 구성 스냅샷: 잡이 있는 케이스마다 잡 시작 전에", res["plan_view"])
+        self.assertIn("잡 시작 10분 전에 읽는다. 케이스의 준비(설정 적용, VM 전원 맞추기)를 먼저 마치고 그 시각까지 기다린 뒤 읽고", res["plan_view"])
+        res0 = gen(self.two(), st=settings(seq_snap_lead_min=0))
+        self.assertIn("SET SNAP_LEAD_MIN 0\n", res0["plan"])
+        self.assertIn("케이스의 준비 때(시작 시각을 적은 케이스는 그 시각 60분 전) 설정 적용과 VM 전원 맞추기를 마친 뒤, 줄을 등록하기 전에 읽는다",
+                      res0["plan_view"])
+        # 스냅샷을 읽은 뒤에 줄을 등록하므로 스냅샷 시점은 스냅샷 뒤 대기와 모니터링 시작보다 3분 이상 앞이어야 한다
+        errs = gen(self.two(), st=settings(seq_snap_lead_min=7))["errors"]
+        self.assertTrue(any(e.startswith("설정: '구성 스냅샷 시점' 7분은 8분 이상이어야 함('스냅샷 뒤 잡 시작까지 최소' 5분, 모니터링 시작 5분보다 "
+                                         "3분 이상 길게.") for e in errs), errs)
+        self.assertEqual(gen(self.two(), st=settings(seq_snap_lead_min=8))["errors"], [])
+        errs = gen(self.two(), st=settings(seq_snap_lead_min=10, mon_lead_min=9))["errors"]
+        self.assertTrue(any("'구성 스냅샷 시점' 10분은 12분 이상이어야 함" in e and "모니터링 시작 9분" in e for e in errs), errs)
+        nomon = [case("n1", seq_start="18:00"), case("n2", seq_start="+8")]
+        self.assertEqual(gen(nomon, st=settings(seq_snap_lead_min=8, mon_lead_min=9))["errors"], [], "모니터링이 없으면 스냅샷 뒤 대기만 본다")
+        errs = gen(nomon, st=settings(seq_snap_lead_min=6))["errors"]
+        self.assertTrue(any("'구성 스냅샷 시점' 6분은 8분 이상이어야 함('스냅샷 뒤 잡 시작까지 최소' 5분보다 3분 이상 길게." in e for e in errs), errs)
+        errs = gen(self.two(), st=settings(seq_snap_lead_min=-1))["errors"]
+        self.assertTrue(any("구성 스냅샷 시점(잡 시작 전) 분" in e for e in errs), errs)
+        w = gen(nomon, st=settings(seq_prep_lead_min=12, seq_settle_min=0))["warnings"]
+        self.assertTrue(any(x.startswith("설정: '시작 시각 준비' 12분이 '구성 스냅샷 시점' 10분보다 5분 이상 길지 않음") for x in w), w)
+
     def test_preparation_shorter_than_the_waits_is_a_warning(self):
         """'시작 시각 준비' 가 변경 작업 뒤 대기나 스냅샷 뒤 대기보다 넉넉히 길지 않으면 잡 시작이 늦어질 수 있다고 알린다."""
         cases = [case("w1", seq_start="18:00"), case("w2", seq_start="+8")]
@@ -694,7 +722,7 @@ class SettingsAndDataTests(unittest.TestCase):
         return snap
 
     def test_names_differ_from_v1(self):
-        self.assertEqual(core.VERSION, "2.10")
+        self.assertEqual(core.VERSION, "2.11")
         for k in self.keys:
             os.environ.pop(k, None)
         self.assertEqual(os.path.basename(core.default_data_dir()), "tcgen2_data")
@@ -951,14 +979,19 @@ class SeqStartTests(unittest.TestCase):
                      "   잡 확인: 안 함. 끝: 정해지지 않음. 모니터링을 중지하지 않고 실행을 끝낸다."):
             self.assertIn(word, view)
         short = gen(cases[:3], st=settings(seq_prep_lead_min=0, mon_lead_min=5))
-        # 준비 0분: 다음 케이스 준비는 '스냅샷 뒤 잡 시작까지 최소'(5분) + 5분 = 잡 시작 10분 전에 시작한다(다음 케이스에 모니터링 없음)
-        h0 = int(time.mktime(dt.datetime(2026, 11, 17, 1, 50).timetuple()))
-        self.assertIn("NOCHK 001 %d 2026-11-17 01:50" % h0, short["plan"].split("\n"))
-        nogap = gen(cases[:3], st=settings(seq_prep_lead_min=0, mon_lead_min=5, seq_snap_gap_min=0))
-        h5 = int(time.mktime(dt.datetime(2026, 11, 17, 1, 55).timetuple()))     # 스냅샷 뒤 대기가 0 이면 잡 시작 5분 전
+        # 준비 0분: 다음 케이스 준비는 '구성 스냅샷 시점'(10분) + 5분 = 잡 시작 15분 전에 시작한다(스냅샷을 잡 시작 10분 전에 읽으려면
+        # 그 전에 준비가 끝나야 한다)
+        h0 = int(time.mktime(dt.datetime(2026, 11, 17, 1, 45).timetuple()))
+        self.assertIn("NOCHK 001 %d 2026-11-17 01:45" % h0, short["plan"].split("\n"))
+        # 스냅샷을 준비 직후에 읽는 설정(0): '스냅샷 뒤 잡 시작까지 최소'(5분) + 5분 = 잡 시작 10분 전
+        early = gen(cases[:3], st=settings(seq_prep_lead_min=0, mon_lead_min=5, seq_snap_lead_min=0))
+        h1 = int(time.mktime(dt.datetime(2026, 11, 17, 1, 50).timetuple()))
+        self.assertIn("NOCHK 001 %d 2026-11-17 01:50" % h1, early["plan"].split("\n"))
+        nogap = gen(cases[:3], st=settings(seq_prep_lead_min=0, mon_lead_min=5, seq_snap_gap_min=0, seq_snap_lead_min=0))
+        h5 = int(time.mktime(dt.datetime(2026, 11, 17, 1, 55).timetuple()))     # 두 값이 모두 0 이면 잡 시작 5분 전
         self.assertIn("NOCHK 001 %d 2026-11-17 01:55" % h5, nogap["plan"].split("\n"))
         mon_next = gen([case("m1", seq_start="18:00"), case("m2", seq_start="+2", esx_monitors=["host_mon"])],
-                       st=settings(seq_prep_lead_min=0, mon_lead_min=5))
+                       st=settings(seq_prep_lead_min=0, mon_lead_min=5, seq_snap_lead_min=0))
         h3 = int(time.mktime(dt.datetime(2026, 11, 16, 19, 50).timetuple()))    # 다음 케이스에 모니터링이 있으면 모니터링 시작 5분 전
         self.assertIn("NOCHK 001 %d 2026-11-16 19:50" % h3, mon_next["plan"].split("\n"))
         close = gen([case("c1", seq_start="18:00"), case("c2", seq_start="18:30")])

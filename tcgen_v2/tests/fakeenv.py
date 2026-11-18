@@ -208,9 +208,11 @@ echo "$1 $2 `date +%s`" >> "$HOME/mon.log"
 
 # 구성 스냅샷 때 VM 마다 실행하는 명령의 가짜(게스트 구성을 VCF Operations 에 기록하는 guest_config_push 를 대신한다).
 # 실행할 때마다 $HOME/gpush.log 에 한 줄을 적는다. $HOME/gpush_fail 이 있으면 실제 스크립트처럼 오류 줄을 내고 1 로 끝난다.
+# $HOME/gpush_slow 에 초를 적어 두면 그만큼 걸린다(가상 시계의 초).
 GPUSH_SH = r"""#!/bin/sh
 echo "[guest_config_push] VM object: $FAKE_HOST   host: $FAKE_HOST"
 echo "  THP enabled                        = (없음)"
+if [ -s "$HOME/gpush_slow" ]; then sleep "`cat "$HOME/gpush_slow"`"; fi
 if [ -f "$HOME/gpush_fail" ]; then
   echo "[ERROR] property write failed HTTP 500: 오류 internal error" >&2
   exit 1
@@ -657,7 +659,7 @@ class FakeEnv(object):
         s = dict(core.DEFAULT_SETTINGS)
         s.update(record_csv=os.path.join(self.root, "pc", "rec.csv"), log_dir=os.path.join(self.root, "pc"), run_mode="seq",
                  jump_log_dir=self.log, mon_lead_min=1, seq_poll_sec=20, seq_first_check_sec=20, seq_gone_count=2, seq_start_wait_min=3,
-                 seq_boot_wait_min=5, seq_shutdown_wait_min=1, seq_settle_min=0, seq_gap_min=0, seq_snap_gap_min=0)
+                 seq_boot_wait_min=5, seq_shutdown_wait_min=1, seq_settle_min=0, seq_gap_min=0, seq_snap_gap_min=0, seq_snap_lead_min=0)
         if self.jdir:
             s["jump_dir"] = self.jdir
         s.update(over)

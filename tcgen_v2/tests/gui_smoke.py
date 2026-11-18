@@ -1025,7 +1025,8 @@ def main():
           "케이스 사이 간격과 지정한 시작 시각이 plan 에 들어감. 시각을 비운 케이스에는 START 줄이 없음")
     check(re.search(r"   시작: 지정 \d{4}-\d\d-\d\d 09:05\. 준비\(설정, VM 전원\)는 \d{4}-\d\d-\d\d 08:05 부터", res["plan_view"])
           and "   시작: 자동. 앞 케이스의 잡이 끝나고 30분 뒤" in res["plan_view"], "실행 계획에 시작 시각, 준비 시각, 간격 설명")
-    check("- 구성 스냅샷: 잡이 있는 케이스마다 잡 시작 전에" in res["plan_view"] and "시작 시각을 적은 케이스는 그 시각 60분 전" in res["plan_view"]
+    check("- 구성 스냅샷: 잡이 있는 케이스마다 잡 시작 전에" in res["plan_view"] and "잡 시작 10분 전에 읽는다" in res["plan_view"]
+          and "SET SNAP_LEAD_MIN 10\n" in res["plan"]
           and "-config-<케이스 번호>-<케이스>.csv 에 기록한다" in res["plan_view"] and "\nCFGL h1 구분\n" in res["plan"]
           and any("구성 스냅샷(config snapshot)" in x for x in app.RESULT_HELP_SEQ), "실행 계획과 도움말에 구성 스냅샷 설명, plan 에 csv 머리글")
     check(any(x[0] == "ask" and "시작 시각이 자동인 케이스 1개(TC-base-a-r3)" in x[1] and "VM 에 접속함" in x[1] for x in LOG[n_gen:]),
@@ -1098,6 +1099,15 @@ def main():
     app.v_snapgap.set("x")
     check(app.current_settings(show_error=False) is None, "스냅샷 뒤 잡 시작까지 최소 칸이 숫자가 아니면 설정을 쓰지 않음")
     app.v_snapgap.set("5")
+    # v2.11 구성 스냅샷 시점: 잡 시작 N분 전에 읽는다 (사용자 2026-11-18 "네 10분전 스냅샷으로")
+    check("구성 스냅샷: 잡 시작" in labels and app.v_snaplead.get() == "10" and core.DEFAULT_SETTINGS["seq_snap_lead_min"] == 10,
+          "설정 영역에 구성 스냅샷 시점 칸, 기본값은 잡 시작 10분 전")
+    app.v_snaplead.set("12")
+    check(core.load_settings(BASE)["seq_snap_lead_min"] == 12, "구성 스냅샷 시점을 고치면 저장")
+    app.v_snaplead.set("")
+    check(app.current_settings(show_error=False) is None and core.load_settings(BASE)["seq_snap_lead_min"] == 12,
+          "구성 스냅샷 시점 칸을 비운 동안에는 설정을 쓰지 않음")
+    app.v_snaplead.set("10")
     seq_saved = _copy.deepcopy(app.cases)
     app.commit_case("c1", "seq_start", "9:05")
     app.commit_case("c2", "seq_start", "+8")
@@ -1160,7 +1170,8 @@ def main():
     check(any("잡 시작 전의 시간 규칙" in x and "끝난 시각에서 %s분 이상 지난 뒤에 잡을 시작한다" % app.v_settle.get() in x
               and "구성 스냅샷이 끝난 시각에서는 5분 이상 지난 뒤에 잡을 시작한다" in x for x in helps)
           and any("[기록 대조]" in x for x in helps) and any("날짜 시각으로 바꿔 고정한다" in x for x in helps)
-          and any("스냅샷 때 VM 에서 실행할 명령(설정 영역)" in x for x in helps), "순서 실행의 탭 4 도움말에 v2.10 설명")
+          and any("스냅샷 때 VM 에서 실행할 명령(설정 영역)" in x for x in helps)
+          and any("구성 스냅샷 시점" in x and "스냅샷은 잡 시작 10분 전에 읽는다" in x for x in helps), "순서 실행의 탭 4 도움말에 v2.10, v2.11 설명")
     shot_window(root, "도움말", "tcgen_seq_help4_v210.png")
     app.help_win.destroy()
     app.cases[:] = seq_saved                                      # 뒤의 점검을 위해 표와 설정을 되돌린다

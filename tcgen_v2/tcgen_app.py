@@ -441,6 +441,7 @@ class App(object):
         self.v_spacing = tk.StringVar(value=str(self.settings["seq_start_spacing_min"]))   # 순서 실행: 잡 시작 최소 간격(분)
         self.v_prep = tk.StringVar(value=str(self.settings["seq_prep_lead_min"]))          # 순서 실행: 시작 시각 전 준비(분)
         self.v_snapgap = tk.StringVar(value=str(self.settings["seq_snap_gap_min"]))        # 순서 실행: 스냅샷 뒤 잡 시작까지 최소(분)
+        self.v_snaplead = tk.StringVar(value=str(self.settings["seq_snap_lead_min"]))      # 순서 실행: 구성 스냅샷 시점(잡 시작 N분 전)
         self.v_gcmd = tk.StringVar(value=self.settings.get("seq_guest_cmd", ""))           # 순서 실행: 스냅샷 때 VM 에서 실행할 명령
         self.v_cfile = tk.StringVar()           # 지금 쓰는 테스트 케이스 파일 (보여 주기만 한다)
         self.v_status = tk.StringVar()
@@ -448,7 +449,7 @@ class App(object):
         self.build()
         self.apply_mode()
         for v in (self.v_record, self.v_log, self.v_user, self.v_mon, self.v_stop, self.v_jlog, self.v_addr, self.v_settle, self.v_gap,
-                  self.v_poll, self.v_spacing, self.v_prep, self.v_jdir, self.v_snapgap, self.v_gcmd):
+                  self.v_poll, self.v_spacing, self.v_prep, self.v_jdir, self.v_snapgap, self.v_gcmd, self.v_snaplead):
             v.trace_add("write", self._settings_changed) if hasattr(v, "trace_add") else v.trace("w", self._settings_changed)
         self.update_status()
         for m in self.start_msgs:
@@ -576,6 +577,7 @@ class App(object):
             self.v_spacing.set(str(self.settings["seq_start_spacing_min"]))
             self.v_prep.set(str(self.settings["seq_prep_lead_min"]))
             self.v_snapgap.set(str(self.settings["seq_snap_gap_min"]))
+            self.v_snaplead.set(str(self.settings["seq_snap_lead_min"]))
             self.v_gcmd.set(self.settings.get("seq_guest_cmd", ""))
             self.refresh_case_file_box()
         finally:
@@ -781,7 +783,11 @@ class App(object):
         ttk.Label(self.f_seq, text="분 뒤 잡 시작").pack(side="left", padx=(0, px(18)))
         ttk.Label(self.f_seq, text="변경 작업 뒤 잡 시작까지 최소").pack(side="left")
         ttk.Spinbox(self.f_seq, from_=0, to=240, width=4, textvariable=self.v_settle).pack(side="left", padx=px(6))
-        ttk.Label(self.f_seq, text="분").pack(side="left")
+        ttk.Label(self.f_seq, text="분").pack(side="left", padx=(0, px(18)))
+        # 구성 스냅샷 시점: 잡 시작 N분 전에 읽는다 (0 = 케이스의 준비가 끝나는 대로)
+        ttk.Label(self.f_seq, text="구성 스냅샷: 잡 시작").pack(side="left")
+        ttk.Spinbox(self.f_seq, from_=0, to=240, width=4, textvariable=self.v_snaplead).pack(side="left", padx=px(6))
+        ttk.Label(self.f_seq, text="분 전").pack(side="left")
         # 순서 실행에서만 보이는 줄: 잡 시작 최소 간격, 준비, 그리고 시작 시각이 '자동' 인 케이스에만 쓰는 두 값(케이스 사이 간격, 잡 종료
         # 확인 간격). 시작 시각을 적는 것이 기본이므로 자동에만 쓰는 값은 뒤에 두고 이름에 (자동) 을 붙인다
         self.row_seq2 = ttk.Frame(sf)
@@ -950,9 +956,10 @@ class App(object):
         "-perfreport_cases.csv (성능 리포트 생성기의 케이스 정보 파일. 잡 시작과 종료는 실제 시각), "
         "-config-<케이스 번호>-<케이스>.csv (구성 스냅샷).",
         "구성 스냅샷(config snapshot): 잡이 있는 케이스마다 잡 시작 전에 그 케이스 VM 의 VM 설정(ESX 호스트에서 읽은 vmx 값)과 "
-        "Guest OS 설정(THP, hugepages 등)을 csv 로 남긴다. 케이스의 준비 때(시작 시각을 적은 케이스는 그 시각에서 '시작 시각 준비' 분 "
-        "전) 설정 적용과 VM 전원 맞추기를 마친 뒤에 읽는다. 배치는 config_snapshot 의 VM 표와 같다(구분, 항목, VM 이름 열). 읽기만 "
-        "하고, 켜져 있는 VM 마다 접속 한 번이다. 읽지 못해도 케이스는 진행한다.",
+        "Guest OS 설정(THP, hugepages 등)을 csv 로 남긴다. 읽는 때는 잡 시작 N분 전이다(설정 영역의 '구성 스냅샷: 잡 시작 N분 전', "
+        "기본 10). 케이스의 준비(설정 적용, VM 전원 맞추기)를 먼저 마치고 그 시각까지 기다린 뒤 읽는다. 0 으로 두면 준비가 끝나는 "
+        "대로 읽는다. 배치는 config_snapshot 의 VM 표와 같다(구분, 항목, VM 이름 열). 읽기만 하고, 켜져 있는 VM 마다 접속 한 번이다. "
+        "읽지 못해도 케이스는 진행한다.",
         "잡 시작 전의 대기: 잡은 구성 스냅샷이 끝나고 '스냅샷 뒤 잡 시작까지 최소' 분, 이번 실행의 마지막 변경 작업(설정 적용, VM 끄기, "
         "VM 켜기)이 끝나고 '변경 작업 뒤 잡 시작까지 최소' 분이 지난 뒤에 시작한다. 진행 로그의 settle: 줄과 snapshot gap: 줄에 "
         "적용한 내용이 남는다. 이 때문에 적은 시작 시각을 지킬 수 없으면 로그에 WARN the start time 줄이 남는다.",
@@ -1010,7 +1017,7 @@ class App(object):
                 "케이스 사이 간격은 적용하지 않는다. VM 을 켠 뒤의 대기가 남았으면 가능한 가장 이른 시각에 시작하고 로그에 WARN 을 "
                 "남긴다." % int(st.get("seq_prep_lead_min", 60)),
                 "잡 확인 안 함: 시작 시각을 적은 케이스는 정해진 시각에 진행하므로 잡 프로세스를 확인하지 않는다. 잡이 실행되는 동안 VM 에 "
-                "접속하지 않는다(VM 접속은 준비 때 VM 마다 3~4번, 그 가운데 1번이 구성 스냅샷. 케이스가 끝난 뒤 1번). 그 케이스는 다음 케이스 준비 2분 전에 모니터링을 "
+                "접속하지 않는다(VM 접속은 잡 시작 전에 VM 마다 3~4번, 그 가운데 1번이 구성 스냅샷. 케이스가 끝난 뒤 1번). 그 케이스는 다음 케이스 준비 2분 전에 모니터링을 "
                 "중지하고 끝낸다. 최대 대기를 적었으면 잡 시작 + 최대 대기가 더 이를 때 그 시각에 끝낸다. 마지막 케이스에 최대 대기가 없으면 "
                 "모니터링을 중지하지 않고 실행을 끝낸다(같은 ESX 호스트의 다음 실행이 준비를 시작할 때나 tcrun cancel 로 중지).",
                 "잡 확인 함: 시작 시각이 자동인 케이스와, 시각을 적었어도 바로 다음 케이스가 자동인 케이스는 잡 종료를 알아야 하므로 확인한다. "
@@ -1035,6 +1042,7 @@ class App(object):
                 "을 남긴다." % (int(st.get("seq_settle_min", 30)), int(st.get("seq_snap_gap_min", 5)), ld[0],
                              int(st.get("seq_prep_lead_min", 60)),
                              max(0, int(st.get("seq_prep_lead_min", 60)) - int(st.get("seq_settle_min", 30)))),
+                self.snap_lead_help(st),
                 "스냅샷 때 VM 에서 실행할 명령(설정 영역): 적어 두면 구성 스냅샷 때 케이스의 켜져 있는 VM 마다 접속해 그 명령을 실행한다. "
                 "게스트 구성을 VCF Operations 에 기록하는 스크립트(guest_config_push)를 VM 안의 경로로 적는다. 결과는 스냅샷 csv 의 "
                 "snapshot command 행과 진행 로그에 남고, 실패해도 케이스는 진행한다. P 블록(점검)이 VM 에 그 파일이 있는지 확인한다.",
@@ -1221,8 +1229,8 @@ class App(object):
                 "[명령어 생성] 을 누르면 넣을 케이스를 고르는 창이 열린다. 테스트 그룹, 잡 종료 (리포트), 종료 기준 VM 은 "
                 "리포트용 CSV 에만 들어간다. 적용 체크한 케이스의 간격, 잡 시작, 모니터링 중지는 고정된다(순서를 바꿔도 케이스와 함께 "
                 "움직인다). 자세한 설명은 [도움말].",
-        "seq": "순서 실행: 점프 VM 이 케이스를 표의 순서대로 준비하고(설정 적용, VM 전원, 구성 스냅샷) 시작 시각 칸에 적은 시각에 잡을 "
-               "시작한다. 시작 시각은 날짜 시각(2026-11-20 10:00:00), 시:분(10:00), +간격(+8:00 = 앞 케이스 시작 8시간 뒤)으로 적는다. "
+        "seq": "순서 실행: 점프 VM 이 케이스를 표의 순서대로 준비하고(설정 적용, VM 전원, 잡 시작 전의 구성 스냅샷) 시작 시각 칸에 적은 "
+               "시각에 잡을 시작한다. 시작 시각은 날짜 시각(2026-11-20 10:00:00), 시:분(10:00), +간격(+8:00 = 앞 케이스 시작 8시간 뒤)으로 적는다. "
                "이렇게 적은 케이스는 잡이 실행되는 동안 VM 에 접속하지 않는다. '자동' 이라고 적으면 앞 케이스의 잡 프로세스가 끝난 것을 "
                "확인한 뒤 이어서 시작한다(확인하러 VM 에 접속한다). "
                "케이스 행의 설정 칸은 ESX 호스트 설정, VM 행의 설정 칸은 VM 설정(탭 3 의 프로파일)이다. "
@@ -1469,6 +1477,19 @@ class App(object):
             if t is not None:
                 t.finish_edit()
 
+    @staticmethod
+    def snap_lead_help(st):
+        """도움말의 구성 스냅샷 시점 설명(설정값에 따라 다르다)."""
+        n = int(st.get("seq_snap_lead_min", 10))
+        if n <= 0:
+            return ("구성 스냅샷 시점(설정 영역의 '구성 스냅샷: 잡 시작 N분 전'): 지금 값은 0 이다. 케이스의 준비(설정 적용, VM 전원 "
+                    "맞추기)가 끝나는 대로 스냅샷을 읽는다. 시작 시각을 적은 케이스는 준비를 미리 시작하므로 스냅샷이 잡 시작보다 한참 "
+                    "앞에 남는다.")
+        return ("구성 스냅샷 시점(설정 영역의 '구성 스냅샷: 잡 시작 N분 전'): 스냅샷은 잡 시작 %d분 전에 읽는다. 준비(설정 적용, VM 전원 "
+                "맞추기)를 먼저 마치고 그 시각까지 기다린 뒤 읽고, 그 뒤에 crontab 줄을 등록한다. 변경 작업 뒤 대기 때문에 잡 시작이 "
+                "늦어지면 늦어진 잡 시작의 %d분 전에 읽는다. 시작 시각이 자동인 케이스는 기다릴 대기가 없으면 준비가 끝나는 대로 읽고 "
+                "'스냅샷 뒤 잡 시작까지 최소' 가 지난 뒤에 잡을 시작한다. 0 으로 두면 준비가 끝나는 대로 읽는다." % (n, n))
+
     def jump_dir_text(self):
         """점프 VM 작업 폴더(화면의 칸, 비우면 ~/.tcgen)."""
         return core.jump_dir({"jump_dir": self.v_jdir.get()})
@@ -1494,6 +1515,15 @@ class App(object):
         if snapgap < 0:
             if show_error:
                 messagebox.showerror(TITLE, "'스냅샷 뒤 잡 시작까지 최소' 분은 0 이상의 정수로 입력", parent=self.root)
+            return None
+        try:
+            snaplead = int(self.v_snaplead.get())
+        except ValueError:
+            snaplead = -1
+        if snaplead < 0:
+            if show_error:
+                messagebox.showerror(TITLE, "'구성 스냅샷: 잡 시작 N분 전' 은 0 이상의 정수로 입력 (0 = 케이스의 준비가 끝나는 대로)",
+                                     parent=self.root)
             return None
         try:
             gap = int(self.v_gap.get())
@@ -1533,7 +1563,7 @@ class App(object):
         s.update(record_csv=self.v_record.get().strip(), log_dir=self.v_log.get().strip(), vm_user=self.v_user.get().strip(),
                  mon_lead_min=ld[0], stop_lead_min=ld[1], run_mode=self.mode(), jump_log_dir=self.v_jlog.get().strip(),
                  esx_addr=self.v_addr.get().strip(), seq_settle_min=settle, seq_gap_min=gap, seq_start_spacing_min=spacing,
-                 seq_prep_lead_min=prep, jump_dir=self.v_jdir.get().strip(), seq_snap_gap_min=snapgap,
+                 seq_prep_lead_min=prep, jump_dir=self.v_jdir.get().strip(), seq_snap_gap_min=snapgap, seq_snap_lead_min=snaplead,
                  seq_guest_cmd=" ".join(self.v_gcmd.get().split()))
         return s
 
