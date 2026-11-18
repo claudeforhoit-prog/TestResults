@@ -555,6 +555,7 @@ grep ' check ' ~/tcgen_log/tcrun-<실행 ID>-<ESX 호스트>.log  # 잡 확인 �
 - config_snapshot 과 다른 점: vCenter 가 아니라 ESX 호스트의 vmx 파일에서 읽는다. vCenter 가 값을 돌려주지 않는 `sched.mem.pin` 도 나온다. vmx 에 적히지 않은 기본값(예: latency sensitivity 를 바꾸지 않은 VM)은 `(없음)` 으로 나온다. 호스트 표(서버 기본 정보, BIOS, 호스트 advanced config, CAT)는 만들지 않는다. 호스트 옵션의 변경 내용은 진행 로그의 `TCGEN-HOST` 줄에 남는다.
 - VCF Operations 기록(v2.10): 설정 영역의 `스냅샷 때 VM 에서 실행할 명령` 에 게스트 안의 guest_config_push 경로를 적으면(예: `bash /home/tester/perf/guest_config_push.sh`), 구성 스냅샷 때 케이스의 켜져 있는 VM 마다 접속해 그 명령을 실행한다. guest_config_push 가 Guest OS 값을 Operations 의 VM 객체 속성(`Custom Configuration|Guest|*`)으로 기록한다. 비워 두면 실행하지 않는다.
   - 명령은 모든 VM 에 같은 글로 실행한다. 스크립트가 모든 VM 의 같은 경로에 있어야 한다. 변수 `<vm이름>`, `<실행시각>` 은 쓸 수 없다. guest_config_push 는 Operations 의 VM 객체 이름으로 게스트의 hostname 을 쓴다.
+  - BM 서버(5.9절)의 구성도 기록하려면 guest_config_push 1.1 이상을 쓰고 명령에 `--target auto` 를 붙인다(예: `bash /home/tester/perf/guest_config_push.sh --target auto`). VM 에서는 VM 객체에, BM 서버에서는 BM 호스트 객체에 기록한다. BM 호스트 객체가 없으면 스크립트가 만들고, `ops_metric_push.sh --target bm` 이 쓰는 객체와 같다. BM 서버만 있는 실행은 `--target bm` 을 붙여도 된다. 옵션 없이 실행하면 VM 객체만 찾으므로 BM 서버에서는 `failed (exit 1): [ERROR] VirtualMachine ... not found` 로 남는다.
   - 결과: 스냅샷 csv 의 Guest OS 구간 마지막 행 `snapshot command` 에 VM 마다 `ok: <명령의 마지막 출력 줄>` 또는 `failed (exit <코드>): <마지막 출력 줄>` 이 들어가고, 진행 로그에 `config snapshot: command on vm <VM>: ok (...)` 줄이 남는다. 실패한 VM 이 있으면 `WARN config snapshot ... command on vm <VM> failed` 가 남고 케이스는 진행한다.
   - P 블록(점검)은 명령에서 `/` 로 시작하는 첫 낱말을 스크립트 파일로 보고, 켜져 있는 VM 마다 그 파일을 읽을 수 있는지 확인한다. 없으면 `[PROBLEM]` 으로 알린다. P 블록은 명령을 실행하지 않는다.
   - 명령 하나에 최대 150초를 기다린다. VM 마다 접속이 한 번 늘어난다.
@@ -605,6 +606,7 @@ VM 행은 점프 VM 이 ssh 로 접속하는 대상이다. BM 서버를 VM 행�
 - BM 서버의 계정과 비밀번호가 VM 과 같아야 자동 로그인이 된다(`VM 접속 계정` 과 `sh ~/.tcgen/setpw` 로 저장한 비밀번호를 쓴다). 다르면 점프 VM 의 ssh 공개 키를 BM 서버의 `~/.ssh/authorized_keys` 에 넣는다.
 - ESX 호스트를 비운 케이스는 한 줄로 차례대로 진행한다. 로그 파일 이름의 호스트 자리에는 `noesx` 가 들어간다.
 - BM 서버에 `crontab` 과 `pgrep` 명령이 있어야 한다. P 블록이 확인한다.
+- 구성 스냅샷: BM 서버의 케이스는 Guest OS 구간만 남는다(ESX 호스트가 없어 VM 설정 구간이 없다). Operations 에도 기록하려면 설정 영역의 `스냅샷 때 VM 에서 실행할 명령` 에 guest_config_push 1.1 이상을 `--target auto` 나 `--target bm` 과 함께 적는다(5.7절).
 
 ## 6. ssh 키 접속 (점프 VM 에서 ESX 호스트로)
 
@@ -1116,7 +1118,7 @@ Windows 에서는 셸이 필요한 시험을 건너뛴다. 전체 시험은 tcsh
 | 점프 VM 의 `setsid`, `base64 --decode`, `gzip`, `sha256sum` | util-linux, coreutils | A 블록의 `OK` 두 줄, S 블록의 `started:` |
 | 구성 스냅샷의 VM 설정 | vmx 파일에 `numvcpus`, `memSize`, `sched.*`, `numa.*`, `monitor*` 키가 `키 = "값"` 줄로 적혀 있다(설정 적용이 고치는 파일과 같다). vSphere 가 기본값인 항목은 vmx 에 적지 않는다 | 첫 케이스의 구성 스냅샷 파일을 vCenter 의 VM 설정, config_snapshot 의 VM 표와 비교 |
 | 구성 스냅샷의 Guest OS 설정 | 게스트의 일반 계정이 `/sys/kernel/mm/transparent_hugepage/*`, `/sys/kernel/mm/hugepages/*/nr_hugepages`, `/proc/sys/kernel/numa_balancing`, `/proc/cmdline` 을 읽을 수 있다. 점프 VM 에 `awk` 가 있다 | 구성 스냅샷 파일의 Guest OS 구간을 게스트에서 `guest_config_push.sh --dry-run` 으로 본 값과 비교. 진행 로그에 `WARN config snapshot` 이 없는지 |
-| 스냅샷 때 VM 에서 실행할 명령 | 게스트의 그 경로에 guest_config_push 가 있고, 접속 계정이 실행할 수 있고, 게스트에서 Operations 로 접속이 된다. 스크립트의 마지막 출력 줄이 결과를 알린다(`[OPS] ... recorded` 또는 `[ERROR] ...`) | P 블록의 `the file of the command at the config snapshot is there` 줄, 첫 케이스의 진행 로그 `config snapshot: command on vm ...: ok` 줄, Operations 의 VM 객체 속성 `Custom Configuration|Guest|Collected At` 의 시각 |
+| 스냅샷 때 VM 에서 실행할 명령 | 게스트(BM 서버 포함)의 그 경로에 guest_config_push 가 있고, BM 서버에는 1.1 이상의 판과 `--target auto` 또는 `--target bm` 이 필요하고, 접속 계정이 실행할 수 있고, 게스트에서 Operations 로 접속이 된다. 스크립트의 마지막 출력 줄이 결과를 알린다(`[OPS] ... recorded` 또는 `[ERROR] ...`) | P 블록의 `the file of the command at the config snapshot is there` 줄, 첫 케이스의 진행 로그 `config snapshot: command on vm ...: ok` 줄, Operations 의 VM 객체 속성 `Custom Configuration|Guest|Collected At` 의 시각 |
 | 변경 작업에 걸리는 시간 | 설정을 변경하는 케이스에서 VM 끄기, 설정 변경, VM 켜기(1GB page backing, ssh 로그인)가 30분 안에 끝난다(`시작 시각 준비` 60분 - `변경 작업 뒤 잡 시작까지 최소` 30분). 메모리가 큰 VM 여러 대는 더 걸릴 수 있다 | 진행 로그의 `settle:` 줄과 `WARN the start time` 줄. WARN 이 나오면 `시작 시각 준비` 를 늘린다 |
 | 터미널을 닫은 뒤의 진행 | `setsid` 로 시작한 진행은 터미널을 닫아도 계속된다. 점프 VM 이 로그아웃할 때 사용자 프로세스를 모두 끝내게 설정돼 있으면(systemd-logind 의 `KillUserProcesses=yes`) 끝난다 | S 블록을 붙여넣고 터미널을 닫은 뒤 다시 접속해 `sh ~/.tcgen/tcrun status` |
 | 300줄쯤 되는 A 블록 붙여넣기 | 터미널이 글자를 빠뜨리지 않는다. 빠뜨리면 `FAILED` 가 나온다 | A 블록의 `OK` 두 줄 |
