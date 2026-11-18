@@ -4,9 +4,10 @@
 
     python tests/gui_fuzz_applied.py [시드] [횟수]        기본: 시드 1, 300번
 
-실제 화면 코드로 탭 4 의 조작(케이스 추가, 삭제, 위로, 아래로, 잡 시작과 간격 입력, 모니터링 중지 변경, 잡 종료 입력, 적용 체크,
-진행 방식 바꾸기, 다시 실행)을 무작위 순서로 하고, 조작마다 적용 체크한 케이스의 간격, 잡 시작, 모니터링 중지 설정, 잡 종료 (리포트),
-고정한 자동 중지 시각이 체크한 때와 같은지, 저장된 파일이 화면의 표와 같은지 확인한다. 다르면 그 조작과 직전 조작들을 보이고 멈춘다.
+실제 화면 코드로 탭 4 의 조작(케이스 추가, 삭제, 위로, 아래로, 시작 시각 입력(날짜 시각, +간격, 지우기), 적용 체크, 잡 종료 입력,
+다시 실행, 그리고 화면에서 고를 수 없는 시각 지정 화면의 조작)을 무작위 순서로 하고, 조작마다 적용 체크한 케이스의 시작 시각과
+'잡 시작 (환산)' 칸, 시각 지정의 값(간격, 잡 시작, 모니터링 중지, 잡 종료)이 체크한 때와 같은지, 저장된 파일이 화면의 표와 같은지
+확인한다. 다르면 그 조작과 직전 조작들을 보이고 멈춘다.
 v2.7 에서는 열 번 안팎의 조작에서 값이 바뀌었다(사용자 보고 2026-11-17 "적용완료된거 순서를 바꾸거나 하면 잡 시작 시간 다 꼬이면서").
 자동 시험(unittest discover)에는 포함하지 않는다.
 """
@@ -37,7 +38,7 @@ app.v_mode.set(T); app.mode_changed(); root.update()
 app.run_cmds.append({"app": "sim", "name": "job_a", "desc": "", "cmd": "/home/t/run_a.sh", "proc": "run_a.sh"}); app.autosave("run")
 app.mon_cmds.append({"app": "mon", "name": "gmon", "desc": "", "where": "VM", "start": "/home/t/mon.sh start", "stop": "/home/t/mon.sh stop"})
 app.autosave("mon")
-KEYS = ("interval", "start", "stop_mode", "stop_time", "end_time")
+KEYS = ("interval", "start", "stop_mode", "stop_time", "end_time", "seq_start")
 snap = {}          # 케이스 이름 -> (적용 체크한 때의 값, 고정한 자동 중지 시각 또는 None)
 log = []
 
@@ -71,6 +72,13 @@ def check(op):
             snap[n] = (want, c["applied_stop"])
         elif stop is not None:
             assert c.get("applied_stop") == stop, "after %s: fixed stop of %s changed %s -> %s" % (op, n, stop, c.get("applied_stop"))
+    if app.mode() == "seq":
+        # 적용 체크해 날짜 시각으로 고정된 케이스: '잡 시작 (환산)' 칸은 그 시각이고, 다른 행을 고쳐도 그대로다
+        for k, c in enumerate(app.cases):
+            ss = (c.get("seq_start") or "").strip()
+            if c.get("applied") and ss[:2] == "20":
+                assert app.seq_at_text(k) == ss[:16], "after %s: computed start of applied case %s is %s, fixed %s\n  ops %s" % (
+                    op, c["name"], app.seq_at_text(k), ss, log[-8:])
     if app.mode() == "time":
         for c, s in zip(app.cases, app.sched):
             if c.get("applied") and (c.get("stop_mode") or "auto") == "auto" and c.get("applied_stop"):
@@ -82,7 +90,7 @@ def check(op):
 
 for step in range(STEPS):
     op = rnd.choice(["add", "add", "add", "del", "up", "down", "up", "down", "start", "start", "interval", "tick", "tick", "end", "stop", "mode",
-                     "restart"])
+                     "restart", "sstart", "sstart", "sstart", "sstart"])
     i = pick()
     if i is None and op != "add":
         op = "add"
@@ -108,6 +116,9 @@ for step in range(STEPS):
         app.t_case.tree.selection_set(sel); app.move_row(-1 if op == "up" else 1)
     elif op == "start" and app.mode() == "time":
         app.commit_case(sel, "start", rtime())
+    elif op == "sstart" and app.mode() == "seq":
+        # 시작 시각 칸: 날짜 시각, +간격, 지우기. 적용 체크한 케이스는 고쳐지지 않아야 한다(확인은 check 가 한다)
+        app.commit_case(sel, "seq_start", rnd.choice((rtime(), rtime(), "+%d:00" % rnd.randint(1, 12), "+0:30", "")))
     elif op == "interval" and app.mode() == "time":
         app.commit_case(sel, "interval", rnd.choice(("", "8:00", "6:30", "12:00", "1:00")))
     elif op == "end":

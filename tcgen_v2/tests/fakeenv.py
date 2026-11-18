@@ -18,6 +18,7 @@ fakeenv.py - 순서 실행 시험용 가짜 환경 (시험 코드에서만 쓴�
 CronSim 은 VM 의 crontab.txt 와 ESX 의 cron/root 에 등록된 줄을 가상 시계의 그 분에 실행한다.
 VM 은 cronie 처럼 % 를 처리하고, ESX 는 busybox crond 처럼 cron.update 가 있을 때만 crontab 을 다시 읽는다.
 """
+import csv
 import datetime as dt
 import json
 import os
@@ -89,6 +90,9 @@ fi
 [ -f "$FAKE_ROOT/banner" ] && [ -z "$QUIET" ] && cat "$FAKE_ROOT/banner" >&2
 if [ -f "$d/deny" ]; then echo "deny $t" >> "$FAKE_ROOT/ssh_calls.txt"; echo "$t: Permission denied (publickey,password)." >&2; exit 255; fi
 echo "vm $t" >> "$FAKE_ROOT/ssh_calls.txt"
+# login_slow: the next login to this VM takes that many seconds before the command runs (a login that is ended while it
+# waits runs nothing on the VM)
+if [ -s "$d/login_slow" ]; then w=`cat "$d/login_slow"`; rm -f "$d/login_slow"; sleep "$w"; fi
 HOME=$d; FAKE_CRONTAB=$d/crontab.txt; FAKE_HOST=$h; FAKE_CLOCK_OFFSET=`cat "$d/clock_offset" 2>/dev/null`
 TCGEN_SYSROOT=$d/root
 export HOME FAKE_CRONTAB FAKE_HOST FAKE_CLOCK_OFFSET TCGEN_SYSROOT
@@ -130,8 +134,10 @@ case "$1" in
   -r) if [ -f "$F" ]; then rm -f "$F"; else echo "no crontab for user" >&2; exit 1; fi ;;
   -*) echo "crontab: bad option" >&2; exit 1 ;;
   *) awk 'NF && $1 !~ /^#/ && NF < 6 { bad = 1 } END { exit bad }' "$1" || { echo "crontab: errors in crontab file" >&2; exit 1; }
-     if [ -s "$HOME/crontab_slow" ]; then sleep "`cat "$HOME/crontab_slow"`"; rm -f "$HOME/crontab_slow"; fi
-     cat "$1" > "$F" ;;
+     # crontab_slow: the next crontab command of this VM takes that many seconds (it has read its file, then it hangs)
+     T=$F.in.$$; cat "$1" > "$T"
+     if [ -s "$HOME/crontab_slow" ]; then w=`cat "$HOME/crontab_slow"`; rm -f "$HOME/crontab_slow"; sleep "$w"; fi
+     cat "$T" > "$F"; rm -f "$T" ;;
 esac
 """
 
@@ -657,9 +663,10 @@ class FakeEnv(object):
     # ---- plan 과 tcrun
     def settings(self, **over):
         s = dict(core.DEFAULT_SETTINGS)
+        # 시험의 기본값: 모니터링 시작 1분 전, 설정 적용 10분 전, 구성 스냅샷 3분 전(가상 시계로 케이스 하나가 십몇 분 안에 끝나게)
         s.update(record_csv=os.path.join(self.root, "pc", "rec.csv"), log_dir=os.path.join(self.root, "pc"), run_mode="seq",
-                 jump_log_dir=self.log, mon_lead_min=1, seq_poll_sec=20, seq_first_check_sec=20, seq_gone_count=2, seq_start_wait_min=3,
-                 seq_boot_wait_min=5, seq_shutdown_wait_min=1, seq_settle_min=0, seq_gap_min=0, seq_snap_gap_min=0, seq_snap_lead_min=0)
+                 jump_log_dir=self.log, mon_lead_min=1, seq_boot_wait_min=5, seq_shutdown_wait_min=1,
+                 seq_prep_lead_min=10, seq_snap_lead_min=3)
         if self.jdir:
             s["jump_dir"] = self.jdir
         s.update(over)
@@ -694,6 +701,22 @@ class FakeEnv(object):
             return {}
         with open(p) as f:
             return dict(x.split("=", 1) for x in f.read().splitlines() if "=" in x)
+
+    def jobs_rows(self, run_id):
+        """등록 기록(<로그 폴더>/tcrun-<실행 ID>-jobs.csv)의 행."""
+        p = os.path.join(self.log, "tcrun-%s-jobs.csv" % run_id)
+        if not os.path.exists(p):
+            return []
+        with open(p, encoding="utf-8", newline="") as f:
+            return list(csv.DictReader(f))
+
+    def vm_logins(self):
+        """점프 VM 에서 VM 으로 ssh 접속한 횟수(가짜 ssh 가 적는 기록)."""
+        p = os.path.join(self.root, "ssh_calls.txt")
+        if not os.path.exists(p):
+            return 0
+        with open(p) as f:
+            return len([x for x in f.read().splitlines() if x.startswith("vm ")])
 
     def log_text(self, run_id, chain, suffix=".log"):
         p = os.path.join(self.log, "tcrun-%s-%s%s" % (run_id, chain, suffix))

@@ -6,8 +6,9 @@
 그림 저장 폴더를 주면 macOS 에서는 탭과 창마다 화면을 PNG 로 저장한다(창 내용을 같은 프로세스에서 그려 저장하므로
 화면 기록 권한이 필요 없다. 글자가 잘리는지는 이 그림을 열어 확인한다). 자동 시험(unittest discover)에는 포함하지 않는다.
 
-순서: 시각 지정 방식(v1.4 와 같은 화면)의 흐름을 먼저 보고, 순서 실행 방식(탭 3 설정 프로파일, 탭 4 의 설정과 최대 대기,
-탭 5 의 블록 A, P, S, D 와 실행 계획)을 본 뒤, 데이터 폴더와 다시 실행, v1 데이터 가져오기를 본다.
+순서: 화면에서 고를 수 없게 된 시각 지정 화면(v1.4 와 같은 화면. 코드가 남아 있어 점검만 한다)의 흐름을 먼저 보고, v2.12 의
+화면(탭 3 설정 프로파일, 탭 4 의 시작 시각과 잡 시작 (환산), 탭 5 의 블록 A, P, S, D, 타임라인, 실행 계획)을 본 뒤, 데이터 폴더와
+다시 실행, v1 데이터 가져오기를 본다. TCGEN_SOFT=1 을 주면 틀린 점검에서 멈추지 않고 FAIL 로 적는다(점검 스크립트를 고칠 때).
 """
 import csv
 import datetime as dt
@@ -55,10 +56,23 @@ appmod.open_folder = lambda p: LOG.append(("open", p))
 SHOTS = sys.argv[1] if len(sys.argv) > 1 else None
 
 
+SOFT = bool(os.environ.get("TCGEN_SOFT"))   # 점검 스크립트를 고칠 때: 틀린 점검에서 멈추지 않고 FAIL 로 적고 계속한다
+FAILED = []
+
+
 def check(cond, msg):
     if not cond:
-        raise AssertionError(msg)
+        if not SOFT:
+            raise AssertionError(msg)
+        FAILED.append(msg)
+        print("FAIL ", msg)
+        return
     print("ok  ", msg)
+
+
+def help_lines(app):
+    """열려 있는 [도움말] 창의 글(줄 목록)."""
+    return app.help_text.get("1.0", "end-1c").split("\n")
 
 
 def walk(w):
@@ -182,13 +196,14 @@ def main():
     check(appmod.TITLE == "테스트 실행 명령 생성기 v%s" % core.VERSION and root.title() == appmod.TITLE, "창 제목에 판 번호")
     check([app.nb.tab(i, "text") for i in range(5)] == ["1. 실행 명령", "2. 모니터링 명령", "3. 설정 프로파일", "4. 테스트 케이스",
                                                         "5. 생성 결과"], "탭 5개와 순서")
-    check(app.mode() == "seq" and app.v_mode.get() == "순서 실행", "진행 방식의 기본값은 순서 실행")
+    check(app.mode() == "seq", "진행 방식은 하나다(시작 시각에 잡 시작)")
     check(app.base == os.path.normpath(BASE) and not os.path.exists(os.environ["TCGEN_V1_DATA_DIR"]), "v1 데이터가 없으면 빈 화면으로 시작")
 
     # ---- 시각 지정 방식: v1.4 와 같은 화면과 동작 (아래 흐름은 v1.4 의 점검을 그대로 옮긴 것)
     app.v_mode.set("시각 지정")
     app.mode_changed()
-    check(core.load_settings(BASE)["run_mode"] == "time", "진행 방식을 바꾸면 settings.json 에 저장")
+    check(app.mode() == "time" and core.load_settings(BASE)["run_mode"] == "seq",
+          "(점검용) 화면에서 고를 수 없는 시각 지정 화면으로 전환. 설정 파일을 읽을 때는 언제나 한 가지 방식이다")
     vis = list(app.t_case.tree.cget("displaycolumns"))
     check("prof" not in vis and "max_wait" not in vis and "seq_start" not in vis and "power" not in vis
           and all(k in vis for k in ("interval", "start", "mon_start", "mon_stop", "end_time")),
@@ -612,7 +627,7 @@ def main():
     t.refresh("c0")
     app.show_help("4. 테스트 케이스", app.case_help)
     root.update()
-    helps = [w.cget("text") for w in walk(app.help_win) if isinstance(w, ttk.Label)]
+    helps = help_lines(app)
     check(any("적용 체크한 케이스는 등록한 기록으로 고정한다" in x for x in helps) and any("바로 윗줄이 적용 체크한 케이스인 행" in x for x in helps),
           "시각 지정의 탭 4 도움말에 적용 체크한 케이스의 고정 설명")
     check(app.help_win.winfo_reqheight() <= app.px(900), "시각 지정의 탭 4 도움말 창 높이 %d" % app.help_win.winfo_reqheight())
@@ -679,56 +694,64 @@ def main():
     press(top, "취소")
     check(not top.winfo_exists(), "취소로 닫힘")
 
-    # ---- 순서 실행 방식 (v2)
+    # ---- v2.12 의 화면(진행 방식은 하나다. 사용자 결정 2026-11-18): 시작 시각에 잡 시작, 타임라인, 블록 A, P, S, D
     n_log = len(LOG)
     app.v_mode.set("순서 실행")
     app.mode_changed()
     root.update()
-    check(core.load_settings(BASE)["run_mode"] == "seq" and app.result is None, "순서 실행으로 바꾸면 저장하고 앞 결과를 비움")
+    check(core.load_settings(BASE)["run_mode"] == "seq" and app.result is None, "앞 결과를 비움")
+    check(app.cb_mode.winfo_manager() == "" and not any(isinstance(w, ttk.Label) and w.cget("text") == "진행 방식" for w in walk(root)),
+          "설정 영역에 진행 방식 칸이 없음")
     vis = list(app.t_case.tree.cget("displaycolumns"))
-    check(vis == ["name", "desc", "esx", "power", "job", "mon", "prof", "max_wait", "seq_start", "group", "end_ref"],
-          "순서 실행: 탭 4 에서 간격, 잡 시작, 모니터링 시작, 모니터링 중지, 잡 종료 (리포트) 열을 숨김 %s" % vis)
+    check(vis == ["name", "desc", "esx", "power", "job", "mon", "prof", "max_wait", "seq_start", "seq_at", "group", "end_time", "end_ref"],
+          "탭 4 의 열: 시작 시각 옆에 잡 시작 (환산) %s" % vis)
+    heads = [app.t_case.tree.heading(c["key"], "text") for c in app.t_case.columns if c["key"] in vis]
+    check(heads[8:10] == ["시작 시각", "잡 시작 (환산)"], "열 제목 %s" % heads)
     check(app.blk_vm.frame.cget("text").startswith("P. 점검 블록") and app.blk_esx.frame.cget("text").startswith("S. 실행 블록"),
-          "순서 실행: 탭 5 의 블록은 A, P, S, D")
+          "탭 5 의 블록은 A, P, S, D")
     check(app.f_seq.winfo_manager() == "pack" and app.f_time.winfo_manager() == "" and app.row_seq.winfo_manager() == "pack"
-          and app.lf_plan.winfo_manager() == "grid" and app.esx_pick.winfo_manager() == "",
-          "순서 실행: 점프 VM 로그 폴더, ESX 접속 주소, VM 다시 켠 뒤 대기 칸과 실행 계획 칸이 보임")
-    check("순서 실행" in app.case_hint.cget("text") and "P(점검)" in app.result_hint.cget("text"), "탭 4, 탭 5 의 안내 글이 진행 방식에 맞게 바뀜")
+          and app.lf_tl.winfo_manager() == "grid" and app.esx_pick.winfo_manager() == "" and app.btn_plan.winfo_manager() == "pack",
+          "설정 영역의 잡 시작 기준 칸, 탭 5 의 타임라인과 [실행 계획 보기] 가 보임")
+    labels = [w.cget("text") for w in walk(app.f_seq) if isinstance(w, ttk.Label)]
+    check(labels == ["잡 시작 기준:", "설정 적용", "분 전", "구성 스냅샷", "분 전", "모니터링 시작", "분 전", "잡 시작 최소 간격", "분"],
+          "설정 영역: 잡 시작 기준 세 칸(타임라인과 같은 순서)과 잡 시작 최소 간격 %s" % labels)
+    gone = [x for x in ("변경 작업 뒤", "스냅샷 뒤", "케이스 사이 간격", "잡 종료 확인 간격", "시작 시각 준비", "프로세스")
+            if any(isinstance(w, (ttk.Label, ttk.Button)) and x in str(w.cget("text")) for w in walk(root))]
+    check(gone == [], "v2.12 에서 뺀 칸과 글이 화면에 없음 %s" % gone)
+    check("순서 실행" not in app.case_hint.cget("text") and "잡 시작 (환산)" in app.case_hint.cget("text")
+          and "P(점검)" in app.result_hint.cget("text"), "탭 4, 탭 5 의 안내 글")
     app.show_help("4. 테스트 케이스", app.case_help)
-    helps = [w.cget("text") for w in walk(last_toplevel(root)) if isinstance(w, ttk.Label)]
-    check(any("표의 순서대로 진행한다" in x for x in helps) and any("최대 대기" in x for x in helps)
-          and any("시작 시각: 잡을 시작할 시각을 적는다" in x and "입력 필요" in x for x in helps)
-          and any("'자동' 이라고 적으면 프로세스 확인 방식" in x and "케이스 사이 간격" in x for x in helps),
-          "탭 4 도움말이 순서 실행 내용으로 바뀜(시작 시각을 적는 것이 기본, 자동은 따로 적을 때만)")
+    root.update()
+    helps = help_lines(app)
+    check(any(x == "시작 시각" for x in helps) and any("+간격: 표의 바로 윗줄 케이스의 시작 시각에서 그만큼 뒤다" in x for x in helps)
+          and any("잡 시작 (환산): 시작 시각 칸의 값으로 계산한 잡 시작 시각이다" in x for x in helps)
+          and any("설정 변경이 없는 케이스: S 블록을 붙여넣은 직후에 crontab 에 잡을 등록한다" in x for x in helps)
+          and any("설정 변경이 있는 케이스: 잡 시작 30분 전에 VM 종료, 설정 적용, VM 전원 ON" in x for x in helps),
+          "탭 4 도움말: 시작 시각, +간격(바로 윗줄), 환산 칸, 잡 시작 전에 하는 일")
+    check(not any(w in x for x in helps for w in ("자동", "프로세스", "케이스 사이 간격", "순서 실행")), "도움말에 뺀 기능의 설명이 없음")
+    check(max(len(x) for x in helps) <= 190, "도움말의 한 항목은 190자 이하 (%d)" % max(len(x) for x in helps))
+    check(app.help_win.winfo_height() <= app.px(760), "도움말 창은 화면보다 길어지지 않고 스크롤로 본다 (%d)" % app.help_win.winfo_height())
     shot_window(root, "도움말", "tcgen_seq_help4.png")
     last_toplevel(root).destroy()
 
-    # 설정 영역: 점프 VM 로그 폴더, ESX 접속 주소, VM 다시 켠 뒤 잡 시작까지 최소 분
+    # 설정 영역: 점프 VM 로그 폴더, ESX 접속 주소, 잡 시작 기준 분
     app.v_jlog.set("/data/tcgen_log")
     app.v_addr.set("esx01=10.0.0.11")
-    app.v_settle.set("15")
+    app.v_prep.set("40")
     st = core.load_settings(BASE)
-    check((st["jump_log_dir"], st["esx_addr"], st["seq_settle_min"]) == ("/data/tcgen_log", "esx01=10.0.0.11", 15),
-          "순서 실행 설정도 바뀌자마자 settings.json 에 저장")
-    app.v_settle.set("")
-    check(core.load_settings(BASE)["seq_settle_min"] == 15, "분 칸을 비운 동안에는 저장하지 않음")
-    app.v_settle.set("10")
+    check((st["jump_log_dir"], st["esx_addr"], st["seq_prep_lead_min"]) == ("/data/tcgen_log", "esx01=10.0.0.11", 40),
+          "설정은 바뀌자마자 settings.json 에 저장")
+    app.v_prep.set("")
+    check(core.load_settings(BASE)["seq_prep_lead_min"] == 40, "분 칸을 비운 동안에는 저장하지 않음")
+    app.v_prep.set("30")
+    check(core.load_settings(BASE)["seq_prep_lead_min"] == 30, "다시 적으면 저장")
 
-    # 탭 1: 프로세스 이름
+    # 탭 1: 프로세스 이름 열이 없다(잡이 끝났는지 확인하지 않는다)
     app.nb.select(0)
     root.update()
-    ci = col_of(app.t_run, "proc")
-    app.t_run.start_edit(0, ci)
-    check(app.t_run.editor is not None and app.t_run.editor[3] == "proc", "탭 1 프로세스 이름 칸 편집")
-    app.t_run.editor[1].set("run_a.sh")
-    app.t_run.finish_edit()
-    app.commit_run(1, "proc", "run_b.sh -n 4")
-    n_log = len(LOG)
-    app.commit_run(1, "proc", "it's bad!")
-    check(app.run_cmds[1]["proc"] == "run_b.sh -n 4" and any(x[0] == "error" and "작은따옴표" in x[1] for x in LOG[n_log:]),
-          "프로세스 이름에 쓸 수 없는 글자는 거부")
+    check([c["key"] for c in app.t_run.columns] == ["app", "name", "desc", "cmd"], "탭 1 의 열: App명, 명령어 명, 잡 조건 설명, 경로/실행 명령")
     saved_run = core.load_rows(os.path.join(BASE, core.RUN_FILE), core.RUN_FIELDS, core.RUN_HEADERS)
-    check([r["proc"] for r in saved_run] == ["run_a.sh", "run_b.sh -n 4"], "프로세스 이름도 run_commands.csv 에 자동 저장")
+    check([r["name"] for r in saved_run] == ["job_a", "job_b4"], "run_commands.csv 의 형식은 그대로다(프로세스 이름 열은 빈 채로 남는다)")
     shot(root, app, 0, "tcgen_seq_tab1.png")
 
     # 탭 3: 처음 실행하면 기본 프로파일 12개가 들어 있다. [기본 프로파일 추가] 는 표에 없는 이름만 다시 추가한다.
@@ -847,7 +870,7 @@ def main():
     n_log = len(LOG)
     app.commit_case("c1", "max_wait", "soon")
     check(app.cases[1]["max_wait"] == "12:00" and any(x[0] == "error" and "최대 대기" in x[1] for x in LOG[n_log:]), "잘못된 최대 대기 거부")
-    check(cell_of(t, "c2", "max_wait") == "제한 없음" and cell_of(t, "c1v0", "max_wait") == "", "최대 대기를 비우면 제한 없음, VM 행은 빈칸")
+    check(cell_of(t, "c2", "max_wait") == "" and cell_of(t, "c1v0", "max_wait") == "", "최대 대기를 비우면 빈칸, VM 행도 빈칸")
     double("c1", "prof")
     top = last_toplevel(root)
     texts = [w.cget("text") for w in walk(top) if isinstance(w, ttk.Checkbutton)]
@@ -871,107 +894,108 @@ def main():
           "설정과 최대 대기도 test_cases.json 에 자동 저장")
     t.refresh("c1")
     times = [(c["start"], c["interval"]) for c in app.cases]          # + 케이스 추가는 아래 행의 잡 시작을 다시 계산한다(시각 지정용 값)
+    seq_saved = _copy.deepcopy(app.cases)
+
+    def at(iid):
+        return cell_of(t, iid, "seq_at")
+
+    def fmt_at(d):
+        return d.strftime("%Y-%m-%d %H:%M")
+
+    # ---- 시작 시각과 '잡 시작 (환산)' (사용자 2026-11-18 "시작시간 +10 +8 등으로 입력하면 옆칸에 시작 시각 환산되어서 나오면 좋겠고")
+    check(cell_of(t, "c1", "seq_start") == "입력 필요" and app.cases[1]["seq_start"] == "" and at("c1") == "",
+          "적지 않은 시작 시각 칸은 '입력 필요' 로 보이고 환산 칸은 비어 있음")
+    check(re.fullmatch(r"\d{4}-\d\d-\d\d \d\d:00:00", app.cases[0]["seq_start"]) and at("c0") == app.cases[0]["seq_start"][:16],
+          "새 표의 첫 케이스에는 다음 정시가 들어 있고 환산 칸에 같은 시각 %r" % app.cases[0]["seq_start"])
+    check(app.case_kind("c1", {"key": "seq_at"}) == "readonly" and app.case_kind("c1", {"key": "seq_start"}) == "entry",
+          "환산 칸은 고칠 수 없고 시작 시각 칸을 고친다")
+    t0 = core.parse_dt(app.cases[0]["seq_start"])
     app.commit_case("c1", "seq_start", "+8.0")
-    t.refresh("c1")
-    check(app.cases[1]["seq_start"] == "+8:00" and cell_of(t, "c1", "seq_start") == "+8:00",
-          "시작 시각에 +간격: '+8.0' 은 '+8:00' 으로 저장(앞 케이스 시작 8시간 뒤)")
+    check(app.cases[1]["seq_start"] == "+8:00" and cell_of(t, "c1", "seq_start") == "+8:00" and at("c1") == fmt_at(t0 + dt.timedelta(hours=8)),
+          "+간격: '+8.0' 은 '+8:00' 으로 저장하고, 환산 칸에 바로 윗줄 시작 + 8시간 (%s)" % at("c1"))
+    app.commit_case("c2", "seq_start", "+10")
+    check(at("c2") == fmt_at(t0 + dt.timedelta(hours=18)), "아래 줄의 +10:00 은 그 윗줄(+8:00 으로 계산한 시각) 기준 (%s)" % at("c2"))
+    app.commit_case("c1", "seq_start", "2031/01/02 03:04")
+    check(app.cases[1]["seq_start"] == "2031-01-02 03:04:00" and at("c1") == "2031-01-02 03:04" and at("c2") == "2031-01-02 13:04",
+          "윗줄의 시각을 고치면 아래 줄의 환산 시각이 따라 변경됨 (%s)" % at("c2"))
     n_log = len(LOG)
-    app.commit_case("c1", "seq_start", "+0")
-    check(app.cases[1]["seq_start"] == "+8:00" and any(x[0] == "error" and "+8:00" in x[1] for x in LOG[n_log:]), "0 인 간격은 거부하고 형식을 알림")
+    app.commit_case("c2", "seq_start", "+0")
+    check(app.cases[2]["seq_start"] == "+10:00" and any(x[0] == "error" and "시작 시각 칸" in x[1] and "바로 윗줄" in x[1] for x in LOG[n_log:]),
+          "0 인 간격은 거부하고 적는 방법을 알림")
+    n_log = len(LOG)
+    app.commit_case("c2", "seq_start", "자동")
+    check(app.cases[2]["seq_start"] == "+10:00" and any(x[0] == "error" and "'자동' 은 쓸 수 없음" in x[1] for x in LOG[n_log:]),
+          "'자동' 은 받지 않음(프로세스 확인 방식은 뺐다)")
+    n_log = len(LOG)
+    app.commit_case("c2", "seq_start", "soon")
+    check(app.cases[2]["seq_start"] == "+10:00" and any(x[0] == "error" and "날짜 시각(2026-11-20 10:00:00)" in x[1] for x in LOG[n_log:]),
+          "형식이 맞지 않는 시작 시각은 거부")
+    app.commit_case("c1", "seq_start", "9:05")
+    hm = dt.datetime.strptime(app.cases[1]["seq_start"], "%Y-%m-%d %H:%M:%S")
+    check((hm.hour, hm.minute) == (9, 5) and dt.timedelta(0) < hm - dt.datetime.now() <= dt.timedelta(days=1) and at("c1") == fmt_at(hm),
+          "시:분만 적으면 지금부터 처음 오는 그 시각으로 날짜를 붙여 저장 %s" % app.cases[1]["seq_start"])
+    app.commit_case("c1", "seq_start", "")
+    check(cell_of(t, "c1", "seq_start") == "입력 필요" and at("c1") == "" and at("c2") == "계산 불가",
+          "윗줄을 지우면 아래 줄의 +간격은 '계산 불가' 로 보임")
+    check(core.load_cases(BASE)[2]["seq_start"] == "+10:00", "시작 시각은 적은 그대로 자동 저장")
+    jv, nv = [{"name": "v1", "job": "job_a"}], [{"name": "v1", "job": "(없음)", "profiles": ["pin"]}]
+    check(app.seq_start_text({"applied": True, "seq_start": "", "vms": jv}) == ""
+          and app.seq_start_text({"applied": False, "seq_start": "", "vms": jv}) == "입력 필요"
+          and app.seq_start_text({"seq_start": "자동", "vms": jv}) == "입력 필요"
+          and app.seq_start_text({"seq_start": "+8:00", "vms": jv}) == "+8:00" and app.seq_start_text({"seq_start": "", "vms": nv}) == "",
+          "'입력 필요' 는 잡이 있고 적용 체크하지 않은 케이스의 빈 칸(예전 판의 '자동' 포함)에만 보임")
+    # + 케이스 추가: +간격은 복사하고 시각은 비운다. 가운데에 넣으면 아래 줄의 환산 시각이 그만큼 밀린다
+    app.commit_case("c1", "seq_start", "+8")
+    t.refresh("c1")
+    before = at("c2")
     app.add_case()
+    t.finish_edit(commit=False)
     check(app.cases[2]["name"] == "TC-base-b4-r2" and app.cases[2]["esx_profiles"] == ["numa0"]
-          and app.cases[2]["vms"][0]["profiles"] == ["pin", "aff"] and app.cases[2]["max_wait"] == "12:00",
-          "+ 케이스 추가: 설정과 최대 대기도 복사")
-    check(app.cases[2]["seq_start"] == "+8:00", "+ 케이스 추가: +간격인 시작 시각은 복사(시각은 복사하지 않음)")
-    app.cases[1]["seq_start"] = app.cases[2]["seq_start"] = ""       # 선택(새 케이스)을 바꾸지 않고 되돌린다
-    app.mark_cases()
-    t.refresh()
+          and app.cases[2]["vms"][0]["profiles"] == ["pin", "aff"] and app.cases[2]["max_wait"] == "12:00" and app.cases[2]["seq_start"] == "+8:00",
+          "+ 케이스 추가: 설정, 최대 대기, +간격을 복사")
+    check(at("c2") == fmt_at(t0 + dt.timedelta(hours=16)) and at("c3") == fmt_at(t0 + dt.timedelta(hours=26)) and at("c3") != before,
+          "가운데에 케이스를 넣으면 아래 줄은 새 윗줄 기준으로 계산됨 (%s, %s)" % (at("c2"), at("c3")))
     app.move_row(-1)
     check([c["name"] for c in app.cases[:3]] == ["TC-base-a", "TC-base-b4-r2", "TC-base-b4"]
-          and app.cases[2]["start"] == "2030-01-15 13:00:00", "순서 실행에서 위로: 케이스의 값이 모두 케이스를 따라감")
+          and app.cases[2]["start"] == "2030-01-15 13:00:00", "위로: 케이스의 값이 모두 케이스를 따라감")
     app.move_row(1)
     app.del_row()
-    check([c["name"] for c in app.cases] == ["TC-base-a", "TC-base-b4", "TC-base-a-r3"], "추가한 케이스 삭제")
+    check([c["name"] for c in app.cases] == ["TC-base-a", "TC-base-b4", "TC-base-a-r3"] and at("c2") == before, "추가한 케이스 삭제: 환산 시각이 되돌아옴")
     for c, (st0, iv0) in zip(app.cases, times):                       # 뒤의 시각 지정 점검을 위해 시각 값을 되돌린다
         c["start"], c["interval"] = st0, iv0
     app.mark_cases()
     t.refresh("c1")
-    # 시작 시각 칸: 직접 적는 것이 기본이다. 적지 않은 칸은 '입력 필요' 로 보이고, 프로세스 확인 방식은 '자동' 이라고 적을 때만 쓴다
-    # (사용자 2026-11-17 "프로세스 체크해서 다음 작업 실행하는 기능은 부하때문에 주로 안쓸꺼같아 ... 기본 UI 에 반영")
-    check(cell_of(t, "c1", "seq_start") == "입력 필요" and app.cases[1]["seq_start"] == "", "적지 않은 시작 시각 칸은 '입력 필요' 로 보임")
-    check(re.fullmatch(r"\d{4}-\d\d-\d\d \d\d:00:00", app.cases[0]["seq_start"]) and cell_of(t, "c0", "seq_start") == app.cases[0]["seq_start"],
-          "새 표의 첫 케이스에는 시작 시각에 다음 정시가 들어 있음 %r" % app.cases[0]["seq_start"])
-    jv, nv = [{"name": "v1", "job": "job_a"}], [{"name": "v1", "job": "(없음)", "profiles": ["pin"]}]
-    check(app.seq_start_text({"applied": True, "seq_start": "", "vms": jv}) == ""
-          and app.seq_start_text({"applied": False, "seq_start": "", "vms": jv}) == "입력 필요"
-          and app.seq_start_text({"seq_start": "+8:00", "vms": jv}) == "+8:00", "적용 체크한 케이스의 빈 시작 시각 칸은 비워 보임")
-    check(app.seq_start_text({"seq_start": "", "vms": nv}) == "" and app.seq_start_text({"seq_start": "자동", "vms": nv}) == "자동"
-          and app.seq_start_text({"seq_start": "자동", "vms": jv}) == "자동 (잡 확인)",
-          "잡이 없는 케이스(설정과 VM 전원만 맞춤)는 시작 시각을 쓰지 않으므로 빈 칸을 '입력 필요' 로 보이지 않음")
-    pick4 = [{"name": "j", "seq_start": "", "vms": jv}, {"name": "s", "seq_start": "", "vms": nv},
-             {"name": "a", "seq_start": "자동", "vms": jv}, {"name": "sa", "seq_start": "자동", "vms": nv}, {"name": "t", "seq_start": "10:00", "vms": jv}]
-    check(app.seq_unset_names(pick4, {0, 1, 2, 3, 4}) == ["j"] and app.seq_unset_names(pick4, {1, 2, 3, 4}) == []
-          and app.seq_auto_names(pick4, {0, 1, 2, 3, 4}) == ["a"],
-          "생성을 막는 것은 잡이 있는데 시작 시각이 빈 케이스뿐. 자동 경고도 잡이 있는 케이스만")
-    n_log = len(LOG)
-    app.generate_picked([1, 2])
-    root.update()
-    check(app.result is None and any(x[0] == "error" and "시작 시각이 비어 있는 케이스 2개: TC-base-b4, TC-base-a-r3" in x[1]
-                                     and "'자동' 이라고 적는다" in x[1] for x in LOG[n_log:]),
-          "시작 시각이 빈 케이스가 있으면 만들지 않고 알림(빈 칸을 자동으로 넘기지 않음)")
-    app.nb.select(3)
-    app.commit_case("c1", "seq_start", "9:05")
-    t.refresh("c1")
-    at = dt.datetime.strptime(app.cases[1]["seq_start"], "%Y-%m-%d %H:%M:%S")
-    check((at.hour, at.minute) == (9, 5) and dt.timedelta(0) < at - dt.datetime.now() <= dt.timedelta(days=1)
-          and cell_of(t, "c1", "seq_start") == app.cases[1]["seq_start"],
-          "시:분만 적으면 지금부터 처음 오는 그 시각으로 날짜를 붙여 저장 %s" % app.cases[1]["seq_start"])
-    typed = app.cases[1]["seq_start"]
-    n_log = len(LOG)
-    app.commit_case("c1", "seq_start", "soon")
-    check(app.cases[1]["seq_start"] == typed and any(x[0] == "error" and "시작 시각" in x[1] and "'자동' 이라고 적는다" in x[1]
-                                                     for x in LOG[n_log:]), "형식이 맞지 않는 시작 시각은 거부")
-    app.commit_case("c2", "seq_start", "2031/01/02 03:04")
-    check(app.cases[2]["seq_start"] == "2031-01-02 03:04:00", "날짜까지 적은 시작 시각")
-    app.commit_case("c2", "seq_start", "자동")
-    t.refresh("c2")
-    check(app.cases[2]["seq_start"] == "자동" and cell_of(t, "c2", "seq_start") == "자동 (잡 확인)",
-          "'자동' 이라고 적으면 프로세스 확인 방식: '자동 (잡 확인)' 으로 보임")
-    app.commit_case("c2", "seq_start", "")
-    t.refresh("c2")
-    check(app.cases[2]["seq_start"] == "" and cell_of(t, "c2", "seq_start") == "입력 필요", "지우면 다시 '입력 필요'")
-    app.commit_case("c2", "seq_start", "자동 (잡 확인)")
-    check(app.cases[2]["seq_start"] == "자동", "칸에 보이는 글 그대로 적어도 자동")
-    check(core.load_cases(BASE)[1]["seq_start"] == typed and core.load_cases(BASE)[2]["seq_start"] == "자동", "시작 시각도 자동 저장")
-    t.refresh("c1")
-    check(app.v_gap.get() == "30" and app.row_seq2.winfo_manager() == "pack", "설정 영역의 케이스 사이 간격 기본값은 30분")
-    app.v_gap.set("45")
-    check(core.load_settings(BASE)["seq_gap_min"] == 45, "케이스 사이 간격을 바꾸면 저장")
-    app.v_gap.set("30")
-    check(app.v_poll.get() == "30" and core.load_settings(BASE)["seq_poll_sec"] == 1800, "잡 종료 확인 간격의 기본값은 30분(1800초)")
-    app.v_poll.set("60")
-    check(core.load_settings(BASE)["seq_poll_sec"] == 3600, "잡 종료 확인 간격을 분으로 바꾸면 초로 저장")
-    n_log = len(LOG)
-    app.v_poll.set("0")
-    check(app.current_settings() is None and any(x[0] == "error" and "잡 종료 확인 간격" in x[1] for x in LOG[n_log:])
-          and core.load_settings(BASE)["seq_poll_sec"] == 3600, "잡 종료 확인 간격은 1분 이상")
-    app.v_poll.set("30")
-    check(core.load_settings(BASE)["seq_poll_sec"] == 1800, "30분으로 되돌림")
-    check((app.v_spacing.get(), app.v_prep.get()) == ("5", "60"), "잡 시작 최소 간격 기본 5분, 시작 시각 준비 기본 60분")
+    # 적용 체크한 케이스의 값은 다른 행을 고쳐도 변경되지 않는다(계획과 기록을 함께 담는 표. 사용자 지시 2026-11-17)
+    fixed0 = (app.cases[0]["seq_start"], at("c0"))
+    app.commit_case("c1", "seq_start", "2031-05-05 05:00")
+    app.commit_case("c2", "seq_start", "+1")
+    check((app.cases[0]["seq_start"], at("c0")) == fixed0, "다른 행을 고쳐도 적용 체크한 케이스의 시작 시각과 환산 시각은 그대로")
+    app.commit_case("c1", "seq_start", "+8")
+    app.commit_case("c2", "seq_start", "+10")
+
+    # 설정 영역의 값
+    check((app.v_prep.get(), app.v_snaplead.get(), app.v_mon.get(), app.v_spacing.get()) == ("30", "10", "5", "5"),
+          "기본값: 설정 적용 30분 전, 구성 스냅샷 10분 전, 모니터링 시작 5분 전, 잡 시작 최소 간격 5분")
     check(app.v_jdir.get() == "" and app.jump_dir_text() == "~/.tcgen", "점프 VM 작업 폴더 기본값(비우면 ~/.tcgen)")
     app.v_jdir.set("/data/tcgen")
     check(core.load_settings(BASE)["jump_dir"] == "/data/tcgen" and app.jump_dir_text() == "/data/tcgen", "작업 폴더를 바꾸면 저장")
     app.v_jdir.set("")
     app.v_spacing.set("8")
-    app.v_prep.set("45")
+    app.v_snaplead.set("12")
     st = core.load_settings(BASE)
-    check((st["seq_start_spacing_min"], st["seq_prep_lead_min"]) == (8, 45), "두 칸도 바꾸면 저장")
+    check((st["seq_start_spacing_min"], st["seq_snap_lead_min"]) == (8, 12), "분 칸을 바꾸면 저장")
     n_log = len(LOG)
     app.v_spacing.set("0")
-    check(app.current_settings() is None and any(x[0] == "error" and "잡 시작 최소 간격" in x[1] for x in LOG[n_log:]),
-          "잡 시작 최소 간격은 1분 이상")
+    check(app.current_settings() is None and any(x[0] == "error" and "'잡 시작 최소 간격' 은 1 이상의 정수로 입력" in x[1] for x in LOG[n_log:]),
+          "잡 시작 최소 간격은 1분 이상(오류 문구에 화면의 칸 이름)")
     app.v_spacing.set("5")
-    app.v_prep.set("60")
+    app.v_snaplead.set("")
+    check(app.current_settings(show_error=False) is None and core.load_settings(BASE)["seq_snap_lead_min"] == 12,
+          "분 칸을 비운 동안에는 설정을 쓰지 않음")
+    app.v_snaplead.set("10")
+    app.v_gcmd.set("  bash /nas/perf/guest_config_push.sh   --target auto ")
+    check(core.load_settings(BASE)["seq_guest_cmd"] == "bash /nas/perf/guest_config_push.sh --target auto",
+          "스냅샷 때 VM 에서 실행할 명령을 저장 (앞뒤와 겹친 공백은 정리)")
     check(cell_of(t, "c1v1", "power") == "켬" and t.kind("c1v1", col_of(t, "power")) == "combo"
           and t.kind("c1", col_of(t, "power")) == "readonly" and cell_of(t, "c1", "power") == "",
           "VM 행의 전원 칸은 켬, 끔을 고르는 칸. 케이스 행은 비어 있음")
@@ -984,56 +1008,81 @@ def main():
     t.refresh("c1")
     shot(root, app, 3, "tcgen_seq_tab4.png")
 
-    # 생성: 블록 A, P, S, D 와 실행 계획
+    # ---- 생성. 오류와 알림은 한 줄이고 화면의 칸 이름을 쓴다(사용자 지적 2026-11-18)
+    app.commit_case("c2", "seq_start", "")
+    n_log = len(LOG)
+    app.generate_picked([1, 2])
+    root.update()
+    shown = app.res_text.get("1.0", "end-1c").split("\n")
+    check(app.result is None and shown[0] == "오류 1건. 블록과 기록을 만들지 않았음. 고친 뒤 다시 생성할 것."
+          and shown[1] == "오류: 3번째 케이스 TC-base-a-r3: 시작 시각 칸이 비어 있음. 시각(예: 2026-11-20 10:00)이나 +간격(예: +10:00)을 적을 것"
+          and app.blk_esx.get("1.0", "end-1c") == "" and app.plan_text.get("1.0", "end-1c") == "",
+          "시작 시각이 빈 케이스가 있으면 만들지 않고 한 줄로 알림 %s" % shown[:2])
+    app.commit_case("c2", "seq_start", "+10")
+    app.cases[1]["vms"][0]["job"] = app.cases[1]["vms"][1]["job"] = app.cases[1]["vms"][2]["job"] = "(없음)"
+    n_log = len(LOG)
+    gen(app, root)
+    check(app.result is None and any(x[0] == "error" and "모니터링만 있고 잡이 없음" in x[1] for x in LOG[n_log:]),
+          "모니터링만 있고 잡이 없는 케이스는 오류")
+    for k, jn in enumerate(("job_a", "job_a", "job_b4")):
+        app.cases[1]["vms"][k]["job"] = jn
+    app.mark_cases()
     n_gen = len(LOG)
     gen(app, root)
     res = app.result
-    check(res is not None and res["mode"] == "seq" and not res["errors"], "순서 실행으로 명령어 생성 성공")
+    check(res is not None and res["mode"] == "seq" and not res["errors"], "명령어 생성 성공")
+    check(not any(x[0] == "ask" for x in LOG[n_gen:]), "경고가 없으면 생성 전에 묻는 창이 없음 %s" % [x for x in LOG[n_gen:] if x[0] == "ask"])
     check(app.nb.index(app.nb.select()) == 4, "생성하면 탭 5 로 이동")
     check(app.blk_setup.get("1.0", "end-1c") == res["setup"] and "tcgen_apply.py" in res["setup"], "A 블록: tcrun 과 설정 적용 스크립트 포함")
     check(app.blk_vm.get("1.0", "end-1c") == res["check"] and app.blk_esx.get("1.0", "end-1c") == res["run"], "P 블록, S 블록 표시")
     check(app.blk_wipe.get("1.0", "end-1c") == res["vm_wipe"], "D 블록 표시")
-    check(app.plan_text.get("1.0", "end-1c") == res["plan_view"] and "- 잡 확인 함:" in res["plan_view"]
-          and "   잡 확인: 함(다음 케이스가 자동이라 잡 종료를 알아야 함). 최대 대기 12:00" in res["plan_view"],
-          "실행 계획 글 표시(시각을 적은 케이스도 다음 케이스가 자동이면 확인한다고 알림)")
+    shown = app.res_text.get("1.0", "end-1c").split("\n")
+    check(shown[2] == "실행 ID %s. 케이스 2개, 선택 창에서 뺀 케이스 1개. ESX 호스트: esx01" % res["run_id"]
+          and shown[3] == "S 블록을 붙여넣은 뒤 crontab 등록 결과: 점프 VM 의 /data/tcgen_log/tcrun-%s-jobs.csv" % res["run_id"],
+          "결과 글: 실행 ID 와 등록 기록 파일 %s" % shown[2:4])
+    check(not any("순서 실행" in x or "잡 종료를 확인" in x or "잡 확인" in x for x in shown), "결과 글에 뺀 기능의 안내가 없음")
+    check(max(len(x) for x in shown) <= 200, "결과 글의 줄은 200자 이하 (%d)" % max(len(x) for x in shown))
+    # 타임라인 표(사용자 2026-11-18): 열은 시점, 줄은 설정 변경이 없는 케이스와 있는 케이스
+    tl = [[w.cget("text") for w in sorted(app.tl_grid.grid_slaves(row=r), key=lambda w: int(w.grid_info()["column"]))] for r in range(3)]
+    check(tl[0] == ["S 블록 실행 직후", "T-30분", "T-10분", "T-5분", "T", "잡 실행 중", "다음 케이스의 T-32분"], "타임라인의 열 %s" % tl[0])
+    check(tl[1] == ["설정 변경이 없는 케이스", "crontab 에 잡 등록", "-", "구성 스냅샷, VM 에서 명령 실행", "모니터링 시작", "잡 시작", "VM 접속 없음",
+                    "모니터링 중지"], "타임라인: 설정 변경이 없는 케이스 %s" % tl[1])
+    check(tl[2] == ["설정 변경이 있는 케이스", "-", "VM 종료 -> 설정 적용 -> VM 전원 ON -> crontab 에 잡 등록", "구성 스냅샷, VM 에서 명령 실행",
+                    "모니터링 시작", "잡 시작", "VM 접속 없음", "모니터링 중지"], "타임라인: 설정 변경이 있는 케이스 %s" % tl[2])
+    note = app.tl_note.cget("text")
+    check(app.tl_note.winfo_manager() == "pack" and "실행을 시작할 때 호스트와 비교하는 케이스(값이 다르면 괄호 안의 시각에 변경): esx01 TC-base-b4 (" in note
+          and "설정이 앞 케이스와 다른 케이스(괄호 안의 시각에 VM 종료): esx01 TC-base-a-r3 (" in note, "타임라인 아래에 설정을 비교하는 케이스와 시각 %r" % note)
+    check(app.plan_text.get("1.0", "end-1c") == res["plan_view"] and "[타임라인]  T = 케이스의 잡 시작 시각" in res["plan_view"]
+          and "   설정과 VM 전원: 앞 케이스와 다르다." in res["plan_view"], "실행 계획 글")
     heads = [app.plan_text.get(a, b) for a, b in zip(*[iter(app.plan_text.tag_ranges("plan_head"))] * 2)]
     cases = [app.plan_text.get(a, b) for a, b in zip(*[iter(app.plan_text.tag_ranges("plan_case"))] * 2)]
-    check(heads[:2] == ["[공통 규칙]", "[ESX 호스트 esx01] 접속 주소 10.0.0.11, 케이스 2개"] and cases[0].startswith("1. "),
+    check(heads[:2] == ["[타임라인]  T = 케이스의 잡 시작 시각", "[ESX 호스트 esx01] 접속 주소 10.0.0.11, 케이스 2개"] and cases[0].startswith("1. "),
           "실행 계획의 제목 줄과 케이스 줄을 굵게 %s %s" % (heads, cases))
-    app.open_plan_window()
+    press(root, "실행 계획 보기")
     root.update()
     top = app.plan_window
     texts = [w for w in walk(top) if isinstance(w, tk.Text)]
     check(top.winfo_exists() and texts and texts[0].get("1.0", "end-1c") == res["plan_view"] and texts[0].cget("wrap") == "word",
-          "[크게 보기] 는 실행 계획을 큰 창에 줄을 접어 보인다")
+          "[실행 계획 보기] 는 실행 계획을 큰 창에 줄을 접어 보인다(탭 5 의 칸이 좁아 숨겨져도 볼 수 있다)")
     shot_window(root, "실행 계획", "tcgen_seq_plan_window.png")
     top.destroy()
     plan = res["plan"]
+    t1 = t0 + dt.timedelta(hours=8)
     check("CASE 001 esx01 TC-base-b4\n" in plan and "CASE 002 esx01 TC-base-a-r3\n" in plan and "TC-base-a\n" not in plan,
           "plan 에 적용 체크하지 않은 케이스 2개가 표의 순서로")
+    check("START 001 %d %s\n" % (int(t1.timestamp()), fmt_at(t1)) in plan
+          and "START 002 %d %s\n" % (int((t1 + dt.timedelta(hours=10)).timestamp()), fmt_at(t1 + dt.timedelta(hours=10))) in plan,
+          "잡 시작은 환산 칸의 시각 그대로 plan 에 들어감(적용 체크한 윗줄도 +간격의 기준)")
+    check("SEG 001 1\n" in plan and "SEG 002 1\n" in plan, "설정이 앞 케이스와 다른 케이스는 SEG 1")
     check("AH 001 /Numa/LocalityWeightActionAffinity=0\n" in plan and "AV 001 esx01ev01 sched.mem.pin=FALSE\n" in plan
           and "AV 001 esx01ev01 numa.nodeAffinity=\n" in plan and "AV 001 esx01ev01 sched.cpu.affinity=0,1,2,3\n" in plan,
           "설정이 plan 에 들어감 (같은 키는 뒤 프로파일의 값)")
-    check("LOGDIR /data/tcgen_log\n" in plan and "ADDR esx01 10.0.0.11\n" in plan and "SET SETTLE_MIN 10\n" in plan
-          and "VM 001 esx01ev01 tester@esx01ev01\n" in plan and "PROC 001 esx01ev01 run_a\\.sh\n" in plan,
-          "로그 폴더, ESX 접속 주소, VM 다시 켠 뒤 대기, 접속 계정, 프로세스 이름이 plan 에 들어감")
-    check("MAXWAIT 001 720\n" in plan and "MAXWAIT 002 0\n" in plan, "최대 대기가 plan 에 들어감")
-    import re as _re
-    check("SET POLL_SEC 1800\n" in plan and "SET FIRST_CHECK_SEC 60\n" in plan and "그 뒤 30분마다" in res["plan_view"],
-          "잡 종료 확인 간격(30분)과 첫 확인(60초)이 plan 과 실행 계획에 들어감")
-    check("SET GAP_MIN 30\n" in plan and _re.search(r"(?m)^START 001 \d+ \d{4}-\d\d-\d\d 09:05$", plan) and "START 002 " not in plan,
-          "케이스 사이 간격과 지정한 시작 시각이 plan 에 들어감. 시각을 비운 케이스에는 START 줄이 없음")
-    check(re.search(r"   시작: 지정 \d{4}-\d\d-\d\d 09:05\. 준비\(설정, VM 전원\)는 \d{4}-\d\d-\d\d 08:05 부터", res["plan_view"])
-          and "   시작: 자동. 앞 케이스의 잡이 끝나고 30분 뒤" in res["plan_view"], "실행 계획에 시작 시각, 준비 시각, 간격 설명")
-    check("- 구성 스냅샷: 잡이 있는 케이스마다 잡 시작 전에" in res["plan_view"] and "잡 시작 10분 전에 읽는다" in res["plan_view"]
-          and "SET SNAP_LEAD_MIN 10\n" in res["plan"]
-          and "-config-<케이스 번호>-<케이스>.csv 에 기록한다" in res["plan_view"] and "\nCFGL h1 구분\n" in res["plan"]
-          and any("구성 스냅샷(config snapshot)" in x for x in app.RESULT_HELP_SEQ), "실행 계획과 도움말에 구성 스냅샷 설명, plan 에 csv 머리글")
-    check(any(x[0] == "ask" and "시작 시각이 자동인 케이스 1개(TC-base-a-r3)" in x[1] and "VM 에 접속함" in x[1] for x in LOG[n_gen:]),
-          "자동인 케이스가 있으면 생성할 때 경고(잡 실행 중 VM 접속)")
-    app.commit_case("c1", "seq_start", "자동")
-    text5 = app.res_text.get("1.0", "end")
-    check("순서 실행. 실행 ID %s" % res["run_id"] in text5 and "VM 을 자동으로 종료하고 다시 켠다" in text5, "결과 글에 실행 ID 와 VM 자동 종료 안내")
+    check("LOGDIR /data/tcgen_log\n" in plan and "ADDR esx01 10.0.0.11\n" in plan and "SET PREP_LEAD_MIN 30\n" in plan
+          and "SET SNAP_LEAD_MIN 10\n" in plan and "VM 001 esx01ev01 tester@esx01ev01\n" in plan
+          and "\nGCMD bash /nas/perf/guest_config_push.sh --target auto\n" in plan and "\nCFGL h1 구분\n" in plan,
+          "로그 폴더, ESX 접속 주소, 잡 시작 기준 분, 접속 계정, 스냅샷 때 실행할 명령이 plan 에 들어감")
+    check(not any(("\n%s " % w) in plan for w in ("PROC", "NOCHK", "MAXWAIT")) and "SET GAP_MIN" not in plan and "SET POLL_SEC" not in plan,
+          "프로세스 확인에 쓰던 줄은 plan 에 없음")
     app.copy_block("setup")
     check(root.clipboard_get() == res["setup"], "A 블록 복사")
     app.copy_block("vm")
@@ -1050,81 +1099,70 @@ def main():
     check(root.clipboard_get() == res["check"], "확인 창에서 아니오를 누르면 S 블록, D 블록을 복사하지 않음")
     with open(rec, encoding="utf-8-sig", newline="") as f:
         rrows = list(csv.reader(f))
-    last = dict(zip(rrows[0], rrows[-2]))
-    check(rrows[0][-3:] == ["진행 방식", "설정", "실행 ID"] and last["진행 방식"] == "순서 실행" and last["실행 ID"] == res["run_id"]
-          and last["설정"] == "esx01:numa0, esx01ev01:pin+aff" and re.fullmatch(r"\d{4}-\d\d-\d\d 09:05:00", last["잡 시작(KST)"])
-          and re.fullmatch(r"\d{4}-\d\d-\d\d 09:00:00", last["모니터링 시작(KST)"]) and last["모니터링 중지(KST)"] == ""
-          and dict(zip(rrows[0], rrows[-1]))["잡 시작(KST)"] == "",
-          "테스트 기록 CSV 에 진행 방식, 설정, 실행 ID 열 추가. 시작 시각을 적은 케이스는 잡 시작과 모니터링 시작 시각을 적고, "
-          "자동인 케이스는 비움 %s" % (last,))
+    last, last2 = dict(zip(rrows[0], rrows[-2])), dict(zip(rrows[0], rrows[-1]))
+    check(rrows[0][-3:] == ["진행 방식", "설정", "실행 ID"] and last["실행 ID"] == res["run_id"]
+          and last["설정"] == "esx01:numa0, esx01ev01:pin+aff" and last["잡 시작(KST)"] == core.fmt_dt(t1) and last["간격"] == "+8:00"
+          and last["모니터링 시작(KST)"] == core.fmt_dt(t1 - dt.timedelta(minutes=5))
+          and last2["잡 시작(KST)"] == core.fmt_dt(t1 + dt.timedelta(hours=10)) and last2["간격"] == "+10:00",
+          "테스트 기록 CSV 에 계획한 잡 시작, +간격, 모니터링 시작을 적음 %s" % (last,))
     shot(root, app, 4, "tcgen_seq_tab5.png")
-    app.show_help("5. 생성 결과", app.RESULT_HELP_SEQ)
+    app.show_help("5. 생성 결과", [x.replace("{D}", app.jump_dir_text()) for x in app.RESULT_HELP_SEQ])
+    root.update()
+    helps = help_lines(app)
+    check(any("tcrun-<실행 ID>-jobs.csv" in x for x in helps) and any("sh ~/.tcgen/tcrun cancel" in x for x in helps)
+          and not any(w in x for x in helps for w in ("프로세스", "자동으로 종료", "settle", "순서 실행")), "탭 5 도움말: 등록 기록 파일과 취소 명령")
     shot_window(root, "도움말", "tcgen_seq_help5.png")
     last_toplevel(root).destroy()
-    n_log = len(LOG)
-    app.export_report()
-    check(any(x[0] == "info" and "perfreport_cases.csv" in x[1] and "/data/tcgen_log/tcrun-" in x[1] for x in LOG[n_log:])
-          and getattr(last_toplevel(root), "winfo_exists", lambda: False)() in (False, 0),
-          "순서 실행의 [리포트용 CSV 저장] 은 점프 VM 로그 폴더의 파일을 안내만 함")
-    app.run_cmds[0]["proc"] = ""
-    n_log = len(LOG)
+    # 마지막 케이스의 모니터링 중지는 생성을 멈추는 경고가 아니라 결과의 알림 한 줄이다(사용자 지적 2026-11-18 "이 경고가필요해?")
+    app.cases[2]["vms"][0]["monitors"] = ["guest_perf"]
+    n_gen = len(LOG)
     gen(app, root)
-    check(app.result is None and any(x[0] == "error" and "프로세스 이름이 비어 있음" in x[1] for x in LOG[n_log:])
-          and app.blk_esx.get("1.0", "end-1c") == "" and app.plan_text.get("1.0", "end-1c") == "",
-          "잡의 프로세스 이름이 없으면 오류, 블록과 실행 계획을 비움")
-    app.run_cmds[0]["proc"] = "run_a.sh"
-    app.cases[1]["vms"][0]["job"] = "(없음)"
-    app.cases[1]["vms"][1]["job"] = "(없음)"
-    app.cases[1]["vms"][2]["job"] = "(없음)"
-    n_log = len(LOG)
-    gen(app, root)
-    check(app.result is None and any(x[0] == "error" and "모니터링만 있고 잡이 없음" in x[1] for x in LOG[n_log:]),
-          "모니터링만 있고 잡이 없는 케이스는 오류")
-    for k, jn in enumerate(("job_a", "job_a", "job_b4")):
-        app.cases[1]["vms"][k]["job"] = jn
+    shown = app.res_text.get("1.0", "end-1c").split("\n")
+    check(app.result is not None and not any(x[0] == "ask" for x in LOG[n_gen:])
+          and "알림: 마지막 케이스(TC-base-a-r3)는 모니터링 중지 시각이 없음. 정하려면 그 케이스의 '최대 대기' 칸에 시간을 적을 것"
+              "(비워 두면 다음 실행이나 tcrun cancel 때 중지)" in shown, "마지막 케이스의 모니터링 중지는 알림 한 줄 %s" % shown[4:])
+    app.cases[2]["vms"][0]["monitors"] = []
     app.mark_cases()
 
-    # v2.10 설정 영역: 잡 시작 전의 시간 규칙과 스냅샷 때 VM 에서 실행할 명령 (사용자 2026-11-17 "잡 시작 최소 5분전에 config 스냅샷
-    # 부분이 완료되면 좋겠으니 변경 작업 포함해서 시간 조정해줘 변경작업은 30분혹은 그 이상 이전에 수행", Operations 기록 "네")
-    labels = [w.cget("text") for w in walk(root) if isinstance(w, ttk.Label)]
-    check("변경 작업 뒤 잡 시작까지 최소" in labels and "스냅샷 뒤 잡 시작까지 최소" in labels and "스냅샷 때 VM 에서 실행할 명령" in labels
-          and "VM 켠 뒤 잡 시작까지 최소" not in labels, "설정 영역에 변경 작업 뒤, 스냅샷 뒤 잡 시작까지 최소 칸과 스냅샷 때 실행할 명령 칸")
-    check(app.v_snapgap.get() == "5" and app.v_gcmd.get() == "" and core.DEFAULT_SETTINGS["seq_settle_min"] == 30,
-          "기본값: 스냅샷 뒤 5분, 변경 작업 뒤 30분, 명령 없음")
-    app.v_snapgap.set("7")
-    app.v_gcmd.set("  bash /home/tester/perf/guest_config_push.sh   --insecure ")
-    stx = core.load_settings(BASE)
-    check(stx["seq_snap_gap_min"] == 7 and stx["seq_guest_cmd"] == "bash /home/tester/perf/guest_config_push.sh --insecure",
-          "두 칸을 바꾸면 저장 (명령의 앞뒤와 겹친 공백은 정리)")
-    app.v_snapgap.set("x")
-    check(app.current_settings(show_error=False) is None, "스냅샷 뒤 잡 시작까지 최소 칸이 숫자가 아니면 설정을 쓰지 않음")
-    app.v_snapgap.set("5")
-    # v2.11 구성 스냅샷 시점: 잡 시작 N분 전에 읽는다 (사용자 2026-11-18 "네 10분전 스냅샷으로")
-    check("구성 스냅샷: 잡 시작" in labels and app.v_snaplead.get() == "10" and core.DEFAULT_SETTINGS["seq_snap_lead_min"] == 10,
-          "설정 영역에 구성 스냅샷 시점 칸, 기본값은 잡 시작 10분 전")
-    app.v_snaplead.set("12")
-    check(core.load_settings(BASE)["seq_snap_lead_min"] == 12, "구성 스냅샷 시점을 고치면 저장")
-    app.v_snaplead.set("")
-    check(app.current_settings(show_error=False) is None and core.load_settings(BASE)["seq_snap_lead_min"] == 12,
-          "구성 스냅샷 시점 칸을 비운 동안에는 설정을 쓰지 않음")
-    app.v_snaplead.set("10")
-    seq_saved = _copy.deepcopy(app.cases)
-    app.commit_case("c1", "seq_start", "9:05")
-    app.commit_case("c2", "seq_start", "+8")
+    # ---- [리포트용 CSV 저장] (사용자 2026-11-18 "+10:00 헀으면 리포트용 csv 저장하면 +10 시간 반영해서 적용이 되어야")
+    n_log = len(LOG)
+    app.export_report()
+    top = last_toplevel(root)
+    rt = app.report_table
+    check(top.winfo_exists() and [r["name"] for r in rt.rows] == ["TC-base-a", "TC-base-b4", "TC-base-a-r3"]
+          and [r["start"] for r in rt.rows] == [core.fmt_dt(t0), core.fmt_dt(t1), core.fmt_dt(t1 + dt.timedelta(hours=10))],
+          "[리포트용 CSV 저장] 창의 잡 시작은 환산 칸의 시각 %s" % [r["start"] for r in rt.rows])
+    shot_window(root, "리포트용 CSV 저장", "tcgen_seq_report_dialog.png")
+    rt.check["toggle"]("1")
+    rt.check["toggle"]("2")
+    REPS = os.path.join(TMP, "reports", "cases_seq.csv")
+    ASK_SAVE.append(REPS)
+    press(top, "저장")
+    with open(REPS, encoding="utf-8-sig", newline="") as f:
+        srows = list(csv.reader(f))
+    check(srows[0] == core.REPORT_HEADER and [(r[1], r[4]) for r in srows[1:]] == [("TC-base-b4", core.fmt_dt(t1)),
+                                                                                    ("TC-base-a-r3", core.fmt_dt(t1 + dt.timedelta(hours=10)))]
+          and not top.winfo_exists(), "리포트용 CSV 에 +간격을 계산한 잡 시작을 저장 %s" % srows[1:])
+    app.commit_case("c1", "seq_start", "")
+    app.export_report()
+    top = last_toplevel(root)
+    rt = app.report_table
+    check([r["start"] for r in rt.rows][1:] == ["확인 필요", "확인 필요"], "시작 시각을 알 수 없는 케이스는 확인 필요로 보임")
+    rt.check["toggle"]("1")
+    n_log = len(LOG)
+    press(top, "저장")
+    check(top.winfo_exists() and any(x[0] == "error" and "TC-base-b4" in x[1] and "시작 시각 칸이 비어 있음" in x[1] for x in LOG[n_log:]),
+          "그 케이스를 고르면 저장하지 않고 이유를 알림")
+    press(top, "취소")
+    app.commit_case("c1", "seq_start", "+8")
+
+    # ---- 적용 체크: +간격을 적은 케이스는 날짜 시각으로 고정한다 (사용자 2026-11-17 "네")
     gen(app, root)
     res = app.result
-    check(res is not None and "\nGCMD bash /home/tester/perf/guest_config_push.sh --insecure\n" in res["plan"]
-          and "SET SNAP_GAP_MIN 5\n" in res["plan"] and "- 스냅샷 뒤 대기: 잡은 구성 스냅샷이 끝나고 5분 뒤부터 시작한다." in res["plan_view"]
-          and "- 변경 작업 뒤 대기: 이번 실행이 그 ESX 호스트에서 변경 작업(설정 적용, VM 끄기, VM 켜기)을 했으면" in res["plan_view"]
-          and "명령: bash /home/tester/perf/guest_config_push.sh --insecure" in res["plan_view"],
-          "스냅샷 뒤 대기와 스냅샷 때 실행할 명령이 plan 과 실행 계획에 들어감")
-    # +간격을 적은 케이스를 적용 체크하면 칸의 값을 날짜 시각으로 고정한다 (사용자 2026-11-17 "네")
-    want = core.fmt_dt([pc for pc in res["cases"] if pc["name"] == app.cases[2]["name"]][0]["start_at"])
-    first = dt.datetime.strptime(app.cases[1]["seq_start"], "%Y-%m-%d %H:%M:%S")
-    check(want == core.fmt_dt(first + dt.timedelta(hours=8)) and app.cases[2]["seq_start"] == "+8:00", "생성한 계획의 잡 시작 = 앞 케이스 + 8시간")
+    want = core.fmt_dt(t1 + dt.timedelta(hours=10))
     app.toggle_applied("c2")
     t.refresh("c2")
-    check(app.cases[2]["applied"] and app.cases[2]["seq_start"] == want and cell_of(t, "c2", "seq_start") == want
+    check(app.cases[2]["applied"] and app.cases[2]["seq_start"] == want and cell_of(t, "c2", "seq_start") == want and at("c2") == want[:16]
           and core.load_cases(BASE)[2]["seq_start"] == want, "+간격을 적은 케이스를 적용 체크하면 날짜 시각으로 바꿔 저장 (이 창에서 만든 계획)")
     check(app.case_kind("c2", {"key": "seq_start"}) == "popup" and app.case_kind("c1", {"key": "seq_start"}) == "entry",
           "적용 체크한 케이스의 시작 시각 칸은 고치는 칸이 열리지 않음")
@@ -1132,26 +1170,27 @@ def main():
     app.commit_case("c2", "seq_start", "+9")
     check(app.cases[2]["seq_start"] == want and any(x[0] == "info" and "적용 체크한 케이스의 시작 시각은 고칠 수 없음" in x[1]
                                                     for x in LOG[n_log:]), "적용 체크한 케이스의 시작 시각은 고쳐지지 않음")
+    app.commit_case("c1", "seq_start", "2031-03-03 03:00")
+    check(app.cases[2]["seq_start"] == want and at("c2") == want[:16], "윗줄을 고쳐도 적용 체크한 케이스의 시각은 그대로")
     app.toggle_applied("c2")
     check(not app.cases[2]["applied"] and app.cases[2]["seq_start"] == want, "적용 체크를 끄면 날짜 시각은 그대로 남고 고칠 수 있음")
-    app.commit_case("c2", "seq_start", "+8")
+    app.commit_case("c2", "seq_start", "+10")
     app.result = None                                             # 창을 다시 연 때처럼: 테스트 기록 CSV 의 마지막 생성 기록을 쓴다
-    app.cases[1]["seq_start"] = "2031-03-03 03:00:00"             # 생성 뒤에 앞 케이스를 고쳤어도 기록의 값(생성한 계획)을 쓴다
     app.toggle_applied("c2")
     check(app.cases[2]["seq_start"] == want, "창을 다시 연 뒤에는 테스트 기록 CSV 의 마지막 생성 기록으로 고정 %s" % app.cases[2]["seq_start"])
     app.toggle_applied("c2")
-    app.commit_case("c2", "seq_start", "+2")                      # 기록의 간격(+8:00)과 다르면 지금 표로 계산한다
+    app.commit_case("c2", "seq_start", "+2")                      # 기록의 간격(+10:00)과 다르면 지금 표로 계산한다(바로 윗줄 기준)
     app.toggle_applied("c2")
-    check(app.cases[2]["seq_start"] == "2031-03-03 05:00:00", "기록과 맞지 않으면 지금 표로 계산 (앞 케이스 + 간격)")
+    check(app.cases[2]["seq_start"] == "2031-03-03 05:00:00", "기록과 맞지 않으면 지금 표로 계산 (바로 윗줄 + 간격)")
     app.toggle_applied("c2")
-    app.commit_case("c1", "seq_start", "자동")
+    app.commit_case("c1", "seq_start", "")
     app.commit_case("c2", "seq_start", "+2")
     n_log = len(LOG)
     app.toggle_applied("c2")
     check(app.cases[2]["applied"] and app.cases[2]["seq_start"] == "+2:00"
-          and any(x[0] == "info" and "날짜 시각으로 바꾸지 못했음" in x[1] for x in LOG[n_log:]),
-          "앞 케이스가 자동이라 계산할 수 없으면 +간격을 그대로 두고 알림")
-    # [기록 대조] (순서 실행): 적용 체크한 케이스의 시작 시각을 기록의 잡 시작과 대조
+          and any(x[0] == "info" and "날짜 시각으로 바꾸지 못했음" in x[1] and "바로 윗줄 케이스의 시작 시각이 없음" in x[1] for x in LOG[n_log:]),
+          "윗줄의 시각이 없어 계산할 수 없으면 +간격을 그대로 두고 알림")
+    # [기록 대조]: 적용 체크한 케이스의 시작 시각을 기록의 잡 시작과 대조
     n_log = len(LOG)
     app.compare_records()
     root.update()
@@ -1159,26 +1198,15 @@ def main():
     labels = [w.cget("text") for w in walk(app.cmp_win) if isinstance(w, ttk.Label)]
     check(rows2 == [(app.cases[2]["name"], "시작 시각", "+2:00", want)]
           and any("기준과 다른 케이스 1개, 같은 케이스 0개, 기준에 없는 케이스 1개 (TC-base-a)" in x for x in labels),
-          "[기록 대조] (순서 실행): 시작 시각 칸을 기록의 잡 시작과 대조 %s %s" % (rows2, [x for x in labels if "케이스" in x]))
+          "[기록 대조]: 시작 시각 칸을 기록의 잡 시작과 대조 %s %s" % (rows2, [x for x in labels if "케이스" in x]))
     shot_window(root, "기록 대조", "tcgen_seq_record_compare.png")
     press(app.cmp_win, "기준 값으로 되돌리기")
     root.update()
     check(app.cases[2]["seq_start"] == want, "기록의 잡 시작으로 되돌림")
-    app.show_help("4. 테스트 케이스", app.case_help)
-    root.update()
-    helps = [w.cget("text") for w in walk(app.help_win) if isinstance(w, ttk.Label)]
-    check(any("잡 시작 전의 시간 규칙" in x and "끝난 시각에서 %s분 이상 지난 뒤에 잡을 시작한다" % app.v_settle.get() in x
-              and "구성 스냅샷이 끝난 시각에서는 5분 이상 지난 뒤에 잡을 시작한다" in x for x in helps)
-          and any("[기록 대조]" in x for x in helps) and any("날짜 시각으로 바꿔 고정한다" in x for x in helps)
-          and any("스냅샷 때 VM 에서 실행할 명령(설정 영역)" in x for x in helps)
-          and any("구성 스냅샷 시점" in x and "스냅샷은 잡 시작 10분 전에 읽는다" in x for x in helps), "순서 실행의 탭 4 도움말에 v2.10, v2.11 설명")
-    shot_window(root, "도움말", "tcgen_seq_help4_v210.png")
-    app.help_win.destroy()
     app.cases[:] = seq_saved                                      # 뒤의 점검을 위해 표와 설정을 되돌린다
     app.v_gcmd.set("")
     app.mark_cases()
     t.refresh("c1")
-    shot(root, app, 3, "tcgen_seq_tab4_v210.png")
 
     # 대상을 바꾸면 고른 케이스에서 선택을 해제한다
     n_log = len(LOG)
@@ -1190,7 +1218,7 @@ def main():
     n_log = len(LOG)
     app.commit_prof(2, "target", "ESX 호스트")
     check(app.profiles[2]["target"] == "ESX" and app.cases[1]["vms"][0]["profiles"] == ["pin"]
-          and any(x[0] == "info" and "선택을 해제함" in x[1] for x in LOG[n_log:]), "대상이 바뀐 프로파일은 케이스에서 선택 해제")
+          and any(x[0] == "info" and "선택을 해제함" in x[1] for x in LOG[n_log:]), "대상이 변경된 프로파일은 케이스에서 선택 해제")
     app.commit_prof(2, "target", "VM")
     app.commit_prof(1, "name", "pin1g")
     check(app.cases[1]["vms"][0]["profiles"] == ["pin1g"], "프로파일 이름을 바꾸면 그 이름을 쓰던 케이스도 바뀜")
@@ -1217,6 +1245,13 @@ def main():
     gen(app, root)
     check(app.result is None and app.blk_vm.get("1.0", "end-1c") == "", "오류가 있으면 블록 비움")
     app.cases[1]["vms"][2]["job"] = "job_b4"
+
+    # 사용자가 쓰는 화면(v2.12 의 한 가지 방식)으로 돌아와 나머지 버튼을 눌러 본다: 백업, 백업 불러오기, 폴더 열기, 데이터 폴더 변경,
+    # 삭제, 다시 실행 (사용자가 기본 방식을 정하면 그 방식으로 버튼과 저장 기능을 전부 실행해 본다)
+    app.v_mode.set("순서 실행")
+    app.mode_changed()
+    root.update()
+    check(app.mode() == "seq" and "seq_at" in list(app.t_case.tree.cget("displaycolumns")), "v2.12 의 화면으로 돌아옴")
 
     # 백업(위치 선택), 백업 불러오기, 폴더 열기
     BK = os.path.join(TMP, "my_backups")
@@ -1272,9 +1307,8 @@ def main():
     check([c["name"] for c in app2.cases] == ["TC-base-a", "TC-base-a-r3"] and [c["applied"] for c in app2.cases] == [True, False],
           "다시 실행 시 테스트 케이스 표와 적용 체크 불러옴")
     check("applied" in app2.t_case.tree.item("c0", "tags"), "다시 실행 시 체크한 행 회색 표시")
-    check(app2.mode() == "time" and [q["name"] for q in app2.profiles] == ["numa0", "pin"]
-          and [r["proc"] for r in app2.run_cmds] == ["run_a.sh", "run_b.sh -n 4"] and app2.v_jlog.get() == "/data/tcgen_log",
-          "다시 실행 시 진행 방식, 설정 프로파일, 프로세스 이름, 점프 VM 로그 폴더 불러옴")
+    check(app2.mode() == "seq" and [q["name"] for q in app2.profiles] == ["numa0", "pin"] and app2.v_jlog.get() == "/data/tcgen_log",
+          "다시 실행하면 한 가지 진행 방식으로 열림(시각 지정은 화면에서 고를 수 없다). 설정 프로파일, 점프 VM 로그 폴더 불러옴")
     check([len(c["vms"]) for c in app2.cases] == [3, 3] and app2.cases[0]["vms"][2]["monitors"] == ["guest_perf", "guest_gpu"],
           "다시 실행 시 VM 구성과 VM 별 모니터링 불러옴")
     root2.destroy()
@@ -1479,6 +1513,9 @@ def main():
           and any(x[0] == "warning" and "기본 파일로 바꿈" in x[1] for x in LOG[n_log:]) and os.path.isfile(emr + ".moved"),
           "지정한 파일을 찾지 못하면 기본 파일로 바꾸고 알림")
     root8.destroy()
+    if FAILED:
+        print("GUI smoke: %d FAILED  tmp=%s" % (len(FAILED), TMP))
+        sys.exit(1)
     print("GUI smoke OK  tmp=%s" % TMP)
 
 

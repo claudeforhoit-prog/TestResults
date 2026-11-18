@@ -314,7 +314,7 @@ class ShellBlockTests(unittest.TestCase):
         self.paste(shell, [(None, 0, res["vm"])], crlf)
         for host, lines in expect.items():
             self.assertEqual([ln for ln in self.vm_crontab(host) if " # tcgen " in ln], lines)
-        # 케이스 하나만 다시 만들면 그 케이스 줄만 바뀐다
+        # 케이스 하나만 다시 만들면 그 케이스 줄만 변경된다
         one = [dict(self.cases[1], start="2026-11-20 13:00:00")]
         res2 = self.gen(one)
         self.paste(shell, [(None, 0, res2["vm"])], crlf)

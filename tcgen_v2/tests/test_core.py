@@ -831,13 +831,15 @@ class RecordCompareTests(TmpDir):
         self.assertIsNone(core.seq_start_from_record(rows, "s1", "2026-11-20 10:00:00"))
         self.assertIsNone(core.seq_start_from_record(rows, "none", "+8:00"))
         self.assertIsNone(core.seq_start_from_record([], "s2", "+8:00"))
-        # 지금 표로 계산: 같은 ESX 호스트의 위 케이스 시작 시각에서 간격만큼 뒤. 위로 올라가며 더한다
+        # 지금 표로 계산(v2.12): 날짜 시각은 그 시각, +간격은 표의 바로 윗줄 케이스의 시작 시각에서 간격만큼 뒤
         self.assertEqual([core.seq_start_by_table(cs, i) for i in range(4)],
-                         [None, dt.datetime(2026, 11, 20, 18, 0), dt.datetime(2026, 11, 21, 2, 30), None])
+                         [dt.datetime(2026, 11, 20, 10, 0), dt.datetime(2026, 11, 20, 18, 0), dt.datetime(2026, 11, 21, 2, 30),
+                          dt.datetime(2026, 11, 20, 10, 30)])
         odd = [self.seqcase("a", "10:00"), self.seqcase("b", "+1"), self.seqcase("c", "자동"), self.seqcase("d", "+1"),
                self.seqcase("e", "+1", esx="esx09"), self.seqcase("f", "2026-11-20 10:00:00", job="(없음)"), self.seqcase("g", "+2")]
-        self.assertEqual([core.seq_start_by_table(odd, i) for i in range(7)], [None] * 7,
-                         "날짜가 없는 시각, 자동, 위 케이스 없음, 잡이 없는 위 케이스: 계산하지 않음")
+        self.assertEqual([core.seq_start_by_table(odd, i) for i in range(7)],
+                         [None, None, None, None, None, dt.datetime(2026, 11, 20, 10, 0), dt.datetime(2026, 11, 20, 12, 0)],
+                         "날짜가 없는 시각, 자동, 윗줄의 시각이 없는 +간격: 계산하지 않음. 잡이 없는 윗줄도 적은 시각이 있으면 기준이 된다")
         # 기록 대조(순서 실행): 적용 체크한 케이스의 시작 시각 칸과 기록의 잡 시작
         for c in cs:
             c["applied"] = True
@@ -864,7 +866,7 @@ class RecordCompareTests(TmpDir):
         self.assertEqual(os.path.dirname(keep), os.path.join(self.base, "backup"))
         self.assertEqual(core.load_cases(self.base, keep), [core._clean_case(c) for c in cs], "남긴 사본은 표 파일로 다시 읽힌다")
         self.assertEqual(core.table_diffs(cs, old, False), ([], [], 3))
-        for key in ("start", "interval", "end_time"):                      # A 와 B 의 값이 서로 바뀐 표
+        for key in ("start", "interval", "end_time"):                      # A 와 B 의 값을 서로 맞바꾼 표
             cs[0][key], cs[1][key] = cs[1][key], cs[0][key]
         cs[2].update(stop_mode="manual", stop_time="2026-11-21 09:00:00")
         cs.append(dict(case("N", "2026-11-22 00:00:00"), applied=True))

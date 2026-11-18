@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-순서 실행 블록(A, P, S)의 붙여넣기 시험 (tcsh 와 sh 가 있는 Linux, macOS 에서만 실행).
+블록 A, P, S 의 붙여넣기 시험 (tcsh 와 sh 가 있는 Linux, macOS 에서만 실행).
 
 의사 터미널(pty)에 띄운 대화형 tcsh 와 bash 에 블록을 붙여넣듯이 보낸다. 줄바꿈을 LF 로 보내는 경우와 CR+LF 로 보내는
 경우를 모두 시험한다. ssh, setsid, crontab, vim-cmd, esxcli, ssh-keygen 은 가짜 명령(fakeenv.py)이다.
@@ -8,7 +8,8 @@
 - A 블록: 파일 7개 설치, sha256 확인(OK), ssh 키 생성과 ESX 에 넣을 한 줄 출력, 비밀번호 입력.
   다시 붙여넣으면 비밀번호를 묻지 않는다.
 - P 블록: plan 을 올리고 tcrun check 를 실행한다.
-- S 블록: plan 을 올리고 진행을 백그라운드로 시작한다. 터미널(셸)을 끝내도 진행은 계속되어 케이스가 끝난다.
+- S 블록: plan 을 올리고 진행을 백그라운드로 시작한다. 터미널(셸)을 끝내도 진행은 계속된다: 잡을 crontab 에 등록하고,
+  잡이 적은 시각에 시작하고, 마지막 잡 시작 1분 뒤에 진행이 끝난다(v2.12).
 - 판 불일치, 미설치, 블록이 중간에 깨진 경우는 시작하지 않는다.
 """
 import datetime as dt
@@ -17,6 +18,7 @@ import re
 import shutil
 import stat
 import sys
+import time
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -37,6 +39,10 @@ SHELLS = {
 @unittest.skipUnless(HAVE, "tcsh, perl, sh 가 있는 Linux/macOS 에서만 실행")
 class SeqBlockTests(unittest.TestCase):
     def setUp(self):
+        # 생성기는 시작 시각을 이 PC 의 시간대로 초(epoch)로 바꾼다. 가짜 환경의 시계는 KST 이므로 시험 프로세스도 KST 로 맞춘다
+        self.old_tz = os.environ.get("TZ")
+        os.environ["TZ"] = "Asia/Seoul"
+        time.tzset()
         self.build()
 
     def build(self, jdir=False):
@@ -50,14 +56,34 @@ class SeqBlockTests(unittest.TestCase):
         prof = [{"name": "same", "target": "VM", "text": "numa.nodeAffinity = 0", "desc": ""},
                 {"name": "numa", "target": "ESX", "text": "Numa.LocalityWeightActionAffinity = 130", "desc": ""}]
         c = core.new_case("esx01", "", 0)
-        c.update(name="paste1", desc="한글 설명", group="그룹", esx_profiles=["numa"],
+        c.update(name="paste1", desc="한글 설명", group="그룹", esx_profiles=["numa"], seq_start="2026-11-20 16:00:00",
                  vms=[{"name": "esx01ev01", "job": "job_a", "monitors": ["gmon"], "profiles": ["same"], "end_ref": True},
                       {"name": "esx01ev02", "job": "job_a", "monitors": [], "profiles": [], "end_ref": False}])
+        self.gen_args = (c, run, mon, prof)
         self.res = core.generate([c], run, mon, e.settings(), now=GEN, write=False, profiles=prof)
         self.assertEqual(self.res["errors"], [])
+        self.rid = self.res["run_id"]
+
+    def make(self, lead_min=30):
+        """P 블록과 S 블록을 지금(가상 시계) 기준으로 다시 만든다: 잡 시작은 lead_min 분 뒤. A 블록을 붙여넣는 데 걸리는 시간이
+        일정하지 않으므로, 붙여넣은 뒤에 시작 시각을 정한다. A 블록의 내용은 plan 과 무관해 그대로다."""
+        c, run, mon, prof = self.gen_args
+        now = dt.datetime.fromtimestamp(self.e.now()).replace(microsecond=0)
+        at = (now + dt.timedelta(minutes=lead_min + 1)).replace(second=0)
+        c["seq_start"] = core.fmt_dt(at)
+        setup = self.res["setup"]
+        self.res = core.generate([c], run, mon, self.e.settings(), now=now, write=False, profiles=prof)
+        self.assertEqual(self.res["errors"], [])
+        self.assertEqual(self.res["setup"], setup, "A 블록은 plan 과 무관하다")
+        self.rid, self.at = self.res["run_id"], at
 
     def tearDown(self):
         self.e.close()
+        if self.old_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = self.old_tz
+        time.tzset()
 
     def paste(self, shell, steps, crlf=False):
         argv, set_prompt, prompt_re = SHELLS[shell]
@@ -113,38 +139,49 @@ class SeqBlockTests(unittest.TestCase):
             self.assertEqual(self.read("id_esx"), key)
             self.assertEqual(self.read("vmpw"), fakeenv.TEST_PW + "\n")
             self.assertEqual(self.read("tcrun"), dict(core.jump_files())["tcrun"])
-        # P 블록
+        # P 블록 (plan 은 지금 만든다: 잡 시작은 가상 시계로 30분 뒤)
+        self.make()
+        RID = self.rid
         out = self.paste(shell, [(None, 0, self.res["check"]), (r"saved: /\S+check\.log\r?\n", 0.5, "")], crlf)
         plan = os.path.join(e.tcgen, "runs", RID, "plan")
         with open(plan, encoding="utf-8") as f:
             self.assertEqual(f.read(), self.res["plan"], "plan 이 그대로 올라감(한글 설명 포함)")
         for word in ("[ok] esx esx01 (esx01): ssh key login works", "[ok] settings and VM power: already as wanted.",
+                     "[ok] start times: the jobs are registered for the start times of the plan. tcrun does not change them",
                      "[ok] vm esx01ev01 (esx01ev01): ssh login works", "[ok] vm esx01ev02 (esx01ev02): ssh login works",
                      "CHECK RESULT: OK"):
             self.assertIn(word, out)
         self.assertNotIn("[PROBLEM]", out)
         self.assertEqual(e.state(RID, "esx01"), {})
         self.assertTrue(os.path.exists(os.path.join(e.log, "tcrun-%s-check.log" % RID)))
-        # S 블록: 셸을 끝내도(터미널을 닫아도) 진행은 계속되어 케이스가 끝난다
+        # S 블록: 셸을 끝내도(터미널을 닫아도) 진행은 계속된다. 잡을 등록하고, 적은 시각에 잡이 시작하고, 1분 뒤에 진행이 끝난다
         cron = e.start_cron()
         out = self.paste(shell, [(None, 0, self.res["run"]), (r"files in /\S+ : tcrun-", 0.5, "")], crlf)
         self.assertRegex(out, r"started: run %s esx esx01   log: %s/tcrun-%s-esx01\.log" % (RID, re.escape(e.log), RID))
         self.assertIn("status: sh %s/tcrun status" % e.tcgen, out)
+        self.assertIn("tcrun-%s-jobs.csv (which jobs are registered in crontab)" % RID, out)
         self.assertNotIn("====", out.replace("==== tcrun on this jump VM", "").replace("==== plan FAILED", ""))
-        e.wait_for(lambda: e.state(RID, "esx01").get("state") in ("done", "paused", "stopped"), seconds=180, what="진행 완료")
+        e.wait_for(lambda: e.state(RID, "esx01").get("state") in ("done", "paused", "stopped"), seconds=240, what="진행 완료")
         log = e.log_text(RID, "esx01")
         self.assertEqual(e.state(RID, "esx01")["state"], "done", log)
         self.assertIn("==== case paste1 done", log)
-        self.assertEqual(len(cron.fired), 4, cron.fired)
-        self.assertEqual(e.vm_crontab("esx01ev01"), ["30 9 * * 1 /home/tester/existing.sh"])
+        text = self.at.strftime("%Y-%m-%d %H:%M")
+        self.assertEqual([(r["case"], r["vm"], r["job_start"], r["crontab"]) for r in e.jobs_rows(RID)],
+                         [("paste1", "esx01ev01", text, "registered"), ("paste1", "esx01ev02", text, "registered")], log)
+        # 모니터링 시작 1번(잡 시작 1분 전. 시험 설정)과 잡 2번이 적은 시각에 실행됐다. 마지막 케이스라 모니터링 중지 줄은 없다
+        job_at = time.mktime(self.at.timetuple())
+        self.assertEqual(sorted(t for h, t, line in cron.fired), [job_at - 60, job_at, job_at], cron.fired)
+        tab = e.vm_crontab("esx01ev01")
+        self.assertEqual([x for x in tab if " # tcgen " not in x], ["30 9 * * 1 /home/tester/existing.sh"], "원래 있던 줄은 그대로")
+        self.assertEqual(len([x for x in tab if " # tcgen paste1 esx01ev01" in x]), 2, "등록한 줄은 남는다(다음 실행이나 cancel 이 지움)")
         rep = e.log_text(RID, "esx01", "-perfreport_cases.csv")
-        self.assertTrue(rep.startswith("﻿테스트 그룹,케이스명,설명,호스트 이름,"))
-        self.assertIn("\r\n그룹,paste1,한글 설명,esx01,2026-11-20 ", rep)
+        self.assertTrue(rep.startswith("\ufeff테스트 그룹,케이스명,설명,호스트 이름,"))
+        self.assertIn("\r\n그룹,paste1,한글 설명,esx01,%s:00," % text, rep)
         if again:
             # 같은 S 블록을 다시 붙여넣어도 다시 시작하지 않는다
             out = self.paste(shell, [(None, 0, self.res["run"]), (r"files in /\S+ : tcrun-", 0.5, "")], crlf)
             self.assertIn("==== esx01: run %s was already started on this jump VM. Not started again." % RID, out)
-            self.assertEqual(len(cron.fired), 4)
+            self.assertEqual(len(cron.fired), 3)
 
     def test_flow_tcsh_lf(self):
         self.flow("tcsh", False, again=True)
@@ -152,11 +189,9 @@ class SeqBlockTests(unittest.TestCase):
     def test_flow_tcsh_crlf(self):
         self.flow("tcsh", True)
 
-    @unittest.skipUnless(os.path.exists("/bin/bash"), "bash 없음")
     def test_flow_bash_lf(self):
         self.flow("bash", False)
 
-    @unittest.skipUnless(os.path.exists("/bin/bash"), "bash 없음")
     def test_flow_bash_crlf(self):
         self.flow("bash", True)
 
@@ -182,14 +217,17 @@ class SeqBlockTests(unittest.TestCase):
         for name, text in core.jump_files(e.jdir):
             self.assertEqual(self.read(name), text, name)
         self.assertIn("sh %s/esxssh <esx host> hostname" % e.tcgen, out)
+        self.make()
+        RID = self.rid
         out = self.paste("tcsh", [(None, 0, self.res["check"]), (r"saved: /\S+check\.log\r?\n", 0.5, "")])
         self.assertIn("CHECK RESULT: OK", out)
         self.assertTrue(os.path.exists(os.path.join(e.tcgen, "runs", RID, "plan")))
         cron = e.start_cron()
         out = self.paste("tcsh", [(None, 0, self.res["run"]), (r"files in /\S+ : tcrun-", 0.5, "")])
         self.assertIn("status: sh %s/tcrun status" % e.tcgen, out)
-        e.wait_for(lambda: e.state(RID, "esx01").get("state") in ("done", "paused", "stopped"), seconds=180, what="진행 완료")
+        e.wait_for(lambda: e.state(RID, "esx01").get("state") in ("done", "paused", "stopped"), seconds=240, what="진행 완료")
         self.assertEqual(e.state(RID, "esx01")["state"], "done", e.log_text(RID, "esx01"))
+        self.assertEqual(len(cron.fired), 3, cron.fired)
         self.assertEqual(sorted(os.listdir(old)), ["id_esx", "id_esx.pub", "vmpw"], "홈의 ~/.tcgen 에는 새로 쓰지 않음")
 
     def test_version_mismatch_and_not_installed(self):

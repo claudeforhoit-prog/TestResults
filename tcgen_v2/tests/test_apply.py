@@ -275,7 +275,7 @@ class ApplyTests(unittest.TestCase):
                             "set esx01ev01 x.y=1\n")
         res, _ = self.apply(["prepare", "t1"], spec)
         self.assertTrue(res.startswith("error host option '/Numa/LocalityWeightActionAffinity' cannot be set to '999'"), res)
-        self.assertEqual(self.e.esx_adv("esx01", "/Cpu/HTWholeCoreThreshold"), "0", "앞 옵션은 이미 바뀐 상태")
+        self.assertEqual(self.e.esx_adv("esx01", "/Cpu/HTWholeCoreThreshold"), "0", "앞 옵션은 이미 변경된 상태")
         res, lines = self.apply(["rollback", "t1"])
         self.assertEqual(res, "rolledback 0 VM(s), 2 host option(s)")
         self.assertEqual([x for x in lines if x.startswith("TCGEN-WASON")], ["TCGEN-WASON esx01ev01", "TCGEN-WASON esx01ev02"])

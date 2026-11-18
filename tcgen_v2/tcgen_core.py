@@ -40,7 +40,7 @@ import shutil
 import sys
 import time
 
-VERSION = "2.11"
+VERSION = "2.12"
 KST_TO_UTC = dt.timedelta(hours=9)
 CHUNK = 100            # 붙여넣는 글 한 줄에 담는 명령 조각 길이(문자 수)
 NONE_JOB = "(없음)"
@@ -91,7 +91,8 @@ DEFAULT_SETTINGS = {
                                # 기록하는 스크립트). 비우면 실행하지 않는다
     "seq_gap_min": 30,         # 순서 실행: 앞 케이스의 잡이 끝난 뒤 다음 케이스의 잡을 시작하기까지 최소 N분 (0 = 기다리지 않음)
     "seq_start_spacing_min": 5,    # 순서 실행: 모든 잡 시작은 서로 N분 이상 떨어진다(ESX 호스트가 달라도, 이 점프 VM 의 다른 실행과도)
-    "seq_prep_lead_min": 60,   # 순서 실행: 시작 시각을 적은 케이스는 그 시각 N분 전에 준비(설정 적용, VM 전원)를 시작한다 (0 = 차례가 오면 바로)
+    "seq_prep_lead_min": 30,   # 설정이나 VM 전원이 호스트와 다른 케이스는 잡 시작 N분 전에 변경한다(VM 종료, 설정 적용, VM 전원 ON).
+                               # 사용자 결정 2026-11-18 "60분전에 설정 적용이 아니고 30분으로". v2.11 까지는 60
     "seq_poll_sec": 1800,      # 순서 실행: 잡 종료 확인 간격(초). 화면에서는 분으로 고친다. 잡이 실행되는 동안 VM 에 접속하는 주기라서 길게 둔다
     "seq_first_check_sec": 60, # 순서 실행: 잡 시작 뒤 프로세스가 떴는지 처음 확인하는 때(초). 한 번만 확인하고 그 뒤로는 위 간격을 따른다
     "seq_gone_count": 3,       # 순서 실행: 프로세스가 연속으로 이 횟수만큼 없으면 잡 종료로 판정
@@ -101,12 +102,11 @@ DEFAULT_SETTINGS = {
     "seq_shutdown_wait_min": 10,   # 순서 실행: 게스트 종료를 기다리는 최대 시간. 넘으면 전원 끄기
 }
 RUN_MODES = ("seq", "time")
-SETTINGS_REV = 1                        # 설정 파일의 판. 1 = v2.10: seq_settle_min 의 예전 기본값 10 을 30 으로 올린다(load_settings)
-SEQ_INT_SETTINGS = (("seq_settle_min", "변경 작업 뒤 잡 시작까지 최소 분", 0), ("seq_snap_gap_min", "스냅샷 뒤 잡 시작까지 최소 분", 0),
-                    ("seq_snap_lead_min", "구성 스냅샷 시점(잡 시작 전) 분", 0), ("seq_gap_min", "케이스 사이 간격 분", 0),
-                    ("seq_start_spacing_min", "잡 시작 최소 간격 분", 1), ("seq_prep_lead_min", "시작 시각 준비 분", 0),
-                    ("seq_poll_sec", "잡 종료 확인 간격(초)", 5), ("seq_first_check_sec", "잡 시작 뒤 첫 확인(초)", 1),
-                    ("seq_gone_count", "연속 없음 횟수", 1), ("seq_start_wait_min", "시작 대기 분", 1),
+SETTINGS_REV = 2                        # 설정 파일의 판. 1 = v2.10: seq_settle_min 10 -> 30. 2 = v2.12: seq_prep_lead_min 60 -> 30,
+                                        # 진행 방식은 하나(run_mode 는 항상 seq)
+# plan 에 넣는 정수 설정: (설정 이름, 오류 문구에 쓰는 화면의 칸 이름, 가장 작은 값)
+SEQ_INT_SETTINGS = (("seq_snap_lead_min", "'구성 스냅샷 N분 전'", 1), ("seq_start_spacing_min", "'잡 시작 최소 간격'", 1),
+                    ("seq_prep_lead_min", "'설정 적용 N분 전'", 1),
                     ("seq_poweron_wait_min", "VM 켜기 대기 분", 1), ("seq_boot_wait_min", "VM 부팅 대기 분", 1),
                     ("seq_shutdown_wait_min", "종료 대기 분", 1))
 
@@ -192,7 +192,7 @@ def load_settings(base):
         except (TypeError, ValueError):
             s[k] = DEFAULT_SETTINGS[k]
     s["default_vms"] = min(max(s["default_vms"], 0), 20)
-    for k, _, _ in SEQ_INT_SETTINGS:
+    for k in [x[0] for x in SEQ_INT_SETTINGS] + ["seq_settle_min", "seq_snap_gap_min", "seq_gap_min", "seq_poll_sec"]:
         try:
             s[k] = int(s[k])
         except (TypeError, ValueError):
@@ -203,9 +203,14 @@ def load_settings(base):
     # 30분으로 올린다. 한 번만 한다(그 뒤에 사용자가 고친 값은 그대로 둔다)
     if old_rev is not None and old_rev < 1 and s["seq_settle_min"] == 10:
         s["seq_settle_min"] = 30
+    # v2.12 (사용자 2026-11-18 "60분전에 설정 적용이 아니고 30분으로"): 예전 기본값 60분이 그대로 있으면 30분으로 한 번만 고친다.
+    # 구성 스냅샷 시점 0(준비가 끝나는 대로)은 없어졌다: 10분으로 둔다
+    if old_rev is not None and old_rev < 2 and s["seq_prep_lead_min"] == 60:
+        s["seq_prep_lead_min"] = 30
+    if s["seq_snap_lead_min"] < 1:
+        s["seq_snap_lead_min"] = DEFAULT_SETTINGS["seq_snap_lead_min"]
     s["settings_rev"] = SETTINGS_REV
-    if s.get("run_mode") not in RUN_MODES:
-        s["run_mode"] = DEFAULT_SETTINGS["run_mode"]
+    s["run_mode"] = "seq"               # v2.12: 진행 방식 칸이 없어졌다. 파일에 time 이 있어도 한 가지 방식으로 연다
     # 테스트 케이스 파일과 파일별 기록 경로. 파일의 맨 위 record_csv, log_dir 는 기본 파일(test_cases.json)을 쓸 때의 값이다
     cf = "" if s.get("case_file") is None else str(s.get("case_file")).strip()
     key = case_file_key(base, cf)
@@ -902,6 +907,11 @@ def fmt_short(d):
 SEQ_START_RE = re.compile(r"^(\d{1,2}):(\d{2})(?::00)?$")
 
 
+def _md_hm(d):
+    """오류와 경고 문구에 쓰는 짧은 시각: 월-일 시:분."""
+    return d.strftime("%m-%d %H:%M")
+
+
 def parse_seq_start(text, now=None):
     """순서 실행에서 케이스의 잡을 시작할 시각. 비우거나 '자동' 이면 None(앞 케이스가 끝난 뒤 시작).
     '10:00' 처럼 시:분만 적으면 now 뒤에 처음 오는 그 시각이고, '2026-11-20 10:00' 처럼 날짜까지 적으면 그 시각이다. 분 단위."""
@@ -942,6 +952,110 @@ def parse_seq_offset(text):
     if minutes <= 0:
         raise ValueError("간격은 0 보다 커야 함: '%s'" % text)
     return dt.timedelta(minutes=minutes)
+
+
+def table_starts(cases, now=None, record_rows=None, generate=False):
+    """표의 케이스마다 잡 시작 시각을 계산한다(v2.12. 사용자 결정 2026-11-18).
+    - 날짜 시각: 그 시각
+    - +간격: 표의 바로 윗줄 케이스의 시작 시각 + 간격 ("그냥 헤깔리니까 바로 윗줄로할래")
+    - 시:분: 날짜가 없다. generate 가 True 이고 적용 체크하지 않은 케이스이면 now 뒤에 처음 오는 그 시각(이번에 생성하는 케이스).
+      그 밖에는 테스트 기록 CSV(record_rows)의 마지막 생성 기록에 있는 그 케이스의 잡 시작(시:분이 같을 때), 없으면 now 가
+      있고 적용 체크하지 않은 케이스일 때 now 뒤에 처음 오는 그 시각
+    - 빈 칸, 자동: 없음 (자동은 v2.12 에서 뺀 프로세스 확인 방식이다)
+    돌려주는 값: 케이스마다 {"at": 시각 또는 None, "why": 시각이 없는 이유(한 줄), "rel": +간격을 적었으면 그 글, "job": 잡이 있는가}"""
+    latest = latest_records(record_rows or [], True)
+    out = []
+    for i, c in enumerate(cases):
+        raw = (c.get("seq_start") or "").strip()
+        at, why, rel = None, "", ""
+        if not raw or raw == "-":
+            why = "칸이 비어 있음. 시각(예: 2026-11-20 10:00)이나 +간격(예: +10:00)을 적을 것"
+        elif raw.lower() in ("자동", "auto"):
+            why = "칸의 '자동' 은 쓸 수 없음. 시각(예: 2026-11-20 10:00)이나 +간격(예: +10:00)을 적을 것"
+        else:
+            try:
+                off = parse_seq_offset(raw)
+                hm = fmt_seq_start(raw) if (off is None and SEQ_START_RE.match(raw)) else None
+            except ValueError as e:
+                off, hm, why = None, None, "칸: %s" % e
+            if why:
+                pass
+            elif off is not None:
+                base = out[i - 1]["at"] if i > 0 else None
+                if i == 0:
+                    why = "'%s': 표의 첫 줄에는 +간격을 쓸 수 없음. 날짜 시각(예: 2026-11-20 10:00)을 적을 것" % raw
+                elif base is None:
+                    why = "'%s' 을(를) 계산할 수 없음. 바로 윗줄 케이스의 시작 시각이 없음" % raw
+                else:
+                    at, rel = base + off, fmt_seq_offset(off)
+            elif hm is not None:
+                try:
+                    rec_at = parse_dt((latest.get((c.get("name") or "").strip()) or {}).get("잡 시작(KST)", ""))
+                except ValueError:
+                    rec_at = None
+                if rec_at is not None and rec_at.strftime("%H:%M") != hm:
+                    rec_at = None
+                fresh = now is not None and not c.get("applied")
+                if generate and fresh:
+                    at = parse_seq_start(raw, now)
+                elif rec_at is not None:
+                    at = rec_at
+                elif fresh:
+                    at = parse_seq_start(raw, now)
+                else:
+                    why = "'%s' 에 날짜가 없음. 날짜까지 적을 것(예: 2026-11-20 %s)" % (raw, hm)
+            else:
+                try:
+                    at = parse_dt(raw)
+                except ValueError as e:
+                    why = "칸: %s" % e
+        out.append({"at": at, "why": why, "rel": rel, "job": any(_has_job(v) for v in (c.get("vms") or []))})
+    return out
+
+
+def timeline_table(prep, snaplead, lead, has_mon, has_gcmd, has_stop=False):
+    """타임라인(사용자 2026-11-18: 설정 변경이 없는 케이스와 있는 케이스로 나눠, 잡 시작 몇 분 전에 무엇을 하는지)을 표로 돌려준다.
+    {"cols": [시점, ...], "rows": [(묶음 제목, [그 시점에 하는 일 또는 "", ...]), ...]}. T 는 케이스의 잡 시작 시각이고, 열은 시간 순서다."""
+    snap = "구성 스냅샷" + (", VM 에서 명령 실행" if has_gcmd else "")
+    before = {snaplead: [snap]}                    # 잡 시작 N분 전에 두 묶음이 똑같이 하는 일
+    if has_mon:
+        before.setdefault(lead, []).append("모니터링 시작")
+    cols = ["S 블록 실행 직후", "T-%d분" % prep]
+    same, change = ["crontab 에 잡 등록", ""], ["", "VM 종료 -> 설정 적용 -> VM 전원 ON -> crontab 에 잡 등록"]
+    for n in sorted(before, reverse=True):
+        text = ", ".join(before[n])
+        if n == prep:                              # 설정 적용과 같은 분: 그 열에 함께 적는다
+            same[1] = text
+            change[1] += ", " + text
+            continue
+        cols.append("T-%d분" % n if n else "T")
+        same.append(text)
+        change.append(text)
+    if 0 in before:                                # 모니터링 시작이 잡 시작과 같은 분
+        same[-1] += ", 잡 시작"
+        change[-1] += ", 잡 시작"
+    else:
+        cols.append("T")
+        same.append("잡 시작")
+        change.append("잡 시작")
+    cols.append("잡 실행 중")
+    same.append("VM 접속 없음")
+    change.append("VM 접속 없음")
+    if has_stop:
+        cols.append("다음 케이스의 T-%d분" % (prep + 2))
+        same.append("모니터링 중지")
+        change.append("모니터링 중지")
+    return {"cols": cols, "rows": [("설정 변경이 없는 케이스", same), ("설정 변경이 있는 케이스", change)]}
+
+
+def timeline_lines(prep, snaplead, lead, has_mon, has_gcmd, has_stop=False):
+    """타임라인을 글 줄로 돌려준다(실행 계획 글의 앞부분). 묶음마다 '시점 : 하는 일' 을 시간 순서로 적는다."""
+    tb = timeline_table(prep, snaplead, lead, has_mon, has_gcmd, has_stop)
+    out = ["[타임라인]  T = 케이스의 잡 시작 시각"]
+    for title, cells in tb["rows"]:
+        out.append(title)
+        out += ["  %s : %s" % (c, x) for c, x in zip(tb["cols"], cells) if x]
+    return out
 
 
 def fmt_seq_offset(td):
@@ -1033,7 +1147,7 @@ def swap_cases(cases, i, j, time_mode):
     """탭 4 의 [위로], [아래로]: 이웃한 i 행과 j 행의 케이스를 서로 바꾼다.
     순서 실행(time_mode 가 False): 케이스의 값은 모두 케이스를 따라간다.
     시각 지정: 두 케이스 모두 적용 체크하지 않았으면 순서만 바꾸고 잡 시작, 간격, 모니터링 중지 설정, 잡 종료 (리포트) 는 그 자리에
-    남긴다(자리에 정해 둔 시각에 넣을 케이스를 바꾸는 것). 하나라도 적용 체크한 케이스이면 값이 모두 케이스를 따라간다. 이때는 적용
+    남긴다(자리에 정해 둔 시각에 넣을 케이스를 교체하는 경우). 하나라도 적용 체크한 케이스이면 값이 모두 케이스를 따라간다. 이때는 적용
     체크하지 않은 케이스의 잡 시작도 바꾸지 않고, 윗줄이 달라진 행의 간격만 맞춘다(fit_interval)."""
     a, b = cases[i], cases[j]
     follow = (not time_mode) or bool(a.get("applied")) or bool(b.get("applied"))
@@ -1871,13 +1985,8 @@ JUMP_DIR_RE = re.compile(r"^(~/|/)[A-Za-z0-9._/+@,:-]*$")
 ADDR_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
 USER_RE = re.compile(r"^[A-Za-z0-9._][A-Za-z0-9._-]*$")
 HOST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
-PROC_MAX = 80
-SEQ_PLAN_NAMES = {"seq_settle_min": "SETTLE_MIN", "seq_snap_gap_min": "SNAP_GAP_MIN", "seq_snap_lead_min": "SNAP_LEAD_MIN",
-                  "seq_gap_min": "GAP_MIN",
-                  "seq_start_spacing_min": "SPACING_MIN",
-                  "seq_prep_lead_min": "PREP_LEAD_MIN", "seq_poll_sec": "POLL_SEC",
-                  "seq_first_check_sec": "FIRST_CHECK_SEC", "seq_gone_count": "GONE_COUNT",
-                  "seq_start_wait_min": "START_WAIT_MIN", "seq_poweron_wait_min": "POWERON_WAIT_MIN",
+SEQ_PLAN_NAMES = {"seq_snap_lead_min": "SNAP_LEAD_MIN", "seq_start_spacing_min": "SPACING_MIN",
+                  "seq_prep_lead_min": "PREP_LEAD_MIN", "seq_poweron_wait_min": "POWERON_WAIT_MIN",
                   "seq_boot_wait_min": "BOOT_WAIT_MIN", "seq_shutdown_wait_min": "SHUTDOWN_WAIT_MIN"}
 
 
@@ -1923,23 +2032,6 @@ def parse_esx_addr(text):
     return out, errors
 
 
-def check_proc_name(name, label):
-    """프로세스 이름 검증: ASCII 인쇄 문자, 작은따옴표와 ! 와 역슬래시 금지, 80자 이하."""
-    errs = []
-    if any(ord(ch) < 32 or ord(ch) > 126 for ch in name):
-        errs.append("%s: 프로세스 이름에는 ASCII 문자만 쓸 수 있음 (한글, 탭, 줄바꿈 불가)" % label)
-    if any(ch in name for ch in "'!\\"):
-        errs.append("%s: 프로세스 이름에 작은따옴표, !, 역슬래시를 쓸 수 없음" % label)
-    if len(name) > PROC_MAX:
-        errs.append("%s: 프로세스 이름은 %d자 이하 (지금 %d자)" % (label, PROC_MAX, len(name)))
-    return errs
-
-
-def proc_pattern(name):
-    """pgrep -f 에 넘길 정규식. 프로세스 이름을 글자 그대로 찾도록 정규식 특수 문자 앞에 역슬래시를 넣는다."""
-    return re.sub(r"([.\[*^$+?(){|])", r"\\\1", name)
-
-
 def _has_job(v):
     return (v.get("job") or NONE_JOB).strip() not in ("", NONE_JOB)
 
@@ -1954,13 +2046,13 @@ def _csv_line(fields):
     return buf.getvalue()
 
 
-def build_seq(cases, run_cmds, mon_cmds, profiles, settings, now=None):
+def build_seq(cases, run_cmds, mon_cmds, profiles, settings, now=None, record_rows=None):
     """순서 실행의 검증과 케이스별 내용 계산. (케이스 목록, 오류, 경고, 공통 값) 반환. 적용 체크한 케이스는 뺀다.
     now: 시:분만 적은 시작 시각을 날짜가 있는 시각으로 바꾸고, 지난 시각인지 보는 기준(생성 시각)."""
     now = (now or dt.datetime.now()).replace(microsecond=0)
     errors, warnings, plan = [], [], []
-    last_fixed = {}                     # ESX 호스트별로 앞에서 지정한 시작 시각 (순서가 거꾸로면 경고)
-    prev_start, prev_name = {}, {}      # ESX 호스트별로 바로 앞 케이스의 시작 시각(자동이면 None)과 이름: '+간격' 의 기준
+    tstarts = table_starts(cases, now, record_rows, generate=True)      # 표의 줄마다 잡 시작 시각(+간격은 바로 윗줄 기준)
+    last_fixed = {}                     # ESX 호스트별로 앞에서 지정한 시작 시각 (순서가 거꾸로면 오류)
     fixed_at = {}                       # 지정한 시작 시각 -> 그 케이스. 모든 잡 시작은 서로 '잡 시작 최소 간격' 이상 떨어진다(ESX 호스트가 달라도)
     profiles = profiles or []
     try:
@@ -1968,7 +2060,7 @@ def build_seq(cases, run_cmds, mon_cmds, profiles, settings, now=None):
     except (TypeError, ValueError):
         lead = -1
     if lead < 0:
-        errors.append("설정: 모니터링 시작 분은 0 이상의 정수")
+        errors.append("설정: '모니터링 시작 N분 전' 은 0 이상의 정수")
         lead = DEFAULT_SETTINGS["mon_lead_min"]
     sets = [("MON_LEAD_MIN", lead)]
     for key, label, low in SEQ_INT_SETTINGS:
@@ -2022,6 +2114,7 @@ def build_seq(cases, run_cmds, mon_cmds, profiles, settings, now=None):
     prof_by = {p["name"].strip(): p for p in profiles if (p.get("name") or "").strip()}
     names = [(c.get("name") or "").strip() for c in cases]
     checked, parsed, vm_chain = set(), {}, {}
+    bad_chains = set()                  # 오류가 있어 뺀 케이스가 있는 ESX 호스트: 앞뒤 케이스를 비교하는 검사는 하지 않는다(오류가 겹치지 않게)
 
     def cmd_errors(text, label):
         key = (label, text)
@@ -2048,9 +2141,11 @@ def build_seq(cases, run_cmds, mon_cmds, profiles, settings, now=None):
         name = names[i]
         if not NAME_RE.match(name):
             errors.append("%s: 케이스 이름은 영문, 숫자, . _ - 만 사용 ('%s')" % (row, name))
+            bad_chains.add((c.get("esx") or "").strip() or "-")
             continue
         if names.count(name) > 1:
-            errors.append("%s: 케이스 이름 중복 '%s' (적용 체크한 행 포함). 이름이 같으면 crontab 줄과 로그에서 케이스를 구별할 수 없음" % (row, name))
+            errors.append("%s: 케이스 이름 '%s' 이(가) 다른 행(적용 체크한 행 포함)과 같음. 이름을 고칠 것" % (row, name))
+            bad_chains.add((c.get("esx") or "").strip() or "-")
             continue
         label = "%s %s" % (row, name)
         esx_host = (c.get("esx") or "").strip()
@@ -2075,8 +2170,7 @@ def build_seq(cases, run_cmds, mon_cmds, profiles, settings, now=None):
                 errors.append("%s: VM '%s' 은 전원 끔인데 잡이나 모니터링이 있음. 전원을 켬으로 바꾸거나 잡과 모니터링을 (없음)으로 할 것"
                               % (label, v.get("name") or "이름 없음"))
         if has_mon and not jobs:
-            errors.append("%s: 모니터링만 있고 잡이 없음. 순서 실행은 잡의 프로세스가 끝난 것을 확인한 뒤 모니터링을 중지하므로 "
-                          "잡이 하나 이상 있어야 함" % label)
+            errors.append("%s: 모니터링만 있고 잡이 없음. 잡을 하나 이상 지정할 것" % label)
         if (esx_mons or has_set or offs) and not HOST_RE.match(esx_host):
             errors.append("%s: ESX 호스트 이름이 비었거나 맞지 않음 ('%s'). 설정 적용, ESX 모니터링, VM 전원 끔에는 ESX 호스트가 있어야 하고, "
                           "이름은 영문이나 숫자로 시작해 영문, 숫자, . _ - 만 사용" % (label, esx_host))
@@ -2096,47 +2190,32 @@ def build_seq(cases, run_cmds, mon_cmds, profiles, settings, now=None):
         except ValueError:
             errors.append("%s: 최대 대기는 시간:분 으로 입력 (예: 12:00, 비우면 제한 없음): '%s'" % (label, c.get("max_wait")))
         chain = esx_host or "-"
-        start_at, start_off = None, None
+        # 시작 시각(v2.12): 잡이 있는 케이스는 반드시 있어야 한다. 적은 시각 그대로 등록하고 바꾸지 않는다(사용자 결정 2026-11-18).
+        # 잡이 없는 케이스(설정과 VM 전원만)는 적었으면 그 시각에 적용하고, 비웠으면 다음 잡 케이스의 설정 적용 때 함께 한다
+        ts = tstarts[i]
         raw_start = (c.get("seq_start") or "").strip()
-        try:
-            start_off = parse_seq_offset(raw_start)
-            if start_off is None:
-                start_at = parse_seq_start(raw_start, now)
-        except ValueError as e:
-            errors.append("%s: 시작 시각 칸. %s" % (label, e))
-        if (start_at is not None or start_off is not None) and not jobs:
-            warnings.append("%s: 잡이 없는 케이스라 시작 시각 %s 을(를) 쓰지 않음" % (label, fmt_dt(start_at) if start_at else raw_start))
-            start_at, start_off = None, None
-        if start_off is not None:
-            # '+간격': 이번 생성에 넣는 케이스 가운데 같은 ESX 호스트의 바로 앞 케이스 시작 시각이 기준이다
-            if chain not in prev_start:
-                errors.append("%s: 시작 시각 '%s' 은(는) 같은 ESX 호스트의 바로 앞 케이스 시작 시각에서 그만큼 뒤라는 뜻인데, 이번 생성에 넣은 "
-                              "앞 케이스가 없음. 그 호스트의 첫 케이스에는 시각을 직접 적을 것(예: 10:00)" % (label, raw_start))
-            elif prev_start[chain] is None:
-                errors.append("%s: 시작 시각 '%s' 을(를) 계산할 수 없음. 같은 ESX 호스트의 바로 앞 케이스 %s 의 시작 시각이 자동이거나 "
-                              "그 케이스에 잡이 없음. 앞 케이스에 시작 시각을 적거나 이 케이스에 시각을 직접 적을 것"
-                              % (label, raw_start, prev_name[chain]))
-            else:
-                start_at = prev_start[chain] + start_off
-        prev_start[chain], prev_name[chain] = start_at, name
+        start_at = ts["at"]
+        if not jobs and raw_start in ("", "-"):
+            start_at = None
+        elif start_at is None:
+            errors.append("%s: 시작 시각 %s" % (label, ts["why"]))
+        elif start_at <= now:
+            errors.append("%s: 시작 시각 %s 이(가) 이미 지났음 (지금 %s). 시각을 고칠 것" % (label, fmt_dt(start_at), fmt_dt(now)))
+        elif jobs and any(abs((start_at - t).total_seconds()) < spacing * 60 for t in fixed_at):
+            t = min(fixed_at, key=lambda x: abs((start_at - x).total_seconds()))
+            errors.append("%s: 시작 시각 %s 이(가) %s 의 시작 시각 %s 과 %d분 이상 떨어져 있지 않음. 두 시각 가운데 하나를 고칠 것"
+                          "(설정 영역의 '잡 시작 최소 간격')" % (label, fmt_dt(start_at), fixed_at[t], fmt_dt(t), spacing))
+        elif chain in last_fixed and start_at < last_fixed[chain]:
+            errors.append("%s: 시작 시각 %s 이(가) 같은 ESX 호스트의 앞 케이스(%s)보다 빠름. 표의 순서를 시작 시각 순서로 맞출 것"
+                          % (label, fmt_dt(start_at), fmt_dt(last_fixed[chain])))
         if start_at is not None:
-            if start_at <= now:
-                errors.append("%s: 시작 시각 %s 이(가) 이미 지났음 (지금 %s). 시각을 고칠 것"
-                              % (label, fmt_dt(start_at), fmt_dt(now)))
-            elif any(abs((start_at - t).total_seconds()) < spacing * 60 for t in fixed_at):
-                t = min(fixed_at, key=lambda x: abs((start_at - x).total_seconds()))
-                errors.append("%s: 시작 시각 %s 이(가) %s 의 시작 시각 %s 과 %d분 이상 떨어져 있지 않음. 모든 잡은 서로 %d분 이상 떨어져 "
-                              "시작해야 함(ESX 호스트가 달라도. 설정 영역의 '잡 시작 최소 간격')"
-                              % (label, fmt_dt(start_at), fixed_at[t], fmt_dt(t), spacing, spacing))
-            elif chain in last_fixed and start_at < last_fixed[chain]:
-                warnings.append("%s: 시작 시각 %s 이(가) 앞 케이스의 시작 시각 %s 보다 빠름. 앞 케이스가 끝난 뒤 가능한 "
-                                "가장 이른 시각에 시작함" % (label, fmt_dt(start_at), fmt_dt(last_fixed[chain])))
             last_fixed[chain] = max(start_at, last_fixed.get(chain, start_at))
-            fixed_at.setdefault(start_at, label)
+            if jobs:
+                fixed_at.setdefault(start_at, label)
         pc = {"index": i, "name": name, "esx": esx_host, "chain": chain, "vms": [], "host_opts": [],
               "ems": [], "emx": [], "epat": "", "max_wait": max_wait, "has_mon": has_mon, "start_at": start_at,
-              "start_rel": fmt_seq_offset(start_off) if (start_off is not None and start_at is not None) else "",
-              "nocheck": False, "handover": None,
+              "start_rel": ts["rel"] if start_at is not None else "",
+              "seg": 1, "mstop": None, "applyat": None,
               "group": _one_line(c.get("group")), "desc": _one_line(c.get("desc")),
               "report_vms": report_vms(c), "end_refs": report_end_refs(c), "entries": [], "case": c}
 
@@ -2211,24 +2290,8 @@ def build_seq(cases, run_cmds, mon_cmds, profiles, settings, now=None):
                 else:
                     for e in cmd_errors(rc.get("cmd"), "탭 1 '%s' 명령" % jn):
                         errors.append(e)
-                    proc = (rc.get("proc") or "").strip()
-                    first_time = ("proc", jn) not in checked
-                    checked.add(("proc", jn))
-                    if proc:
-                        if first_time:
-                            errors += check_proc_name(proc, "탭 1 '%s'" % jn)
-                            if len(proc) < 3:
-                                warnings.append("탭 1 '%s': 프로세스 이름 '%s' 가 3자보다 짧음. 다른 프로세스의 명령줄에도 같은 글자가 "
-                                                "있으면 잡이 끝나지 않은 것으로 판정됨" % (jn, proc))
-                        for mname in vm["monitors"]:
-                            mc = mon_by.get(mname) or {}
-                            if proc in (mc.get("start") or ""):
-                                warnings.append("%s: VM '%s' 의 모니터링 '%s' 시작 명령에 프로세스 이름 '%s' 가 들어 있음. 모니터링이 "
-                                                "실행되는 동안 잡이 끝나지 않은 것으로 판정될 수 있음" % (label, vname, mname, proc))
                     vm["job_name"] = jn
                     vm["job"] = render_command(rc.get("cmd", ""), False) + marker(name, vname)
-                    vm["proc_name"] = proc
-                    vm["proc"] = proc_pattern(proc) if proc else ""
                     entry("VM", vname, "잡", jn, rc.get("app", ""), rc.get("desc", ""), (rc.get("cmd") or "").strip(), vm["job"])
             if vm["ms"] or vm["mx"] or vm["job"]:
                 vm["pat"] = _bre(marker(name, vname)) + "$"
@@ -2250,76 +2313,78 @@ def build_seq(cases, run_cmds, mon_cmds, profiles, settings, now=None):
             pc["epat"] = _bre(marker(name, esx_host)) + "$"
         if len(errors) == before:
             plan.append(pc)
+        else:
+            bad_chains.add(chain)
     for n, pc in enumerate(plan, 1):
         pc["seq"] = "%03d" % n
-    # 잡 확인을 하는 케이스와 하지 않는 케이스 (사용자 결정 2026-11-17): 시작 시각을 적은 케이스(시각 또는 +간격)는 정해진 시각에
-    # 진행하므로 잡 프로세스를 확인하지 않는다. 잡이 실행되는 동안 VM 에 접속하지 않기 위해서다. 다만 같은 ESX 호스트의 바로 다음
-    # 케이스가 자동이면 그 케이스가 이 케이스의 잡 종료를 기다리므로 확인한다.
+    # 케이스 묶음과 시각(사용자 결정 2026-11-18. 업무기록 W-20261118-08)
+    # - seg 1: 설정이나 VM 전원이 호스트와 다를 수 있는 케이스. ESX 호스트의 첫 케이스와, 설정, VM 전원, VM 구성이 앞 케이스와 다른
+    #   케이스다. tcrun 이 잡 시작 prep 분 전에 호스트와 비교하고, 다르면 VM 종료, 설정 적용, VM 전원 ON 을 한다
+    # - seg 0: 앞 케이스와 같다. tcrun 이 ESX 호스트에 접속하지 않고, crontab 줄은 앞의 seg 1 케이스와 함께 등록한다
+    # - 잡 시작 시각은 표에 적은 그대로다. tcrun 이 바꾸지 않는다
+    # - 구성 스냅샷은 모든 케이스에서 잡 시작 snaplead 분 전이다. 줄 등록이 스냅샷보다 먼저이므로 스냅샷 때문에 시각이 달라지지 않는다
     prep = dict(sets).get("PREP_LEAD_MIN", DEFAULT_SETTINGS["seq_prep_lead_min"])
-    settle = dict(sets).get("SETTLE_MIN", DEFAULT_SETTINGS["seq_settle_min"])
-    snapgap = dict(sets).get("SNAP_GAP_MIN", DEFAULT_SETTINGS["seq_snap_gap_min"])
     snaplead = dict(sets).get("SNAP_LEAD_MIN", DEFAULT_SETTINGS["seq_snap_lead_min"])
-    # 구성 스냅샷 시점(사용자 결정 2026-11-18 "네 10분전 스냅샷으로"): 스냅샷은 잡 시작 snaplead 분 전에 읽는다. 스냅샷을 읽은 뒤에
-    # crontab 줄을 등록하므로, 스냅샷 시점은 '스냅샷 뒤 잡 시작까지 최소' 와 모니터링 시작(잡 시작 lead 분 전)보다 3분 이상 앞이어야
-    # 한다(스냅샷을 읽고 줄을 등록하는 시간). 모자라면 시작 시각을 적은 케이스마다 잡 시작이 늦어지므로 오류로 알린다
-    if snaplead > 0 and any(any(vm["job"] for vm in pc["vms"]) for pc in plan):
-        need = max(snapgap, lead if any(pc["has_mon"] for pc in plan) else 0) + 3
-        if snaplead < need:
-            errors.append("설정: '구성 스냅샷 시점' %d분은 %d분 이상이어야 함('스냅샷 뒤 잡 시작까지 최소' %d분%s보다 3분 이상 길게. "
-                          "스냅샷을 읽고 줄을 등록하는 시간). 0 으로 두면 케이스의 준비가 끝나는 대로 읽음"
-                          % (snaplead, need, snapgap, (", 모니터링 시작 %d분" % lead) if any(pc["has_mon"] for pc in plan) else ""))
-    # 잡 시작 전의 시간 규칙(사용자 2026-11-17 "잡 시작 최소 5분전에 config 스냅샷 부분이 완료되면 좋겠으니 변경 작업 포함해서 시간
-    # 조정해줘 변경작업은 30분혹은 그 이상 이전에 수행"): 잡은 변경 작업이 끝나고 settle 분, 구성 스냅샷이 끝나고 snapgap 분 뒤부터
-    # 시작한다(tcrun 의 register). 시작 시각을 적은 케이스의 준비가 이보다 늦게 시작하면 잡 시작이 적은 시각보다 늦어지므로 알린다
-    if prep > 0 and any(pc["start_at"] is not None for pc in plan):
-        if settle > 0 and prep < settle + 10:
-            warnings.append("설정: '시작 시각 준비' %d분이 '변경 작업 뒤 잡 시작까지 최소' %d분보다 10분 이상 길지 않음. 준비 때 설정을 "
-                            "변경하거나 VM 을 켜고 끄는 케이스는 잡 시작이 적은 시각보다 늦어짐(변경 작업에 걸리는 시간만큼). "
-                            "'시작 시각 준비' 를 늘릴 것" % (prep, settle))
-        if snapgap > 0 and prep < snapgap + 5:
-            warnings.append("설정: '시작 시각 준비' %d분이 '스냅샷 뒤 잡 시작까지 최소' %d분보다 5분 이상 길지 않음. 잡 시작이 적은 "
-                            "시각보다 늦어질 수 있음. '시작 시각 준비' 를 늘릴 것" % (prep, snapgap))
-        if snaplead > 0 and prep < snaplead + 5:
-            warnings.append("설정: '시작 시각 준비' %d분이 '구성 스냅샷 시점' %d분보다 5분 이상 길지 않음. 준비가 그때까지 끝나지 않으면 "
-                            "구성 스냅샷이 잡 시작 %d분 전보다 늦게 남음. '시작 시각 준비' 를 늘릴 것" % (prep, snaplead, snaplead))
-    by_chain, no_proc = {}, []
+    common["notes"] = []
+    if prep <= snaplead:
+        errors.append("설정: '설정 적용 N분 전'(%d)은 '구성 스냅샷 N분 전'(%d)보다 커야 함" % (prep, snaplead))
+    if any(pc["has_mon"] for pc in plan) and prep <= common["lead"]:
+        errors.append("설정: '설정 적용 N분 전'(%d)은 '모니터링 시작 N분 전'(%d)보다 커야 함" % (prep, common["lead"]))
+    by_chain, no_stop = {}, []
     for pc in plan:
         by_chain.setdefault(pc["chain"], []).append(pc)
-    for pcs in by_chain.values():
+
+    def sig(pc):
+        return (tuple(pc["host_opts"]), tuple((vm["name"], vm["power"], tuple(vm["set"])) for vm in pc["vms"]))
+
+    for chain, pcs in by_chain.items():
+        errs = [] if chain in bad_chains else errors
         for k, pc in enumerate(pcs):
             label = "%d번째 케이스 %s" % (pc["index"] + 1, pc["name"])
-            nxt = pcs[k + 1] if k + 1 < len(pcs) else None
             has_job = any(vm["job"] for vm in pc["vms"])
-            if has_job and pc["start_at"] is not None and (nxt is None or nxt["start_at"] is not None):
-                pc["nocheck"] = True
-                if nxt is not None:
-                    # 다음 케이스 준비를 시작하는 시각. 그 2분 전에 이 케이스의 모니터링을 중지한다. 준비는 적어도 다음 케이스의
-                    # 모니터링 시작, '스냅샷 뒤 잡 시작까지 최소', '구성 스냅샷 시점' 가운데 가장 긴 것보다 5분 앞에 시작한다
-                    # (로그인 확인, 스냅샷, 줄 등록)
-                    lead_n = max(prep, max(lead if nxt["has_mon"] else 0, snapgap, snaplead) + 5)
-                    pc["handover"] = nxt["start_at"] - dt.timedelta(minutes=lead_n)
-                    if pc["handover"] - dt.timedelta(minutes=2) <= pc["start_at"] + dt.timedelta(minutes=1):
-                        errors.append("%s: 다음 케이스 %s 의 준비 시작 %s 이(가) 이 케이스의 잡 시작 %s 보다 빠르거나 3분 안임. 시작 시각을 적은 "
-                                      "케이스는 다음 케이스 준비 2분 전에 모니터링을 중지하고 넘어가므로 잡이 실행될 시간이 없음. 다음 케이스의 "
-                                      "시작 시각을 늦추거나 설정 영역의 '시작 시각 준비' 를 줄일 것"
-                                      % (label, nxt["name"], fmt_dt(pc["handover"]), fmt_dt(pc["start_at"])))
-                elif not pc["max_wait"]:
-                    warnings.append("%s: 이 ESX 호스트의 마지막 케이스이고 잡을 확인하지 않아 끝나는 시각이 없음. 모니터링을 중지하지 않고 "
-                                    "실행을 끝냄. 최대 대기를 적으면 잡 시작 + 최대 대기에 모니터링을 중지함. 비워 두면 같은 ESX 호스트의 "
-                                    "다음 실행이 준비를 시작할 때나 점프 VM 의 tcrun cancel 로 중지함" % label)
-            elif has_job and pc["start_at"] is not None and any(vm["job"] for vm in nxt["vms"]):
-                warnings.append("%s: 시작 시각을 적었지만 다음 케이스 %s 이(가) 자동이라 이 케이스의 잡 종료를 확인함(VM 접속). "
-                                "확인을 없애려면 다음 케이스에도 시작 시각이나 +간격을 적을 것" % (label, nxt["name"]))
-            elif has_job and pc["start_at"] is not None:
-                warnings.append("%s: 시작 시각을 적었지만 다음 케이스 %s 이(가) 잡이 없는 케이스(설정과 VM 전원만 맞춤)라 이 케이스의 잡 종료를 "
-                                "확인한 뒤에 진행함(VM 접속)" % (label, nxt["name"]))
-            if has_job and not pc["nocheck"]:
-                for vm in pc["vms"]:
-                    if vm["job"] and not vm["proc"] and vm["job_name"] not in no_proc:
-                        no_proc.append(vm["job_name"])
-                        errors.append("탭 1 '%s': 프로세스 이름이 비어 있음. %s 은(는) 잡 종료를 확인하는 케이스라(시작 시각이 자동이거나 "
-                                      "다음 케이스가 자동) 이 이름의 프로세스가 없어진 것으로 잡 종료를 판정함 (pgrep -f 로 찾으므로 실행 "
-                                      "중인 명령줄에 들어 있는 글자를 입력)" % (vm["job_name"], label))
+            pc["seg"] = 1 if k == 0 else (0 if (chain == "-" or sig(pc) == sig(pcs[k - 1])) else 1)
+            nxt = next((q for q in pcs[k + 1:] if any(vm["job"] for vm in q["vms"])), None)       # 뒤에 오는 첫 잡 케이스
+            prev = next((q for q in reversed(pcs[:k]) if any(vm["job"] for vm in q["vms"])), None)
+            if not has_job:
+                # 설정과 VM 전원만 맞추는 케이스: 적은 시각, 없으면 다음 잡 케이스의 설정 적용 시각(잡 시작 prep 분 전)에 한다
+                if pc["start_at"] is not None:
+                    pc["applyat"] = pc["start_at"]
+                elif nxt is not None and nxt["start_at"] is not None:
+                    pc["applyat"] = nxt["start_at"] - dt.timedelta(minutes=prep)
+                elif nxt is None:
+                    errs.append("%s: 잡이 없는 케이스이고 뒤에 잡이 있는 케이스도 없음. 시작 시각 칸에 설정을 적용할 시각을 적을 것" % label)
+                if pc["applyat"] is not None and prev is not None and prev["start_at"] is not None \
+                        and pc["applyat"] <= prev["start_at"] + dt.timedelta(minutes=1):
+                    errs.append("%s: 설정을 적용할 시각 %s 이(가) 앞 케이스 %s 의 잡 시작 %s 보다 빠름. 시각을 늦출 것"
+                                  % (label, _md_hm(pc["applyat"]), prev["name"], _md_hm(prev["start_at"])))
+                continue
+            if pc["start_at"] is None:
+                continue
+            if pc["seg"] == 1 and prev is not None and prev["start_at"] is not None \
+                    and pc["start_at"] - dt.timedelta(minutes=prep) <= prev["start_at"] + dt.timedelta(minutes=1):
+                errs.append("%s: 시작 시각을 %s 이후로 고칠 것. 설정이 앞 케이스와 달라 잡 시작 %d분 전에 VM 을 종료하는데, "
+                              "그 시각이 앞 케이스 %s 의 잡 시작(%s)보다 늦지 않음"
+                              % (label, _md_hm(prev["start_at"] + dt.timedelta(minutes=prep + 2)), prep, prev["name"],
+                                 _md_hm(prev["start_at"])))
+            # 모니터링 중지(중지 명령이 있는 모니터링): 다음 잡 케이스의 설정 적용 2분 전(잡 시작 prep + 2분 전). 최대 대기를 적었으면
+            # 잡 시작 + 최대 대기가 더 이를 때 그 시각. 마지막 케이스는 최대 대기가 있을 때만 중지한다. crontab 에 잡과 함께 등록한다
+            has_stop = bool(pc["emx"]) or any(vm["mx"] for vm in pc["vms"])
+            ends = []
+            if nxt is not None and nxt["start_at"] is not None:
+                ends.append(nxt["start_at"] - dt.timedelta(minutes=prep + 2))
+            if pc["max_wait"]:
+                ends.append(pc["start_at"] + dt.timedelta(minutes=pc["max_wait"]))
+            if has_stop and ends:
+                pc["mstop"] = min(ends)
+                if pc["mstop"] <= pc["start_at"] + dt.timedelta(minutes=1):
+                    errs.append("%s: 모니터링을 중지할 시각 %s 이(가) 잡 시작 %s 보다 빠르거나 같음. 다음 케이스의 시작 시각을 늦추거나 "
+                                  "최대 대기를 늘릴 것" % (label, _md_hm(pc["mstop"]), _md_hm(pc["start_at"])))
+            elif has_stop:
+                no_stop.append(pc["name"])
+    if no_stop:
+        # 생성을 막지 않는 알림으로 보인다(사용자 지적 2026-11-18 "이 경고가필요해?"). 그 대상(중지 명령이 있는 모니터링)이 있을 때만 낸다
+        common["notes"].append("마지막 케이스(%s)는 모니터링 중지 시각이 없음. 정하려면 그 케이스의 '최대 대기' 칸에 시간을 적을 것"
+                               "(비워 두면 다음 실행이나 tcrun cancel 때 중지)" % ", ".join(no_stop))
     return plan, errors, warnings, common
 
 
@@ -2347,12 +2412,14 @@ def plan_text(plan, common, run_id, now):
     for pc in plan:
         s = pc["seq"]
         out.append("CASE %s %s %s" % (s, pc["chain"], pc["name"]))
-        out.append("MAXWAIT %s %d" % (s, pc["max_wait"]))
-        if pc.get("start_at"):          # 잡을 시작할 시각: 초(이 PC 의 시간대 기준 epoch)와 읽기 쉬운 글
+        out.append("SEG %s %d" % (s, pc["seg"]))
+        if pc.get("start_at") and any(vm["job"] for vm in pc["vms"]):       # 잡을 시작할 시각: 초(이 PC 의 시간대 기준 epoch)와 읽기 쉬운 글
             out.append("START %s %d %s" % (s, int(time.mktime(pc["start_at"].timetuple())), pc["start_at"].strftime("%Y-%m-%d %H:%M")))
-        if pc.get("nocheck"):           # 잡을 확인하지 않는 케이스: 다음 케이스 준비를 시작하는 시각(없으면 0)
-            h = pc.get("handover")
-            out.append("NOCHK %s %d %s" % (s, int(time.mktime(h.timetuple())) if h else 0, h.strftime("%Y-%m-%d %H:%M") if h else "-"))
+        if pc.get("mstop"):             # 모니터링 중지 시각(crontab 에 잡과 함께 등록)
+            out.append("MSTOP %s %d %s" % (s, int(time.mktime(pc["mstop"].timetuple())), pc["mstop"].strftime("%Y-%m-%d %H:%M")))
+        if pc.get("applyat"):           # 잡이 없는 케이스: 설정과 VM 전원을 맞출 시각
+            out.append("APPLYAT %s %d %s" % (s, int(time.mktime(pc["applyat"].timetuple())),
+                                             pc["applyat"].strftime("%Y-%m-%d %H:%M")))
         out.append("RPTA %s %s" % (s, _csv_line([pc["group"], pc["name"], pc["desc"], pc["esx"]])))
         out.append("RPTB %s %s" % (s, _csv_line([";".join(pc["report_vms"]), ";".join(pc["end_refs"])])))
         for vm in pc["vms"]:
@@ -2367,8 +2434,6 @@ def plan_text(plan, common, run_id, now):
             out += ["MS %s %s %s" % (s, vm["name"], ln) for ln in vm["ms"]]
             if vm["job"]:
                 out.append("JOB %s %s %s" % (s, vm["name"], vm["job"]))
-                if vm["proc"]:
-                    out.append("PROC %s %s %s" % (s, vm["name"], vm["proc"]))
             out += ["MX %s %s %s" % (s, vm["name"], ln) for ln in vm["mx"]]
         if pc["epat"]:
             out.append("EPAT %s %s" % (s, pc["epat"]))
@@ -2378,77 +2443,29 @@ def plan_text(plan, common, run_id, now):
     return "\n".join(out) + "\n"
 
 
+def plan_has_stop(plan):
+    """중지 명령이 있는 모니터링을 쓰는 케이스가 있는가."""
+    return any(pc["emx"] or any(vm["mx"] for vm in pc["vms"]) for pc in plan)
+
+
 def plan_view(plan, common, run_id):
-    """화면에 보이는 실행 계획. 공통 규칙을 맨 위에 한 번 적고, 케이스마다 그 케이스에만 해당하는 값을 항목별로 적는다."""
+    """화면에 보이는 실행 계획: 타임라인(설정 변경이 없는 케이스와 있는 케이스)을 먼저 적고, 케이스마다 그 케이스의 값을 적는다."""
     sets = dict(common["sets"])
-    lead, settle, gap = sets["MON_LEAD_MIN"], sets["SETTLE_MIN"], sets.get("GAP_MIN", 0)
-    snapgap, gcmd, snaplead = sets.get("SNAP_GAP_MIN", 5), common.get("gcmd") or "", sets.get("SNAP_LEAD_MIN", 10)
-    spacing, prep, shut = sets.get("SPACING_MIN", 5), sets.get("PREP_LEAD_MIN", 60), sets.get("SHUTDOWN_WAIT_MIN", 10)
-    poll, first, gone = sets["POLL_SEC"], sets.get("FIRST_CHECK_SEC", 60), sets["GONE_COUNT"]
-    every = ("%d분" % (poll // 60)) if poll % 60 == 0 else ("%d초" % poll)
+    lead, snaplead, prep = sets["MON_LEAD_MIN"], sets.get("SNAP_LEAD_MIN", 10), sets.get("PREP_LEAD_MIN", 30)
+    gcmd = common.get("gcmd") or ""
     jdir = common.get("jdir") or DEFAULT_JUMP_DIR
-
-    def jobs_in(pc):
-        return any(vm["job"] for vm in pc["vms"])
-
     out = ["실행 ID %s" % run_id,
-           "점프 VM 작업 폴더 %s, 로그 폴더 %s (진행 로그 tcrun-%s-<ESX 호스트>.log)" % (jdir, common["logdir"], run_id),
+           "점프 VM 작업 폴더 %s, 로그 폴더 %s" % (jdir, common["logdir"]),
+           "등록 기록 %s/tcrun-%s-jobs.csv (케이스, ESX 호스트, VM, 잡 시작, crontab 등록 여부)" % (common["logdir"], run_id),
            "진행 확인 sh %s/tcrun status, 멈추기 sh %s/tcrun stop, 취소 sh %s/tcrun cancel" % (jdir, jdir, jdir),
-           "",
-           "[공통 규칙]",
-           "- 순서: ESX 호스트마다 표의 순서대로 진행한다. 호스트끼리는 서로 기다리지 않는다.",
-           "- 잡 시작 간격: 모든 잡 시작은 서로 %d분 이상 떨어진다(다른 ESX 호스트, 이 점프 VM 의 다른 실행 포함). "
-           "가까우면 뒤에 정한 잡을 %d분 뒤로 옮긴다." % (spacing, spacing),
-           "- 설정 적용: 값이 모두 같으면 VM 을 끄지 않는다. 하나라도 다르면 케이스의 VM 을 모두 끄고 바꾼다.",
-           "- VM 전원: 끔인 VM 은 끈다(게스트 종료, %d분 안에 꺼지지 않으면 전원 끄기). 켬인 VM 은 표의 순서대로 하나씩 켠다. "
-           "VM 마다 켜기 작업, 1GB page backing 완료(1GB page 를 쓰는 VM), ssh 로그인을 확인한 뒤 다음 VM 을 켠다." % shut]
-    if settle > 0:
-        out.append("- 변경 작업 뒤 대기: 이번 실행이 그 ESX 호스트에서 변경 작업(설정 적용, VM 끄기, VM 켜기)을 했으면 마지막 변경이 끝나고 "
-                   "%d분 뒤부터 잡을 시작한다. 변경한 것이 없으면 기다리지 않는다." % settle)
-    else:
-        out.append("- 변경 작업 뒤 대기: 없음(설정값 0분).")
-    if snaplead > 0:
-        when = ("잡 시작 %d분 전에 읽는다. 케이스의 준비(설정 적용, VM 전원 맞추기)를 먼저 마치고 그 시각까지 기다린 뒤 읽고, 그 뒤에 줄을 "
-                "등록한다. 변경 작업 뒤 대기 때문에 잡 시작이 늦어지면 늦어진 잡 시작의 %d분 전에 읽는다. 시작 시각이 자동인 케이스는 "
-                "기다릴 대기(변경 작업 뒤 대기, 케이스 사이 간격)가 없으면 준비가 끝나는 대로 읽는다" % (snaplead, snaplead))
-    else:
-        when = ("케이스의 준비 때(%s) 설정 적용과 VM 전원 맞추기를 마친 뒤, 줄을 등록하기 전에 읽는다"
-                % (("시작 시각을 적은 케이스는 그 시각 %d분 전" % prep) if prep > 0 else "시작 시각을 적은 케이스도 차례가 오는 대로"))
-    out.append("- 구성 스냅샷: 잡이 있는 케이스마다 잡 시작 전에 그 케이스 VM 의 VM 설정(ESX 호스트에서 읽은 vmx 값)과 Guest OS 설정(THP "
-               "등)을 로그 폴더의 tcrun-%s-<ESX 호스트>-config-<케이스 번호>-<케이스>.csv 에 기록한다. %s(켜져 있는 VM 마다 접속 1번. "
-               "읽기만 한다. 방금 켠 VM 이 있으면 마지막 VM 의 준비 60초 뒤부터)." % (run_id, when))
-    if snapgap > 0:
-        out.append("- 스냅샷 뒤 대기: 잡은 구성 스냅샷이 끝나고 %d분 뒤부터 시작한다." % snapgap)
-    else:
-        out.append("- 스냅샷 뒤 대기: 없음(설정값 0분).")
+           ""]
+    out += timeline_lines(prep, snaplead, lead, any(pc["has_mon"] for pc in plan), bool(gcmd), plan_has_stop(plan))
     if gcmd:
-        out.append("- 스냅샷 때 실행할 명령: 구성 스냅샷 때 케이스의 켜져 있는 VM 마다 접속해 실행한다(VM 마다 접속 1번 더). 결과는 "
-                   "스냅샷 csv 의 snapshot command 행과 진행 로그에 남는다. 실패해도 케이스는 진행한다. 명령: %s" % gcmd)
-    else:
-        out.append("- 스냅샷 때 실행할 명령: 없음(게스트 구성을 VCF Operations 에 기록하지 않는다. 설정 영역에서 적는다).")
-    out.append("- 시각을 지킬 수 없을 때: 변경 작업 뒤 대기나 스냅샷 뒤 대기 때문에 적은 시작 시각을 지킬 수 없으면 가능한 가장 이른 "
-               "시각에 잡을 시작하고 진행 로그에 WARN 을 남긴다.")
-    out.append("- 모니터링: 잡 시작 %d분 전에 시작한다. 중지 명령은 잡을 확인하는 케이스는 잡 종료를 확인한 뒤에, 확인하지 않는 케이스는 "
-               "케이스가 끝나는 시각에 실행한다." % lead)
-    out.append("- 시작 시각: 시각이나 +간격(앞 케이스 시작 시각 기준)을 적은 케이스는 그 시각에 잡을 시작하고, 설정 적용과 VM 전원 맞추기는 "
-               "%s. 자동인 케이스는 앞 케이스의 잡이 끝나고 %d분 뒤에 시작한다."
-               % (("그 시각 %d분 전에 시작한다" % prep) if prep > 0 else "차례가 오는 대로 한다", gap))
-    if any(pc.get("nocheck") for pc in plan):
-        out.append("- 잡 확인 안 함: 시작 시각을 적은 케이스는 잡 프로세스를 확인하지 않는다. 잡이 실행되는 동안 VM 에 접속하지 않는다"
-                   "(VM 접속은 잡 시작 전에 VM 마다 3~4번, 그 가운데 1번이 구성 스냅샷. 케이스가 끝난 뒤 1번). 케이스는 정해진 시각에 끝난다: 다음 케이스 준비 2분 전에 "
-                   "모니터링을 중지하고 넘어간다. 최대 대기를 적었으면 잡 시작 + 최대 대기가 더 이를 때 그 시각에 끝낸다.")
-    if any(jobs_in(pc) and not pc.get("nocheck") for pc in plan):
-        out.append("- 잡 확인 함: 시작 시각이 자동인 케이스와 바로 다음 케이스가 자동인 케이스는 잡 종료를 알아야 하므로 확인한다. "
-                   "잡 시작 %d초 뒤 한 번, 그 뒤 %s마다 VM 에서 프로세스를 찾는다. %d회 연속 없으면 종료로 본다." % (first, every, gone))
-        if poll > 120:
-            out.append("- 종료를 아는 시점은 실제 종료보다 최대 %s 늦다. 그래서 리포트용 CSV 의 잡 종료 시각은 비워 둔다." % every)
+        out.append("스냅샷 때 VM 에서 실행할 명령: %s" % gcmd)
     chains = []
     for pc in plan:
         if pc["chain"] not in chains:
             chains.append(pc["chain"])
-
-    def jobs_of(pc):
-        return [vm for vm in pc["vms"] if vm["job"]]
 
     def items(label, rows, none="없음"):
         if not rows:
@@ -2461,68 +2478,57 @@ def plan_view(plan, common, run_id):
         mine = [pc for pc in plan if pc["chain"] == ch]
         out.append("")
         if ch == "-":
-            out.append("[ESX 호스트 없음] 케이스 %d개. VM 전원과 설정은 다루지 않는다. VM 이 켜져 있어야 한다." % len(mine))
+            out.append("[ESX 호스트 없음] 케이스 %d개. VM 전원과 설정은 다루지 않는다. VM(또는 BM 서버)이 켜져 있어야 한다." % len(mine))
         else:
             via = common["addr"].get(ch)
             out.append("[ESX 호스트 %s]%s 케이스 %d개" % (ch, (" 접속 주소 %s," % via) if via else "", len(mine)))
         for n, pc in enumerate(mine, 1):
-            out.append("%d. %s" % (n, pc["name"]))
-            jobs = jobs_of(pc)
-            first_job = not any(jobs_of(q) for q in mine[:n - 1])
-            if not jobs:
-                start = "잡 없음. 설정과 VM 전원만 맞추고 다음 케이스로 넘어간다."
-            elif pc.get("start_at"):
-                start = "지정 %s" % pc["start_at"].strftime("%Y-%m-%d %H:%M")
+            jobs = [vm for vm in pc["vms"] if vm["job"]]
+            if jobs:
+                head = "%d. %s   잡 시작 %s" % (n, pc["name"], pc["start_at"].strftime("%Y-%m-%d %H:%M") if pc.get("start_at") else "?")
                 if pc.get("start_rel"):
-                    start += " (앞 케이스 시작 %s)" % pc["start_rel"]
-                if prep > 0:
-                    start += ". 준비(설정, VM 전원)는 %s 부터" % (pc["start_at"] - dt.timedelta(minutes=prep)).strftime("%Y-%m-%d %H:%M")
-            elif first_job:
-                start = "자동. 이 ESX 호스트의 첫 잡이라 준비가 끝나는 대로"
-            elif gap > 0:
-                start = "자동. 앞 케이스의 잡이 끝나고 %d분 뒤" % gap
+                    head += " (윗줄 %s)" % pc["start_rel"]
             else:
-                start = "자동. 앞 케이스가 끝나면 바로"
-            out.append("   시작: " + start)
-            if ch != "-" and pc["vms"]:
-                out.append("   VM 전원: " + ", ".join("%s %s" % (vm["name"], POWER_LABELS[vm["power"]]) for vm in pc["vms"]))
+                head = "%d. %s   잡 없음. 설정과 VM 전원만 맞춘다" % (n, pc["name"])
+            out.append(head)
+            if ch != "-":
+                when = (pc["start_at"] - dt.timedelta(minutes=prep)) if (jobs and pc.get("start_at")) else pc.get("applyat")
+                at = when.strftime("%m-%d %H:%M") if when else "?"
+                if pc["seg"] == 1 and n == 1:
+                    out.append("   설정과 VM 전원: 실행을 시작할 때 호스트와 비교한다. 다르면 %s 에 VM 종료, 설정 적용, VM 전원 ON" % at)
+                elif pc["seg"] == 1:
+                    out.append("   설정과 VM 전원: 앞 케이스와 다르다. %s 에 호스트와 비교하고, 다르면 VM 종료, 설정 적용, VM 전원 ON" % at)
+                else:
+                    out.append("   설정과 VM 전원: 앞 케이스와 같다. 변경하지 않는다")
+                if pc["vms"]:
+                    out.append("   VM 전원: " + ", ".join("%s %s" % (vm["name"], POWER_LABELS[vm["power"]]) for vm in pc["vms"]))
             sets_rows = ["ESX 호스트 %s = %s" % (k, v) for k, v in pc["host_opts"]]
             for vm in pc["vms"]:
                 sets_rows += [('%s %s = "%s"' % (vm["name"], k, v)) if v != "" else "%s %s (이 키의 줄을 삭제)" % (vm["name"], k)
                               for k, v in vm["set"]]
-            if ch != "-" or sets_rows:
+            if sets_rows:
                 items("설정", sets_rows)
             if not jobs:
                 continue
             by_kind = {}
             for e in pc["entries"]:
                 by_kind.setdefault(e["kind"], []).append(e)
-            items("모니터링", ["%s%s %s: %s" % (e["host"], " (ESX)" if e["role"] == "ESX" else "", e["name"], e["cmd"])
-                              for e in by_kind.get("모니터링 시작", [])])
-            items("잡 (잡이 있는 VM 은 같은 분에 시작)",
-                  ["%s %s (프로세스 이름 %s): %s" % (vm["name"], vm["job_name"], vm["proc_name"], next(
-                      e["cmd"] for e in by_kind.get("잡", []) if e["host"] == vm["name"])) for vm in jobs])
             if pc["has_mon"]:
-                items("모니터링 중지", ["%s%s %s: %s" % (e["host"], " (ESX)" if e["role"] == "ESX" else "", e["name"], e["cmd"])
-                                    for e in by_kind.get("모니터링 중지", [])], none="중지 명령 없음. crontab 줄만 지운다")
-            if pc.get("nocheck"):
-                ends = []
-                if pc.get("handover"):
-                    ends.append("%s 모니터링 중지, %s 부터 다음 케이스 준비" % (
-                        (pc["handover"] - dt.timedelta(minutes=2)).strftime("%m-%d %H:%M"), pc["handover"].strftime("%H:%M")))
-                if pc["max_wait"]:
-                    ends.append("잡 시작 + 최대 대기 %s (%s)" % (fmt_interval(dt.timedelta(minutes=pc["max_wait"])), (
-                        pc["start_at"] + dt.timedelta(minutes=pc["max_wait"])).strftime("%m-%d %H:%M")))
-                if not ends:
-                    end = ("정해지지 않음. 모니터링을 중지하지 않고 실행을 끝낸다. 같은 ESX 호스트의 다음 실행이 준비를 시작할 때나 "
-                           "sh %s/tcrun cancel 로 중지한다" % jdir)
+                items("모니터링 (잡 시작 %d분 전에 시작)" % lead,
+                      ["%s%s %s: %s" % (e["host"], " (ESX)" if e["role"] == "ESX" else "", e["name"], e["cmd"])
+                       for e in by_kind.get("모니터링 시작", [])])
+            items("잡 (잡이 있는 VM 은 같은 분에 시작)",
+                  ["%s %s: %s" % (vm["name"], vm["job_name"], next(e["cmd"] for e in by_kind.get("잡", []) if e["host"] == vm["name"]))
+                   for vm in jobs])
+            if pc["has_mon"]:
+                stops = ["%s%s %s: %s" % (e["host"], " (ESX)" if e["role"] == "ESX" else "", e["name"], e["cmd"])
+                         for e in by_kind.get("모니터링 중지", [])]
+                if not stops:
+                    out.append("   모니터링 중지: 중지 명령 없음")
+                elif pc.get("mstop"):
+                    items("모니터링 중지 (%s)" % pc["mstop"].strftime("%m-%d %H:%M"), stops)
                 else:
-                    end = " 과 ".join(ends) + (" 가운데 이른 쪽" if len(ends) == 2 else "")
-                out.append("   잡 확인: 안 함. 끝: %s" % end)
-            else:
-                out.append("   잡 확인: 함%s. 최대 대기 %s" % (
-                    "(다음 케이스가 자동이라 잡 종료를 알아야 함)" if pc.get("start_at") else "",
-                    fmt_interval(dt.timedelta(minutes=pc["max_wait"])) if pc["max_wait"] else "제한 없음"))
+                    out.append("   모니터링 중지: 자동으로 중지하지 않음(마지막 케이스. '최대 대기' 를 적으면 그 시각에 중지)")
     return "\n".join(out) + "\n"
 
 
@@ -2699,21 +2705,10 @@ RECORD_HEADER_SEQ = RECORD_HEADER + ["진행 방식", "설정", "실행 ID"]
 LOG_HEADER_SEQ = LOG_HEADER + ["프로세스 이름", "설정", "실행 ID"]
 
 
-def nocheck_end(pc):
-    """잡을 확인하지 않는 케이스가 끝나는 시각(모니터링 중지 시각): 다음 케이스 준비 2분 전과 잡 시작 + 최대 대기 가운데 이른 쪽.
-    정해지지 않으면(마지막 케이스이고 최대 대기 없음) None. tcrun 의 register 가 같은 식으로 계산한다."""
-    ends = []
-    if pc.get("handover"):
-        ends.append(pc["handover"] - dt.timedelta(minutes=2))
-    if pc.get("max_wait") and pc.get("start_at"):
-        ends.append(pc["start_at"] + dt.timedelta(minutes=pc["max_wait"]))
-    return min(ends) if ends else None
-
-
 def write_records_seq(settings, plan, gen_time, run_id, backup_dir=None):
     """순서 실행의 기록: 테스트 기록 CSV 에 케이스마다 한 행, 로그 폴더에 testcaselogging-<시각>.csv.
-    시작 시각을 적은 케이스는 계획한 시각을 적는다: 잡 시작, 모니터링 시작(잡 시작 - 모니터링 시작 분), 그리고 잡을 확인하지 않는
-    케이스는 모니터링 중지(nocheck_end). 시작 시각이 자동인 케이스는 시각 칸을 비운다(실제 시각은 점프 VM 의 로그 폴더에 기록된다)."""
+    계획한 시각을 적는다: 잡 시작, 모니터링 시작(잡 시작 - 모니터링 시작 분), 모니터링 중지(plan 의 MSTOP. 없으면 빈 칸).
+    잡이 없는 케이스는 시각 칸을 비운다. 등록 결과는 점프 VM 로그 폴더의 tcrun-<실행 ID>-jobs.csv 에 남는다."""
     gen_text = fmt_dt(gen_time)
     try:
         lead = int(settings.get("mon_lead_min", DEFAULT_SETTINGS["mon_lead_min"]))
@@ -2725,7 +2720,7 @@ def write_records_seq(settings, plan, gen_time, run_id, backup_dir=None):
         has_mon = case_has_monitors(c)
         mons = format_case_monitors(c) if has_mon else ""
         start = pc.get("start_at")
-        end = nocheck_end(pc) if pc.get("nocheck") else None
+        end = pc.get("mstop")           # 모니터링 중지 시각(crontab 에 등록하는 시각. 없으면 None)
         t_job = fmt_dt(start) if start else ""
         t_mon = fmt_dt(start - dt.timedelta(minutes=lead)) if (start and has_mon) else ""
         t_stop = fmt_dt(end) if (end and has_mon) else ""
@@ -2733,11 +2728,10 @@ def write_records_seq(settings, plan, gen_time, run_id, backup_dir=None):
         rel = pc.get("start_rel") or ""        # 시작 시각 칸에 +간격을 적은 케이스: 그 간격(+8:00). seq_start_from_record 가 대조에 쓴다
         rec_rows.append([pc["name"], gen_text, c.get("esx", ""), format_vms(c), t_job, rel, mons, t_mon, t_stop, c.get("desc", ""),
                          c.get("group", ""), "", ";".join(pc["end_refs"]), "순서 실행", format_case_profiles(c), run_id])
-        procs = dict((vm["name"], vm["proc_name"]) for vm in pc["vms"])
         for e in pc["entries"]:
             log_rows.append([e["case"], gen_text, e["kind"], e["host"], e["role"], e["name"], e["app"], e.get("desc", ""),
                              when.get(e["kind"], ""), "순서 실행", e["cmd"], e["line"], c.get("esx", ""), format_vms(c), t_job, rel, mons,
-                             t_mon, t_stop, procs.get(e["host"], "") if e["kind"] == "잡" else "", format_case_profiles(c), run_id])
+                             t_mon, t_stop, "", format_case_profiles(c), run_id])
     added, keep = append_csv(settings["record_csv"], RECORD_HEADER_SEQ, rec_rows, backup_dir=backup_dir, now=gen_time)
     os.makedirs(settings["log_dir"], exist_ok=True)
     log_path = os.path.join(settings["log_dir"], "testcaselogging-%s.csv" % gen_time.strftime("%Y%m%d%H%M%S"))
@@ -2806,34 +2800,23 @@ def _norm_interval(text):
 
 
 def seq_start_by_table(cases, i):
-    """순서 실행의 시작 시각 칸에 +간격을 적은 케이스 i 의 날짜 시각을 지금 표로 계산한다: 같은 ESX 호스트의 바로 위 케이스의 시작
-    시각에서 그 간격 뒤. 위 케이스도 +간격이면 더 위로 올라가며 더한다. 계산할 수 없으면 None(같은 호스트의 위 케이스가 없음, 그
-    케이스에 잡이 없음, 시작 시각이 자동이거나 비어 있음, 시:분만 있어 날짜를 알 수 없음)."""
-    total = dt.timedelta(0)
-    k = i
-    while True:
-        raw = (cases[k].get("seq_start") or "").strip()
-        try:
-            off = parse_seq_offset(raw)
-        except ValueError:
-            return None
-        if off is None:
-            if k == i or raw.lower() in AUTO_WORDS or SEQ_START_RE.match(raw):
-                return None
-            try:
-                return parse_dt(raw) + total
-            except ValueError:
-                return None
-        total += off
-        esx = (cases[k].get("esx") or "").strip()
-        for j in range(k - 1, -1, -1):
-            if (cases[j].get("esx") or "").strip() == esx:
-                break
+    """시작 시각 칸에 +간격을 적은 케이스 i 의 날짜 시각을 지금 표로 계산한다(바로 윗줄 기준. table_starts). 계산할 수 없으면 None."""
+    return table_starts(cases)[i]["at"]
+
+
+def seq_report_sched(cases, record_rows=None, now=None):
+    """리포트용 CSV 에 넣을 케이스별 잡 시작(표의 시작 시각 칸으로 계산한 값. table_starts). report_rows 의 sched 와 같은 모양이다:
+    케이스마다 {"job": 시각 또는 None, "start_error": 알 수 없는 이유}.
+    (사용자 2026-11-18 "시간 지정을 전부 했고 +10:00 헀으면 리포트용 csv 저장하면 +10 시간 반영해서 적용이 되어야")"""
+    out = []
+    for t in table_starts(cases, now, record_rows):
+        if not t["job"]:
+            out.append({"job": None, "start_error": "(잡이 없는 케이스)"})
+        elif t["at"] is None:
+            out.append({"job": None, "start_error": "(시작 시각 %s)" % t["why"]})
         else:
-            return None
-        if not any(_has_job(v) for v in (cases[j].get("vms") or [])):
-            return None
-        k = j
+            out.append({"job": t["at"], "start_error": ""})
+    return out
 
 
 def seq_start_from_record(rows, name, raw):
@@ -2991,14 +2974,16 @@ def keep_cases_copy(base, cases, tag, now=None):
 def generate_seq(cases, run_cmds, mon_cmds, profiles, settings, now=None, write=True, backup_dir=None):
     """순서 실행의 [명령어 생성]. 오류가 있으면 블록과 기록을 만들지 않는다."""
     now = (now or dt.datetime.now()).replace(microsecond=0)
-    plan, errors, warnings, common = build_seq(cases, run_cmds, mon_cmds, profiles, settings, now=now)
+    plan, errors, warnings, common = build_seq(cases, run_cmds, mon_cmds, profiles, settings, now=now,
+                                               record_rows=read_record_rows(settings.get("record_csv")))
     run_id = now.strftime("%Y%m%d-%H%M%S")
     res = {"mode": "seq", "errors": errors, "warnings": warnings, "entries": [], "sched": [], "vm": "", "esx": {},
            "setup": seq_setup_block(common.get("jdir") or DEFAULT_JUMP_DIR), "check": "", "run": "", "plan": "", "plan_view": "",
            "run_id": run_id, "jump_dir": common.get("jdir") or DEFAULT_JUMP_DIR,
            "record": "", "log": "", "record_rows": 0, "record_added": [], "record_backup": None, "gen_time": now,
            "vm_wipe": "", "wipe_hosts": [], "wipe_conflicts": [], "chains": [], "cases": plan,
-           "jump_log_dir": common["logdir"]}
+           "jump_log_dir": common["logdir"], "notes": list(common.get("notes") or []), "timeline": [], "timeline_table": None,
+           "changes": {"first": [], "diff": []}}
     res["skipped"] = sum(1 for c in cases if c.get("applied"))
     if errors or not plan:
         if not plan and not errors:
@@ -3011,6 +2996,25 @@ def generate_seq(cases, run_cmds, mon_cmds, profiles, settings, now=None, write=
     data = text.encode("utf-8")
     res["plan"] = text
     res["plan_view"] = plan_view(plan, common, run_id)
+    sets = dict(common["sets"])
+    tl = (sets.get("PREP_LEAD_MIN", 30), sets.get("SNAP_LEAD_MIN", 10), sets["MON_LEAD_MIN"],
+          any(pc["has_mon"] for pc in plan), bool(common.get("gcmd")), plan_has_stop(plan))
+    res["timeline"] = timeline_lines(*tl)
+    res["timeline_table"] = timeline_table(*tl)
+    # 설정이나 VM 전원을 호스트와 비교하는 케이스(seg 1)와 변경 시각. ESX 호스트의 첫 케이스는 실행을 시작할 때 비교하고,
+    # 그 뒤의 케이스는 설정이 앞 케이스와 다를 때 변경 시각에 비교한다
+    res["changes"] = {"first": [], "diff": []}
+    seen = set()
+    for pc in plan:
+        first = pc["chain"] not in seen
+        seen.add(pc["chain"])
+        if pc["chain"] == "-" or pc["seg"] != 1:
+            continue
+        has_job = any(vm["job"] for vm in pc["vms"])
+        when = (pc["start_at"] - dt.timedelta(minutes=sets.get("PREP_LEAD_MIN", 30))) if (has_job and pc.get("start_at")) \
+            else pc.get("applyat")
+        res["changes"]["first" if first else "diff"].append(
+            {"esx": pc["chain"], "name": pc["name"], "at": when, "text": "%s %s (%s)" % (pc["chain"], pc["name"], _md_hm(when) if when else "?")})
     res["check"] = seq_check_block(data, run_id, common["jdir"])
     res["run"] = seq_run_block(data, run_id, common["jdir"])
     res["entries"] = [e for pc in plan for e in pc["entries"]]
