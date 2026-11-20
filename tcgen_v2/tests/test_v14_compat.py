@@ -4,6 +4,7 @@
 
 - 기준 자료: tests/fixtures/v14_blocks.json (v1.4 의 tcgen_core.generate 결과. make_v14_fixture.py 로 만든 것)
 - 이 폴더 옆에 v1.4 소스(../tcgen/tcgen_core.py)가 있으면 그 코드도 직접 실행해 한 번 더 비교한다.
+  (저장소 main 에는 그 폴더가 없다. 태그 tcgen-v1.4 로 받은 tcgen 폴더를 옆에 두면 된다.)
 """
 import io
 import json

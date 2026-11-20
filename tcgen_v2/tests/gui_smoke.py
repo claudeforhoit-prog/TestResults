@@ -40,7 +40,15 @@ import tcgen_app as appmod  # noqa: E402
 ASK_DIR = []                                # 폴더 선택 창 대답 (차례대로)
 appmod.filedialog.askdirectory = lambda **k: ASK_DIR.pop(0) if ASK_DIR else ""
 ASK_SAVE = []                               # 저장 위치 창 대답 (차례대로)
-appmod.filedialog.asksaveasfilename = lambda **k: ASK_SAVE.pop(0) if ASK_SAVE else ""
+SAVE_KW = []                                # 저장 위치 창을 연 인자 (연 순서대로)
+
+
+def _ask_save(**k):
+    SAVE_KW.append(k)
+    return ASK_SAVE.pop(0) if ASK_SAVE else ""
+
+
+appmod.filedialog.asksaveasfilename = _ask_save
 ASK_OPEN = []                               # 파일 열기 창 대답 (차례대로)
 appmod.filedialog.askopenfilename = lambda **k: ASK_OPEN.pop(0) if ASK_OPEN else ""
 
@@ -1540,6 +1548,66 @@ def main():
           "파일을 바꾸면 탭 5 의 이전 생성 결과를 지움")
     check(app6.v_record.get() == os.path.join(ext, "emr_record.csv") and [x["name"] for x in app6.cases] == ["EMR-base"],
           "EMR 파일에서 쓰던 기록 CSV 와 케이스가 그대로")
+    # [새로 만들기] (사용자 결정 2026-11-20 "새로 만들기 버튼 추가"): 새 파일의 위치와 이름을 정하면 탭 4 가 빈 표로 시작하고 그 파일에
+    # 자동 저장한다. 이전 파일은 마지막 상태로 남고, 탭 1, 2, 3 과 테스트 기록 CSV 는 그대로 쓴다
+    labels6 = [w.cget("text") for w in walk(root6) if isinstance(w, ttk.Button)]
+    check(labels6.index("새로 만들기") < labels6.index("불러오기") < labels6.index("다른 이름으로 저장"),
+          "설정 영역의 단추 순서: [새로 만들기] [불러오기] [다른 이름으로 저장]")
+    n_log = len(LOG)
+    ASK_SAVE.append(spr)                                          # 이미 있는 파일은 새로 만들지 않는다
+    press(root6, "새로 만들기")
+    root6.update()
+    check(app6.v_cfile.get() == emr and core.load_cases(cf_dir, spr)[0]["name"] == "SPR-base" and [x["name"] for x in app6.cases] == ["EMR-base"]
+          and any(x[0] == "error" and "이미 있는 파일이라 새로 만들지 않았음" in x[1] and "[불러오기]" in x[1] for x in LOG[n_log:]),
+          "[새로 만들기]: 이미 있는 파일을 고르면 만들지 않고 알림 (그 파일의 표와 지금 표는 그대로)")
+    kw = SAVE_KW[-1]
+    check(kw.get("confirmoverwrite") is False and kw.get("initialdir") == ext and kw.get("initialfile", "").startswith("test_cases_")
+          and not os.path.exists(os.path.join(ext, kw.get("initialfile", ""))), "[새로 만들기] 의 창이 제안하는 이름은 그 폴더에 없는 이름 %s" % kw.get("initialfile"))
+    ASK_SAVE.append("")                                           # 창에서 취소
+    press(root6, "새로 만들기")
+    root6.update()
+    check(app6.v_cfile.get() == emr and [x["name"] for x in app6.cases] == ["EMR-base"], "[새로 만들기] 창에서 취소하면 그대로")
+    newf = os.path.join(ext, "new_cases.csv")
+    ASK_SAVE.append(newf)
+    press(root6, "새로 만들기")
+    root6.update()
+    with open(newf, encoding="utf-8-sig", newline="") as f:
+        rows = list(csv.reader(f))
+    check(app6.v_cfile.get() == newf and core.case_file(app6.settings) == newf and app6.cases == [] and rows == [core.CASE_CSV_HEADER]
+          and app6.nb.index(app6.nb.select()) == 3 and "새로 만듦" in app6.v_status.get() and "new_cases.csv" in app6.v_status.get(),
+          "[새로 만들기]: 빈 표로 시작하고 그 파일을 쓰는 것으로 변경됨. 탭 4 를 보임 %s" % rows[:2])
+    check(app6.v_record.get() == os.path.join(ext, "emr_record.csv") and app6.result is None
+          and app6.run_cmds[0]["desc"] == "EMR 작업 중에 고친 설명" and len(app6.profiles) == 12,
+          "새 파일은 테스트 기록 CSV 를 지금 값 그대로 쓰고, 탭 1, 2, 3 의 내용도 그대로")
+    check(core.load_cases(cf_dir, emr)[0]["name"] == "EMR-base", "이전 파일은 마지막 상태로 남음")
+    shot(root6, app6, 3, "tcgen_newfile_tab4.png")
+    # 빈 표에서 사용자가 하는 순서: [+ 케이스 추가] 직후 이름 편집, ESX 호스트와 잡 입력, [명령어 생성] 의 선택 창, [생성]
+    t6 = app6.t_case
+    press(root6, "+ 케이스 추가")
+    root6.update()
+    check(len(app6.cases) == 1 and t6.editor is not None and t6.editor[2:] == ("c0", "name"), "빈 표에 케이스를 추가하면 이름 칸이 편집 상태")
+    t6.editor[1].set("NEW-first")
+    t6.finish_edit()
+    app6.commit_case("c0", "esx", "new01")
+    app6.commit_case("c0v0", "job", "job_a")
+    check(core.load_cases(cf_dir, newf)[0]["name"] == "NEW-first" and core.load_cases(cf_dir, newf)[0]["vms"][0]["job"] == "job_a"
+          and core.load_cases(cf_dir, emr)[0]["name"] == "EMR-base", "추가한 케이스는 새 파일에 자동 저장되고 이전 파일은 그대로")
+    app6.generate()
+    root6.update()
+    top6 = getattr(app6, "gen_pick_win", None)
+    check(top6 is not None and top6.winfo_exists() and [r["name"] for r in app6.gen_pick_table.rows] == ["NEW-first"],
+          "[명령어 생성] 을 누르면 넣을 케이스를 고르는 창에 새 케이스가 보임")
+    press(top6, "생성")
+    root6.update()
+    check(app6.result is not None and app6.result["errors"] == [] and "new01" in app6.result["chains"]
+          and "NEW-first" in app6.result["plan"], "새 파일의 케이스로 블록을 생성 %s" % (app6.result or {}).get("errors"))
+    with open(os.path.join(ext, "emr_record.csv"), encoding="utf-8-sig") as f:
+        check("NEW-first" in f.read(), "생성 기록은 그대로 쓰는 테스트 기록 CSV 에 추가")
+    shot(root6, app6, 4, "tcgen_newfile_tab5.png")
+    ASK_OPEN.append(emr)                                          # 이전 파일로 돌아가면 그 파일의 케이스가 그대로
+    press(root6, "불러오기")
+    root6.update()
+    check([x["name"] for x in app6.cases] == ["EMR-base"] and app6.result is None, "[불러오기] 로 이전 파일로 돌아가면 그 파일의 케이스가 그대로")
     # 데이터 폴더의 기본 파일을 고르면 '지정하지 않음' 상태로 돌아간다
     ASK_OPEN.append(default_file)
     press(root6, "불러오기")

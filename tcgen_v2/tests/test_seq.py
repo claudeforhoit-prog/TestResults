@@ -468,7 +468,7 @@ class PlanTests(unittest.TestCase):
         t2 = int(time.mktime(dt.datetime(2026, 11, 16, 18, 0).timetuple()))
         tx = int(time.mktime(dt.datetime(2026, 11, 17, 4, 0).timetuple()))      # 잡 시작 16:00 + 최대 대기 12:00
         want = """TCGEN-PLAN 2
-VER 2.13
+VER 2.14
 RUNID 20261116-143000
 LOGDIR /data/log
 GEN 2026-11-16 14:30:00
@@ -705,7 +705,7 @@ class SettingsAndDataTests(unittest.TestCase):
         return snap
 
     def test_names_differ_from_v1(self):
-        self.assertEqual(core.VERSION, "2.13")
+        self.assertEqual(core.VERSION, "2.14")
         for k in self.keys:
             os.environ.pop(k, None)
         self.assertEqual(os.path.basename(core.default_data_dir()), "tcgen2_data")

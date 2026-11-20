@@ -4,6 +4,7 @@ make_v14_fixture.py - v1.4 의 생성 결과를 tests/fixtures/v14_blocks.json �
 
 v2 의 시각 지정 방식이 v1.4 와 같은 결과를 내는지 확인하는 기준 자료다(tests/test_v14_compat.py 가 읽는다).
 v1.4 소스(tcgen_core.py, VERSION 1.4)가 있는 폴더를 인자로 준다. 인자가 없으면 이 폴더 옆의 ../tcgen 을 쓴다.
+(저장소 main 에는 그 폴더가 없다. 태그 tcgen-v1.4 로 받은 tcgen 폴더를 쓴다.)
 
     python tests/make_v14_fixture.py [v1.4 폴더]
 

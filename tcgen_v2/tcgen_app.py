@@ -739,10 +739,11 @@ class App(object):
         row_cf.pack(fill="x", pady=(px(6), 0))
         ttk.Label(row_cf, text="테스트 케이스 파일").grid(row=0, column=0, sticky="w")
         ttk.Entry(row_cf, textvariable=self.v_cfile, state="readonly").grid(row=0, column=1, sticky="ew", padx=(px(6), px(4)))
-        ttk.Button(row_cf, text="불러오기", command=self.load_case_file).grid(row=0, column=2, padx=(0, px(4)))
-        ttk.Button(row_cf, text="다른 이름으로 저장", command=self.save_case_file_as).grid(row=0, column=3, padx=(0, px(10)))
+        ttk.Button(row_cf, text="새로 만들기", command=self.new_case_file).grid(row=0, column=2, padx=(0, px(4)))
+        ttk.Button(row_cf, text="불러오기", command=self.load_case_file).grid(row=0, column=3, padx=(0, px(4)))
+        ttk.Button(row_cf, text="다른 이름으로 저장", command=self.save_case_file_as).grid(row=0, column=4, padx=(0, px(10)))
         ttk.Label(row_cf, text="탭 4 의 표를 이 파일에 자동 저장한다. 탭 1, 2, 3 은 어느 파일을 쓰든 같이 쓴다",
-                  style="Hint.TLabel").grid(row=0, column=4, sticky="w")
+                  style="Hint.TLabel").grid(row=0, column=5, sticky="w")
         row_cf.columnconfigure(1, weight=1)
         self.refresh_case_file_box()
         row1 = ttk.Frame(sf)
@@ -1602,7 +1603,7 @@ class App(object):
         s.update(vals)
         return s
 
-    # ------------------------------------------------------------ 테스트 케이스 파일 (불러오기, 다른 이름으로 저장, 자동 백업)
+    # ------------------------------------------------------------ 테스트 케이스 파일 (새로 만들기, 불러오기, 다른 이름으로 저장, 자동 백업)
     CASE_FILE_TYPES = [("테스트 케이스 파일", "*.csv *.json"), ("CSV", "*.csv"), ("JSON", "*.json"), ("모든 파일", "*.*")]
 
     def case_file_label(self):
@@ -1670,6 +1671,32 @@ class App(object):
         except OSError:
             pass
 
+    def new_case_file(self):
+        """[새로 만들기] (사용자 결정 2026-11-20 "새로 만들기 버튼 추가"): 새 테스트 케이스 파일의 위치와 이름을 정하면 탭 4 가 빈 표로
+        시작하고, 그 뒤로는 그 파일에 자동 저장한다. 이전 파일은 마지막 상태로 남는다. 탭 1, 2, 3 과 테스트 기록 CSV, 로그 폴더는
+        지금 값을 그대로 쓴다. 이미 있는 파일은 새로 만들지 않는다(그 파일의 표를 지우지 않기 위해서다)."""
+        if not self._save_before_file_change():
+            return
+        folder = self._case_file_start_dir()
+        stem = "test_cases_%s" % dt.datetime.now().strftime("%Y%m%d")
+        name, n = stem + ".csv", 1
+        while os.path.exists(os.path.join(folder, name)):       # 제안하는 이름은 그 폴더에 없는 이름으로
+            n += 1
+            name = "%s_%d.csv" % (stem, n)
+        p = filedialog.asksaveasfilename(parent=self.root, title="새 테스트 케이스 파일의 위치와 이름 (빈 표로 시작하고 이 파일에 자동 저장하게 된다)",
+                                         initialdir=folder, initialfile=name, defaultextension=".csv",
+                                         filetypes=self.CASE_FILE_TYPES, confirmoverwrite=False)
+        if not p:
+            return
+        p = os.path.normpath(p)
+        if os.path.exists(p):
+            messagebox.showerror(TITLE, "이미 있는 파일이라 새로 만들지 않았음\n%s\n\n다른 이름을 정할 것. 이 파일의 표를 쓰려면 [불러오기] 를 누른다." % p,
+                                 parent=self.root)
+            return
+        if self.use_case_file(p, cases=[], note="새로 만듦: %s (빈 표). 탭 4 의 [+ 케이스 추가] 로 케이스를 넣는다. 고치면 이 파일에 자동 저장된다." % p):
+            self._remember_case_file_dir(p)
+            self.nb.select(3)               # 탭 4 (테스트 케이스): 다음에 할 일이 케이스 추가다
+
     def load_case_file(self):
         """[불러오기]: 고른 파일의 테스트 케이스 표를 불러오고, 그 뒤로는 그 파일에 자동 저장한다."""
         if not self._save_before_file_change():
@@ -1682,7 +1709,7 @@ class App(object):
         try:
             n = len(core.load_cases(self.base, p))       # 바꾸기 전에 읽을 수 있는 파일인지 본다
         except (OSError, ValueError) as e:
-            messagebox.showerror(TITLE, "이 파일은 불러올 수 없음\n%s\n\n%s\n\n[다른 이름으로 저장] 으로 만든 테스트 케이스 파일(.csv, .json)을 고를 것"
+            messagebox.showerror(TITLE, "이 파일은 불러올 수 없음\n%s\n\n%s\n\n[새로 만들기] 나 [다른 이름으로 저장] 으로 만든 테스트 케이스 파일(.csv, .json)을 고를 것"
                                  % (p, e), parent=self.root)
             return
         if self.use_case_file(p, note="불러옴: %s (케이스 %d개). 고치면 이 파일에 자동 저장된다." % (p, n)):

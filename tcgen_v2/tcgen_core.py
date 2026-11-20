@@ -40,7 +40,7 @@ import shutil
 import sys
 import time
 
-VERSION = "2.13"
+VERSION = "2.14"
 KST_TO_UTC = dt.timedelta(hours=9)
 CHUNK = 100            # 붙여넣는 글 한 줄에 담는 명령 조각 길이(문자 수)
 NONE_JOB = "(없음)"
