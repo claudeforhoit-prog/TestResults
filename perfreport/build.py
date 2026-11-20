@@ -325,6 +325,8 @@ def run_csv(cases_csv, data_dir, out_dir=None, title=None, baseline=None, analys
     write_summary: 결과 폴더의 case_summary 에 케이스 요약 파일을 남길지(기본 남김).
     case_baselines: {케이스명: 기준선} 케이스마다의 TAT 기준선. 기준선 = {'name', 'kind'(BM · VM), 'value'(초), 'cond', 'note'}.
                     없는 케이스는 tat_baseline 을 쓴다."""
+    from . import __version__
+    log(f'[판] 성능 리포트 생성기 v{__version__}')
     phase_files, tat_files, unknown_files = [], [], []
     cases, profiles, srcs, index = scan_sources(cases_csv, data_dir, log, phase_out=phase_files, tat_out=tat_files,
                                                 unknown_out=unknown_files)
@@ -681,7 +683,8 @@ def run_job(job, base, log=print):
         for c in cases:
             summary_mod.write(outdir, c, meta[c['id']], df, stats, built_at)
         log(f'[요약 저장] {os.path.join(outdir, summary_mod.DIRNAME)}: 케이스 {len(cases)}건')
-    rec = {'job': job.get('name'), 'built_at': dt.datetime.now().isoformat(timespec='seconds'),
+    from . import __version__
+    rec = {'job': job.get('name'), 'version': __version__, 'built_at': dt.datetime.now().isoformat(timespec='seconds'),
            'cases': case_order, 'baseline': baseline, 'metrics': len(metrics), 'values': int(len(df)),
            'charts': n_charts, 'term_violations': term_hits, 'outputs': docs + htmls + cmp_out, 'outdir': outdir,
            'windows': {c['id']: [str(meta[c['id']]['start']), str(meta[c['id']]['end']), bool(c.get('end_auto'))] for c in cases},

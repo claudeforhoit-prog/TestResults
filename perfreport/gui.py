@@ -389,7 +389,8 @@ def build(root):
     탭 1 테스트 케이스(생성 선택 · 설명 수정 · 기준선), 탭 2 기준선(사전 정의), 탭 3 케이스 리포트 옵션, 탭 4 생성."""
     from .build import cases_from_csv
     C = COLORS
-    root.title('성능 리포트 생성기')
+    from . import __version__
+    root.title(f'성능 리포트 생성기 v{__version__}')
     root.geometry('1320x880')
     root.minsize(1180, 740)
     apply_style(root)
@@ -423,7 +424,7 @@ def build(root):
         legacy.append({'name': str(saved.get('tat_baseline_note') or '기준선').strip(), 'kind': 'BM', 'cond': '',
                        'tat': str(saved['tat_baseline']).strip(), 'note': '이전 판의 TAT 비교 기준에서 옮김'})
 
-    tk.Label(root, text='  성능 리포트 생성기', bg=C['dark'], fg='#ffffff', font=(FONT, 13, 'bold'), anchor='w', pady=7).pack(fill='x')
+    tk.Label(root, text=f'  성능 리포트 생성기  v{__version__}', bg=C['dark'], fg='#ffffff', font=(FONT, 13, 'bold'), anchor='w', pady=7).pack(fill='x')
 
     # ── 입력 (경로): 바뀌면 바로 저장
     card = ttk.Frame(root, padding=(12, 8))

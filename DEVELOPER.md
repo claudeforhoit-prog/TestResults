@@ -124,6 +124,7 @@ DEVELOPER.md 와 README.md 를 먼저 읽어라.
 4. `python tests/check_release.py` 를 실행해 전부 통과하는지 본다.
 5. 창 화면을 바꿨으면 `python run_perfreport.py` 로 열어 글자가 잘리지 않는지 본다.
 6. Windows 실행 파일은 `build_windows.bat` 으로 만든다.
+7. 올릴 때마다 판 번호(`perfreport/__init__.py` 의 `__version__`)를 올리고 README `0.5 판 이력` 에 한 줄을 더한다. 커밋에 태그 `perfreport-v<판>` 을 붙여 이름을 지정해 올린다(`git push origin main perfreport-v<판>`, `--tags` 는 쓰지 않는다). 같은 번호로 다시 올리지 않는다.
 
 ## 5. 자동 시험
 
