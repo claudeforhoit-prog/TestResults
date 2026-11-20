@@ -22,7 +22,7 @@ import tcgen_core as core
 TITLE = "테스트 실행 명령 생성기 v%s" % core.VERSION
 NONE_JOB = core.NONE_JOB
 MODE_LABELS = {"seq": "순서 실행", "time": "시각 지정"}
-SEQ_HIDE = ("interval", "start", "mon_start", "mon_stop")      # 순서 실행에서 숨기는 탭 4 열
+SEQ_HIDE = ("interval", "start", "mon_start")      # 순서 실행에서 숨기는 탭 4 열. 모니터링 중지 칸은 보인다(사용자 결정 2026-11-09)
 TIME_HIDE = ("power", "prof", "max_wait", "seq_start", "seq_at")                      # 시각 지정에서 숨기는 탭 4 열
 
 COLORS = dict(bg="#f3f5f8", card="#ffffff", line="#d5dbe3", head="#e8edf4", ink="#1f2937", mut="#6b7280",
@@ -782,6 +782,10 @@ class App(object):
             ttk.Label(self.f_seq, text=label).pack(side="left")
             ttk.Spinbox(self.f_seq, from_=low, to=1440, width=4, textvariable=var).pack(side="left", padx=px(6))
             ttk.Label(self.f_seq, text=unit).pack(side="left", padx=(0, px(12)))
+        # 모니터링 자동 중지(사용자 결정 2026-11-09 "다음테스트 시작하기 10분전에 설정한 모든 모니터링 종료하도록 만들어줘")
+        ttk.Label(self.f_seq, text="모니터링 중지").pack(side="left")
+        ttk.Spinbox(self.f_seq, from_=1, to=1440, width=4, textvariable=self.v_stop).pack(side="left", padx=px(6))
+        ttk.Label(self.f_seq, text="분 전 (다음 케이스)").pack(side="left", padx=(0, px(12)))
         ttk.Label(self.f_seq, text="잡 시작 최소 간격").pack(side="left", padx=(px(6), 0))
         ttk.Spinbox(self.f_seq, from_=1, to=1440, width=4, textvariable=self.v_spacing).pack(side="left", padx=px(6))
         ttk.Label(self.f_seq, text="분").pack(side="left")
@@ -964,7 +968,9 @@ class App(object):
         "비밀번호를 바꿀 때는 sh {D}/setpw 를 실행한다.",
         "P. 점검 블록: 실행 전에 점프 VM 터미널에 붙여넣는다. 아무것도 변경하지 않는다. ESX 키 접속, VM 접속, 시계 차이, "
         "설정의 현재 값과 목표 값, VM 전원을 출력한다. 마지막 줄이 CHECK RESULT: OK 이면 S 블록을 붙여넣는다.",
-        "S. 실행 블록: 점프 VM 터미널에 붙여넣으면 ESX 호스트별 진행이 백그라운드로 시작된다. 터미널을 닫아도 계속된다.",
+        "S. 실행 블록: 점프 VM 터미널에 붙여넣으면 등록할 케이스 목록(케이스 이름, VM 이름, 잡 시작, 실행 명령, 모니터링)이 나오고 "
+        "등록할지 묻는다. yes 를 입력해야 ESX 호스트별 진행이 백그라운드로 시작되고, no 를 입력하면 아무것도 등록하지 않는다. "
+        "시작한 뒤에는 터미널을 닫아도 계속된다. 터미널 출력의 VM 이름은 초록색이다.",
         "D. VM crontab 전체 삭제: 필요할 때만 쓴다. VM 의 crontab 을 모두 지운다(tcgen 이 등록하지 않은 줄 포함). "
         "지우기 전 내용은 각 VM 홈 폴더의 tcgen_crontab_backup-<시각>.txt 에 저장한다.",
         "[복사] 를 누르면 그 블록 전체가 클립보드에 들어간다. 점프 VM 터미널에서는 마우스 오른쪽 또는 Shift+Insert 로 붙여넣는다.",
@@ -981,17 +987,17 @@ class App(object):
         "로그인과 VM, 호스트 객체가 있는지 미리 확인한다.",
         "잡이 실행되는 동안에는 VM 에 접속하지 않는다. 잡이 끝났는지 확인하지 않는다.",
         "진행은 마지막 잡 시작 1분 뒤에 끝난다(done). 등록한 crontab 줄은 그대로 남고, 같은 ESX 호스트의 다음 실행이 첫 잡 시작 "
-        "N분 전에 지운다. 바로 지우려면 sh {D}/tcrun cancel 을 실행한다.",
-        "## 진행 확인, 중지, 취소",
+        "N분 전에 지운다. 바로 지우려면 sh {D}/tcrun stop 을 실행한다.",
+        "## 진행 확인, 중지",
         "sh {D}/tcrun status: 진행 중, 대기 중, crontab 줄이 남은 실행을 ESX 호스트별로 출력한다.",
-        "sh {D}/tcrun stop: 진행만 끝낸다. 이미 등록한 crontab 줄은 남으므로 그 잡은 시작 시각에 시작한다. 아직 등록하지 않은 "
-        "케이스는 등록하지 않는다.",
-        "sh {D}/tcrun cancel [ESX 호스트]: 진행을 끝내고 등록한 crontab 줄을 지운다. 시작 전인 잡은 시작하지 않는다. 실행 중인 "
-        "잡은 끝내지 않는다. 시작된 모니터링은 중지 명령을 실행한다. 적용한 설정은 그대로 둔다. 접속하지 못한 VM 이 있으면 "
-        "NOT removed on: <VM> 을 출력하고 그 VM 의 줄은 남는다. 접속이 되는 때에 같은 명령을 다시 실행한다.",
+        "sh {D}/tcrun stop [ESX 호스트]: 진행을 끝내고 등록한 crontab 줄을 지운다. 시작 전인 잡은 시작하지 않는다. 실행 중인 "
+        "잡은 끝내지 않는다. 시작된 모니터링은 중지 명령을 실행한다. 적용한 설정은 그대로 둔다. 줄을 지운 실행은 점프 VM 의 "
+        "실행 기록에서 지우므로 tcrun status 에 나오지 않는다. 로그 폴더의 파일은 남는다. 같은 S 블록을 다시 붙여넣어도 시작하지 "
+        "않는다. 접속하지 못한 VM 이 있으면 NOT removed on: <VM> 을 출력하고 그 실행은 status 에 남는다. 접속이 되는 때에 같은 "
+        "명령을 다시 실행한다.",
         "실행을 더할 때: 앞 실행이 진행 중인 ESX 호스트에 새 S 블록을 붙여넣으면 대기(queued)했다가 앞 실행이 done 으로 끝난 뒤 "
         "시작한다. 앞 실행이 paused 나 stopped 로 끝나 줄이 남아 있으면 시작하지 않고 이유를 출력한다. 그때는 "
-        "sh {D}/tcrun cancel <ESX 호스트> 를 실행하고 다시 생성해 S 블록을 붙여넣는다.",
+        "sh {D}/tcrun stop <ESX 호스트> 를 실행하고 다시 생성해 S 블록을 붙여넣는다.",
         "진행이 멈추면(paused) 로그의 PAUSED 줄에서 이유를 확인한다. 실행한 케이스를 탭 4 에서 적용 체크하고 다시 생성해 "
         "S 블록을 붙여넣는다.",
         "## 남는 파일",
@@ -1048,13 +1054,15 @@ class App(object):
                 "설정, VM 전원, VM 구성이 바로 앞 케이스와 다를 때 호스트와 비교한다. 값이 모두 같으면 VM 을 끄지 않는다.",
                 "구성 스냅샷: 모든 케이스에서 잡 시작 %d분 전에 VM 설정과 Guest OS 설정을 csv 로 남긴다. 설정 영역의 '스냅샷 때 VM 에서 "
                 "실행할 명령' 을 적었으면 이때 켜져 있는 VM 마다 실행한다." % snap,
-                "모니터링: 잡 시작 %d분 전에 시작한다. 중지 명령이 있는 모니터링은 다음 케이스의 잡 시작 %d분 전에 중지한다. "
-                "최대 대기를 적은 케이스는 잡 시작에서 그 시간이 지났을 때가 더 이르면 그때 중지한다. 마지막 케이스는 최대 대기를 "
-                "적었을 때만 중지한다." % (ld[0], prep + 2),
+                "모니터링: 잡 시작 %d분 전에 시작한다. 케이스 행의 모니터링 중지 칸에서 자동, 직접 입력, 중지 없음 가운데 고른다. "
+                "자동은 같은 ESX 호스트의 다음 케이스 잡 시작 %d분 전(설정 영역의 '모니터링 중지 N분 전')에 그 케이스의 모든 "
+                "모니터링을 중지한다." % (ld[0], ld[1]),
+                "모니터링 중지의 자동: 최대 대기를 적은 케이스는 잡 시작에서 그 시간이 지났을 때가 더 이르면 그때 중지한다. "
+                "마지막 케이스의 자동은 최대 대기를 적었을 때만 중지한다. 중지 명령이 없는 모니터링은 중지하지 않는다.",
                 "잡이 실행되는 동안에는 VM 에 접속하지 않는다. 잡이 끝났는지 확인하지 않는다.",
                 "## 케이스와 VM",
                 "케이스 행(옅은 파란 바탕, 굵은 글씨): 적용 체크, 케이스 이름, 설명, ESX 호스트, ESX 모니터링, 설정(대상이 ESX 호스트인 "
-                "프로파일), 최대 대기, 시작 시각, 잡 시작 (환산), 테스트 그룹, 잡 종료 (리포트).",
+                "프로파일), 최대 대기, 시작 시각, 잡 시작 (환산), 모니터링 중지, 테스트 그룹, 잡 종료 (리포트).",
                 "VM 행(└): VM 이름, 전원(켬, 끔), 잡, 그 VM 의 모니터링, 설정(대상이 VM 인 프로파일), 종료 기준 VM.",
                 "VM 전원: ESX 호스트가 있는 케이스는 이름이 있는 VM 행이 모두 그 케이스의 VM 이다. 전원 칸이 끔인 VM 은 켜져 있으면 "
                 "끄고, 켬인 VM 은 꺼져 있으면 켠다.",
@@ -1323,7 +1331,8 @@ class App(object):
                     for m in list(c.get("esx_monitors") or []) + [x for v in (c.get("vms") or []) for x in (v.get("monitors") or [])]]
             tb = core.timeline_table(int(st.get("seq_prep_lead_min", 30)), int(st.get("seq_snap_lead_min", 10)),
                                      int(st.get("mon_lead_min", 5)), bool(used), bool((st.get("seq_guest_cmd") or "").strip()),
-                                     any(m in stops for m in used), bool((st.get("ops_host") or "").strip()))
+                                     any(m in stops for m in used), bool((st.get("ops_host") or "").strip()),
+                                     int(st.get("stop_lead_min", 10)))
             ch = {}
         for w in self.tl_grid.winfo_children():
             w.destroy()
@@ -2178,11 +2187,14 @@ class App(object):
         self.sched = core.case_schedule(self.cases, ld[0], ld[1])
         # 표의 줄마다 잡 시작 시각('잡 시작 (환산)' 칸). 표를 그릴 때마다 한 번 계산한다
         self.seq_ats = core.table_starts(self.cases, dt.datetime.now(), self.record_rows_cached()) if self.mode() == "seq" else []
+        # 모니터링 중지 칸(순서 실행): 생성할 때와 같은 규칙(core.seq_stop_at)
+        self.seq_stops = core.seq_stop_view(self.cases, self.mon_cmds, {"stop_lead_min": ld[1]}, dt.datetime.now(),
+                                            self.record_rows_cached()) if self.mode() == "seq" else []
 
     LOCKED_TEXT = ("적용 체크한 케이스의 간격, 잡 시작, 모니터링 중지는 고칠 수 없음.\n\n이미 등록한 케이스의 기록이라 고정해 둔다. "
                    "다른 케이스를 추가하거나 순서를 바꿔도 이 값은 바뀌지 않는다.\n고치려면 적용 체크를 먼저 끄고, 고친 뒤 다시 체크할 것.")
 
-    LOCKED_TEXT_SEQ = ("적용 체크한 케이스의 시작 시각은 고칠 수 없음.\n\n이미 실행한 케이스의 기록이라 고정해 둔다. "
+    LOCKED_TEXT_SEQ = ("적용 체크한 케이스의 시작 시각과 모니터링 중지는 고칠 수 없음.\n\n이미 실행한 케이스의 기록이라 고정해 둔다. "
                        "고치려면 적용 체크를 먼저 끄고, 고친 뒤 다시 체크할 것.")
 
     def is_locked(self, c):
@@ -2309,10 +2321,25 @@ class App(object):
             mode = c.get("stop_mode") or "auto"
             if mode == "none":
                 return "중지 없음"
+            if self.mode() == "seq":
+                return self.seq_stop_text(i, mode)
             if s.get("stop_error") or not s.get("mon_stop"):
                 return "확인 필요"
             return core.fmt_short(s["mon_stop"]) + (" (직접)" if mode == "manual" else " (자동)")
         return None
+
+    def seq_stop_text(self, i, mode):
+        """순서 실행의 모니터링 중지 칸. 자동이면 '월-일 시:분 (자동)', 직접 입력이면 '(직접)'. 중지 명령이 있는 모니터링이 없으면
+        '중지 명령 없음', 마지막 케이스의 자동처럼 중지하지 않으면 '없음 (마지막)'."""
+        r = self.seq_stops[i] if i < len(getattr(self, "seq_stops", [])) else {}
+        if not r.get("has_stop"):
+            return "중지 명령 없음"
+        if r.get("stop_error"):
+            return "확인 필요"
+        if r.get("mon_stop"):
+            return core.fmt_short(r["mon_stop"]) + (" (직접)" if mode == "manual" else " (자동)")
+        at = self.seq_ats[i]["at"] if i < len(getattr(self, "seq_ats", [])) else None
+        return "없음 (마지막)" if (at is not None and mode == "auto") else "-"
 
     SEQ_UNSET = "입력 필요"
     @staticmethod
@@ -2373,10 +2400,42 @@ class App(object):
             c["applied_stop"] = ""          # 고정해 둔 자동 중지 시각을 지운다. 다시 체크하면 그때의 표로 다시 고정한다
         elif self.mode() == "seq":
             note = self.fix_seq_start(i, c)
+            self.freeze_seq_stop(i, c)
         self.mark_cases()
         self.t_case.refresh(iid)
         if note:
             messagebox.showinfo(TITLE, note, parent=self.root)
+
+    def freeze_seq_stop(self, i, c):
+        """순서 실행에서 적용 체크할 때: 모니터링 중지가 자동이면 그 값을 applied_stop 으로 고정한다(다음 케이스를 고쳐도 등록한
+        기록이 다르게 보이지 않게). 값은 마지막 [명령어 생성] 의 계획 시각, 없으면 테스트 기록 CSV 의 마지막 생성 기록, 그것도 없으면
+        지금 표로 계산한 값이다."""
+        if core.stop_mode_of(c) != "auto":
+            c["applied_stop"] = ""
+            return
+        name = (c.get("name") or "").strip()
+        t = None
+        res = self.result
+        if res and res.get("mode") == "seq":
+            for pc in res.get("cases") or []:
+                if pc.get("name") == name and pc.get("mstop"):
+                    t = pc["mstop"]
+        if t is None:
+            rec = core.latest_records(self.record_rows_cached(), True).get(name) or {}
+            try:
+                t = core.parse_dt(rec.get("모니터링 중지(KST)"))
+            except ValueError:
+                t = None
+        if t is None:
+            ld = self.leads() or (self.settings["mon_lead_min"], self.settings["stop_lead_min"])
+            c["applied"] = False
+            try:
+                view = core.seq_stop_view(self.cases, self.mon_cmds, {"stop_lead_min": ld[1]}, dt.datetime.now(),
+                                          self.record_rows_cached())
+            finally:
+                c["applied"] = True
+            t = view[i]["mon_stop"] if i < len(view) else None
+        c["applied_stop"] = core.fmt_dt(t) if t else ""
 
     def fix_seq_start(self, i, c):
         """순서 실행에서 적용 체크할 때: 시작 시각 칸의 +간격을 날짜 시각으로 바꿔 고정한다(사용자 결정 2026-11-17. 적용 체크한 케이스의
@@ -2734,7 +2793,7 @@ class App(object):
         i, k, c, v = self._get(iid)
         if c is None or k is not None:
             return
-        if self.is_locked(c):
+        if self.is_locked(c) or self.seq_locked(c):
             self.locked_notice()
             return
         if not core.case_has_monitors(c):
@@ -2750,10 +2809,17 @@ class App(object):
         fr = ttk.Frame(top, padding=self.px(10))
         fr.pack(fill="both", expand=True)
         mode = tk.StringVar(value=c.get("stop_mode") or "auto")
-        auto_txt = "자동: 다음 케이스 잡 시작 %d분 전" % ld[1] if i + 1 < len(self.cases) else \
-            "자동: 마지막 케이스이므로 잡 시작 + 간격 - %d분" % ld[1]
-        if (c.get("stop_mode") or "auto") == "auto":
-            auto_txt += "  (%s)" % (core.fmt_dt(s["mon_stop"]) if s.get("mon_stop") else (s.get("stop_error") or "확인 필요"))
+        if self.mode() == "seq":
+            # 사용자 결정 2026-11-09: 자동(다음 케이스 잡 시작 N분 전), 직접 입력, 중지 없음
+            s = self.seq_stops[i] if i < len(self.seq_stops) else {}
+            auto_txt = "자동: 같은 ESX 호스트의 다음 케이스 잡 시작 %d분 전 (마지막 케이스는 최대 대기를 적었을 때만)" % ld[1]
+            if (c.get("stop_mode") or "auto") == "auto":
+                auto_txt += "  (%s)" % (core.fmt_dt(s["mon_stop"]) if s.get("mon_stop") else (s.get("stop_error") or "없음"))
+        else:
+            auto_txt = "자동: 다음 케이스 잡 시작 %d분 전" % ld[1] if i + 1 < len(self.cases) else \
+                "자동: 마지막 케이스이므로 잡 시작 + 간격 - %d분" % ld[1]
+            if (c.get("stop_mode") or "auto") == "auto":
+                auto_txt += "  (%s)" % (core.fmt_dt(s["mon_stop"]) if s.get("mon_stop") else (s.get("stop_error") or "확인 필요"))
         ttk.Radiobutton(fr, text=auto_txt, value="auto", variable=mode).grid(row=0, column=0, columnspan=2, sticky="w")
         ttk.Radiobutton(fr, text="직접 입력", value="manual", variable=mode).grid(row=1, column=0, sticky="w")
         guess = c.get("stop_time") or (core.fmt_dt(s["mon_stop"]) if s.get("mon_stop") else "")

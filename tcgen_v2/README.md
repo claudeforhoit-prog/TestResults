@@ -1,4 +1,4 @@
-# 테스트 실행 명령 생성기 (tcgen) v2.14
+# 테스트 실행 명령 생성기 (tcgen) v2.15
 
 > 이 생성기를 고치거나 AI 로 다시 만들 때는 `DEVELOPER.md`(구조, 설계 규칙, plan 형식, 시험)를 먼저 읽는다.
 
@@ -29,7 +29,16 @@ v2 는 v1.4 와 따로 설치하고 따로 실행한다. 프로그램 이름, �
 - 잡은 탭 4 에 적은 시작 시각에 시작한다. 진행 스크립트는 시작 시각을 변경하지 않는다.
 - 진행 스크립트는 잡이 끝났는지 확인하지 않는다. 다음 케이스의 시작 시각은 앞 케이스의 잡이 끝나는 때를 보고 사용자가 정한다.
 
-## 2. v2.12, v2.13, v2.14 에서 달라진 것
+## 2. v2.12 부터 v2.15 까지 달라진 것
+
+v2.15 는 네 가지를 바꿨다.
+
+- 탭 4 케이스 행의 `모니터링 중지` 칸(자동, 직접 입력, 중지 없음)과 설정 영역의 `모니터링 중지 N분 전`(기본 10)을 되살렸다. 2026-11-09 에 사용자가 정한 규칙이다("다음테스트 시작하기 10분전에 설정한 모든 모니터링 종료하도록 만들어줘", "중지 없음 옵션도있어야됨"). v2.12 에서 진행 방식을 하나로 합칠 때 이 칸이 요청 없이 빠졌고, v2.12 부터 v2.14 까지는 다음 케이스 잡 시작 32분 전에 중지했다(7.5절).
+- S 블록을 붙여넣으면 등록할 케이스 목록(케이스 이름, VM 이름, 잡 시작, 실행 명령, 모니터링)을 보이고, `yes` 를 입력해야 시작한다(6.4절).
+- 점프 VM 터미널의 출력에서 VM 이름을 초록색으로 보인다. 로그 파일에는 색 글자를 쓰지 않는다.
+- `tcrun stop` 이 v2.14 까지의 `tcrun cancel` 이 하던 일을 함께 한다. 진행을 끝내고, 등록한 crontab 줄을 지우고, 시작된 모니터링을 중지하고, 점프 VM 의 실행 기록을 지운다. 지운 실행은 `tcrun status` 에 나오지 않는다. `tcrun cancel` 은 없앴다(6.5절). 2026-11-20 사용자 결정이다("Stop으로 멈추고 cancle작업까지 둘다 허고 cancle 없애줘", "삭제하면 trunk status에 없어져야지").
+
+진행 스크립트가 바뀌었으므로 A 블록을 다시 붙여넣는다. v2.15 의 `tcrun stop` 은 v2.14 까지의 판으로 시작한 실행이 남긴 줄도 지운다.
 
 v2.14 는 설정 영역에 테스트 케이스 파일의 [새로 만들기] 를 더했다(4.3절). 진행 방식은 v2.13 과 같다. 저장소 main 에서 v1.4 의 `tcgen` 폴더를 삭제했다(v1.4 는 태그 `tcgen-v1.4` 로 받는다. 14절).
 
@@ -50,14 +59,14 @@ v2.11 을 쓰던 경우에 확인할 것은 다음과 같다.
 | 탭 1 의 프로세스 이름 | 잡 종료 확인에 사용 | 열이 없다 |
 | 등록 결과 | 진행 로그에서 찾음 | `tcrun-<실행 ID>-jobs.csv` 에 케이스, ESX 호스트, VM, 잡 시작, 등록 여부가 남는다 |
 | 한 VM 에서 등록이 안 될 때 | 다른 VM 의 줄을 지움. VM 의 응답이 늦으면 다른 VM 의 잡이 먼저 시작될 수 있었음 | VM 접속마다 첫 실행 시각 15초 전까지 남은 시간만 주고, VM 도 자기 시계가 그 시각을 지났으면 줄을 받지 않는다. 확인할 VM 은 `jobs.csv` 의 그 VM 행에 적는다(7.3절) |
-| `tcrun cancel` 이 접속하지 못한 VM | 지운 것으로 출력하고 그 줄은 남음 | 그 VM 이름을 출력한다. 다시 실행하면 남은 줄만 지운다(6.5절) |
+| `tcrun cancel`(v2.15 부터 `tcrun stop`)이 접속하지 못한 VM | 지운 것으로 출력하고 그 줄은 남음 | 그 VM 이름을 출력한다. 다시 실행하면 남은 줄만 지운다(6.5절) |
 | 탭 5 | 결과 글, 블록, 실행 계획 | 타임라인 표 추가. 오류와 알림은 한 줄 |
 | [리포트용 CSV 저장] | 시각 지정에서만 | 쓴다. 잡 시작은 `잡 시작 (환산)` 칸의 시각 |
 
 판을 올릴 때 할 일은 다음과 같다.
 
-1. 점프 VM 에서 진행 중인 실행이 없는지 확인한다(`sh ~/.tcgen/tcrun status`). v2.11 의 실행이 남긴 crontab 줄이 있으면 `sh ~/.tcgen/tcrun cancel` 로 지운 뒤에 판을 올린다.
-2. 새 판의 A 블록을 점프 VM 에 다시 붙여넣는다. 생성기와 진행 스크립트의 판 번호가 같아야 한다(v2.13 에서 v2.14 로 올릴 때도 같다).
+1. 점프 VM 에서 진행 중인 실행이 없는지 확인한다(`sh ~/.tcgen/tcrun status`). 진행 중인 실행은 판을 올리기 전에 지금 판의 명령으로 끝낸다(v2.14 까지는 `sh ~/.tcgen/tcrun cancel`). 끝난 실행이 남긴 crontab 줄은 판을 올린 뒤에 `sh ~/.tcgen/tcrun stop` 으로 지워도 된다.
+2. 새 판의 A 블록을 점프 VM 에 다시 붙여넣는다. 생성기와 진행 스크립트의 판 번호가 같아야 한다(v2.14 에서 v2.15 로 올릴 때도 같다).
 3. 탭 4 에서 `잡 시작 (환산)` 칸을 확인한다. `+간격` 의 기준이 바로 윗줄로 변경됐으므로, ESX 호스트가 섞여 있는 표는 시각이 v2.11 과 다르게 계산된다.
 4. v2.11 에서 생성하고 아직 적용 체크하지 않은 케이스는 적용 체크를 먼저 한다. 적용 체크한 케이스의 시작 시각은 생성한 때의 날짜 시각으로 고정된다.
 5. 설정 파일의 `시작 시각 준비` 가 예전 기본값 60분이면 `설정 적용` 30분 전으로 한 번 변경된다. 직접 고친 값은 그대로 둔다.
@@ -199,6 +208,7 @@ v2 를 처음 실행할 때 `tcgen2_data` 에 데이터가 없고 v1 의 데이�
 | 잡 시작 기준: 설정 적용 N분 전 | 기본 30. 설정이나 VM 전원이 호스트와 다른 케이스는 잡 시작 N분 전에 VM 종료, 설정 적용, VM 전원 ON 을 한다(7.2절) |
 | 잡 시작 기준: 구성 스냅샷 N분 전 | 기본 10. 모든 케이스에서 잡 시작 N분 전에 구성 스냅샷을 읽는다(7.4절). `설정 적용 N분 전` 보다 작아야 한다 |
 | 잡 시작 기준: 모니터링 시작 N분 전 | 기본 5. 모니터링이 있는 케이스는 잡 시작 N분 전에 모니터링을 시작한다. `설정 적용 N분 전` 보다 작아야 한다 |
+| 잡 시작 기준: 모니터링 중지 N분 전 (다음 케이스) | 기본 10. 모니터링 중지 칸이 자동인 케이스는 같은 ESX 호스트의 다음 케이스 잡 시작 N분 전에 그 케이스의 모든 모니터링을 중지한다(7.5절). 중지 명령이 있는 모니터링이 있으면 `모니터링 시작 N분 전` 보다 커야 한다 |
 | 잡 시작 최소 간격 N분 | 기본 5. 모든 잡 시작은 서로 N분 이상 떨어져야 한다(ESX 호스트가 달라도). 더 가까우면 [명령어 생성] 이 오류로 알린다 |
 | 점프 VM 로그 폴더 | 점프 VM 의 폴더. `/` 또는 `~/` 로 시작하고 영문, 숫자, `.` `_` `-` `/` `+` `@` `,` `:` 만 쓴다. 비우면 `~/tcgen_log`, 점프 VM 작업 폴더를 적었으면 `<작업 폴더>/log` |
 | ESX 접속 주소 | 선택. `호스트이름=주소` 를 `;` 로 구분한다. 비우면 ESX 호스트 이름으로 접속한다 |
@@ -337,6 +347,7 @@ Numa.LocalityWeightActionAffinity = 0
 | 최대 대기 | 시간:분(예: `12:00`). 모니터링을 중지할 때를 정하는 데만 쓴다(7.5절) | |
 | 시작 시각 | 잡을 시작할 시각 | |
 | 잡 시작 (환산) | 시작 시각 칸의 값으로 계산한 잡 시작 시각. 고칠 수 없다 | |
+| 모니터링 중지 | 두 번 누르면 자동, 직접 입력, 중지 없음 가운데 고르는 창이 열린다(7.5절). 자동이면 계산한 시각이 `(자동)` 과 함께 보인다. 중지 명령이 있는 모니터링이 없으면 `중지 명령 없음`, 마지막 케이스의 자동처럼 중지하지 않으면 `없음 (마지막)` 으로 보인다 | |
 | 테스트 그룹, 잡 종료 (리포트), 종료 기준 VM | 성능 리포트 생성기에 넘기는 값(9.2절) | 종료 기준 VM 은 VM 행에서 지정 |
 
 시작 시각 칸에는 다음 가운데 하나를 적는다.
@@ -487,31 +498,81 @@ P 블록은 모든 케이스를 지금의 호스트와 비교한다. 뒤 케이�
 
 ### 6.4 실행 블록 (S)
 
-탭 5 의 S 블록 [복사] 를 누르면 확인 창이 나온다. 점프 VM 터미널에 붙여넣으면 ESX 호스트별 진행이 백그라운드로 시작되고 아래처럼 출력된다. 터미널을 닫아도 진행은 계속된다.
+탭 5 의 S 블록 [복사] 를 누르면 확인 창이 나온다. 점프 VM 터미널에 붙여넣으면 등록할 케이스의 목록이 나오고 등록할지 묻는다(사용자 요청 2026-11-20 "확인작업필수"). `yes`(또는 `y`)를 입력해야 ESX 호스트별 진행이 백그라운드로 시작된다. `no` 를 입력하면 아무것도 등록하지 않고 끝난다.
+
+```
+run 20261120-100000: 2 cases. Check them before they are registered in crontab.
+---- ESX host esx01: 2 cases
+case 1/2  caseA   job start 2026-11-20 10:14
+  monitoring start 2026-11-20 10:09, stop 2026-11-20 20:04
+  vm esx01ev01
+    job: /home/tester/bench/run_a.sh
+    monitoring guest_perf: bash /nas/perf/ops_metric_push.sh > /tmp/ops_push.log 2>&1
+  vm esx01ev02
+    job: /home/tester/bench/run_b.sh
+  ESX host esx01
+    monitoring host_mon: python3 /vmfs/volumes/ds1/vmkperf_ops_push/vmkperf_ops_push.py start
+case 2/2  caseB   job start 2026-11-20 20:14
+  vm esx01ev01
+    job: /home/tester/bench/run_a.sh
+Register these cases in crontab? Type yes or no: yes
+```
+
+- 목록의 VM 이름은 터미널에서 초록색이다.
+- 빈 줄이나 다른 글을 입력하면 다시 묻는다. 답은 터미널에서만 받는다. 터미널이 없는 실행(ssh 명령으로 넘긴 실행 등)은 아무것도 등록하지 않는다(`no terminal to ask on`).
+- 이미 시작한 실행의 S 블록을 다시 붙여넣으면 묻지 않고 이미 시작했다고 알린다. `tcrun stop` 으로 지운 실행도 다시 시작하지 않는다.
+- 명령의 `<vm이름>`, `<실행시각>` 은 목록에서 `${TC_HOST}`, `${TC_START}` 로 보인다(crontab 에 들어가는 이름).
+
+`yes` 를 입력하면 아래처럼 출력된다. 터미널을 닫아도 진행은 계속된다.
 
 ```
 started: run 20261120-100000 esx esx01   log: /home/<계정>/tcgen_log/tcrun-20261120-100000-esx01.log
-status: sh ~/.tcgen/tcrun status       stop: sh ~/.tcgen/tcrun stop       cancel: sh ~/.tcgen/tcrun cancel
+status: sh ~/.tcgen/tcrun status       stop: sh ~/.tcgen/tcrun stop (ends the run, removes its crontab lines and stops its monitoring)
 files in /home/<계정>/tcgen_log : tcrun-20261120-100000-jobs.csv (which jobs are registered in crontab), ...
 ```
 
 - 설정 변경이 없는 케이스의 잡은 이때 바로 crontab 에 등록된다. 등록 결과는 `tcrun-<실행 ID>-jobs.csv` 에서 확인한다(8.1절).
 - 실행을 더할 때: 앞 실행이 진행 중인 ESX 호스트에 새 실행의 S 블록을 붙여넣으면 그 호스트의 진행은 대기한다. 출력은 `queued:` 로 시작하고 앞 실행이 끝나는 시각이 함께 나온다(`waiting for run ... to end (about <시각>, 1 min after its last job start)`). 앞 실행이 `done` 으로 끝나면 스스로 시작한다. ESX 호스트 하나에는 한 번에 한 실행만 진행한다. 진행은 마지막 잡 시작 1분 뒤에 끝나므로, 대기하는 실행의 등록은 그 뒤에 한다.
-- 앞 실행이 `done` 이 아닌 상태(paused, stopped, cancelled, died)로 끝나면 대기하던 실행은 시작하지 않고 `paused` 로 끝난다. 앞 실행을 확인한 뒤 다시 생성한다.
-- 앞 실행이 paused 나 stopped 로 끝나 crontab 줄이 남아 있으면 새 실행은 시작하지 않고 `==== esx01: not started. ...` 로 이유를 알린다. `sh ~/.tcgen/tcrun cancel esx01` 을 실행한 뒤 같은 S 블록을 다시 붙여넣는다.
+- 앞 실행이 `done` 이 아닌 상태(paused, died 등)로 끝나면 대기하던 실행은 시작하지 않고 `paused` 로 끝난다. 앞 실행을 확인한 뒤 다시 생성한다.
+- 앞 실행이 paused 등으로 끝나 crontab 줄이 남아 있으면 새 실행은 시작하지 않고 `==== esx01: not started. ...` 로 이유를 알린다. `sh ~/.tcgen/tcrun stop esx01` 을 실행한 뒤 같은 S 블록을 다시 붙여넣는다.
 - 앞 실행이 `done` 으로 끝나 남긴 줄은 새 실행이 지운다(7.6절).
 
-### 6.5 진행 확인, 중지, 취소
+### 6.5 진행 확인, 중지
 
 | 명령 (점프 VM) | 하는 일 |
 | :-- | :-- |
-| `sh ~/.tcgen/tcrun status` | 마지막 실행의 모든 ESX 호스트, 진행 중이거나 대기 중인 실행, crontab 줄이 남은 실행의 상태를 보인다. 지금 케이스와 단계, 로그의 마지막 세 줄이 함께 나온다. `-a` 를 주면 모든 실행을 보인다 |
-| `sh ~/.tcgen/tcrun stop [ESX 호스트]` | 진행만 끝낸다. 이미 등록한 crontab 줄은 남으므로 그 잡은 시작 시각에 시작한다. 아직 등록하지 않은 케이스는 등록하지 않는다 |
-| `sh ~/.tcgen/tcrun cancel [ESX 호스트]` | 진행 중이거나 대기 중인 실행을 바로 끝내고 등록한 crontab 줄을 지운다. 시작 전인 잡은 시작하지 않는다. 실행 중인 잡은 끝내지 않는다. 시작된 모니터링은 중지 명령을 실행한다. 적용한 설정은 그대로 둔다. 끝난 실행이 남긴 줄도 지운다. 접속하지 못한 VM 이 있으면 `crontab lines of case <이름> NOT removed on: <VM>` 을 출력하고 그 VM 의 줄은 남는다(그 잡은 아직 시작할 수 있다). 접속이 되는 때에 같은 명령을 다시 실행하면 남은 VM 의 줄만 지운다 |
+| `sh ~/.tcgen/tcrun status` | 마지막 실행의 모든 ESX 호스트, 진행 중이거나 대기 중인 실행, crontab 줄이 남은 실행의 상태를 보인다. 지금 케이스와 단계, 로그의 마지막 세 줄이 함께 나온다. `-a` 를 주면 점프 VM 에 남은 모든 실행을 보인다. `tcrun stop` 으로 지운 실행은 나오지 않는다 |
+| `sh ~/.tcgen/tcrun stop [ESX 호스트]` | 실행을 끝내고 지운다(아래 표의 순서). ESX 호스트를 적으면 그 ESX 호스트의 실행만 다룬다 |
 | `sh ~/.tcgen/tcrun key` | ESX 호스트에 넣을 키 줄을 다시 출력한다 |
 | `sh ~/.tcgen/tcrun version` | 설치된 판 |
 
 작업 폴더를 `~/.tcgen` 이 아닌 폴더로 정했으면 명령의 `~/.tcgen` 대신 그 폴더를 적는다.
+
+`tcrun stop` 은 점프 VM 에 남은 실행마다 다음 순서로 한다. 2026-11-20 사용자 결정이다("Stop으로 멈추고 cancle작업까지 둘다 허고 cancle 없애줘", "삭제하면 trunk status에 없어져야지").
+
+| 순서 | 하는 일 |
+| :-- | :-- |
+| 1 | 진행 중이거나 대기 중인 진행 스크립트가 다음 확인 시점에 끝난다. ESX 호스트에서 설정 적용, VM 종료, 되돌리기를 하는 중이면 그 작업이 끝날 때까지 기다린다. 그 밖의 단계에서 60초 안에 끝나지 않으면 강제로 끝낸다 |
+| 2 | 등록한 crontab 줄을 지운다. 시작 전인 잡은 시작하지 않는다. 실행 중인 잡은 끝내지 않는다. 끝난 실행(`done` 등)이 남긴 줄도 지운다 |
+| 3 | 시작된 모니터링은 중지 명령을 실행한다. 등록한 중지 시각이 이미 지난 모니터링은 다시 중지하지 않는다 |
+| 4 | 점프 VM 의 실행 기록(`~/.tcgen/runs/<실행 ID>`)을 지운다. 그 실행은 `tcrun status` 에 나오지 않는다. 로그 폴더의 로그, `jobs.csv`, `result.csv`, 구성 스냅샷 csv 는 남는다 |
+
+- 적용한 설정은 되돌리지 않는다.
+- 접속하지 못한 VM 이 있으면 `crontab lines of case <이름> NOT removed on: <VM>` 을 출력한다. 그 VM 의 줄은 남고(그 잡은 아직 시작할 수 있다), 그 실행은 `tcrun status` 에 남는다. 접속이 되는 때에 같은 명령을 다시 실행하면 남은 VM 의 줄만 지운다.
+- 지운 실행의 S 블록을 다시 붙여넣으면 시작하지 않고 `was ended by sh tcrun stop on this jump VM` 을 출력한다. 다시 실행하려면 다시 생성한다.
+- v2.14 까지 있던 `tcrun cancel` 은 없앴다. 입력하면 `tcrun stop` 을 쓰라는 안내만 출력한다.
+
+출력 예(줄을 등록한 뒤 구성 스냅샷을 기다리는 동안):
+
+```
+== run 20261120-100000 esx esx01: stopping (state running, case caseA, step wait-snapshot)
+   the runner (pid 12345) ended: before the config snapshot of case caseA
+   crontab lines of case caseA removed (job start 2026-11-20 10:30)
+   the crontab lines of 1 case(s) were removed: their jobs that have not started will not start. Jobs that run now are not touched.
+   stopped. Settings that this run applied stay as they are.
+   removed from tcrun status. The log stays: /home/<계정>/tcgen_log/tcrun-20261120-100000-esx01.log
+stop finished: tcrun status shows no run now. The logs and records stay in the log folder.
+```
 
 | 상태 | 뜻 |
 | :-- | :-- |
@@ -519,20 +580,21 @@ files in /home/<계정>/tcgen_log : tcrun-20261120-100000-jobs.csv (which jobs a
 | `queued` | 같은 ESX 호스트의 앞 실행이 끝나기를 기다리는 중 |
 | `done` | 모든 케이스를 처리했다. `text` 에 등록한 케이스 수와 등록하지 못한 케이스 수가 나온다. crontab 줄은 호스트에 남아 있다(7.6절) |
 | `paused` | 문제가 있어 스스로 멈췄다. `text` 에 이유가 있다 |
-| `stopped` | `tcrun stop` 으로 끝냈다 |
-| `cancelled` | `tcrun cancel` 로 끝냈다 |
+| `stopped` | `tcrun stop` 이 접속하지 못한 호스트에 줄이 남은 실행. `text` 에 다시 실행할 명령이 있다 |
+| `cancelled` | v2.14 까지의 `tcrun cancel` 로 끝낸 실행 |
 | `died` | 진행 프로세스가 없다(점프 VM 재부팅 등). `~/.tcgen/runs/<실행 ID>/<ESX 호스트>.out` 을 본다 |
 
-`stop` 을 받은 시점에 따라 하는 일이 다르다.
+진행 스크립트가 `stop` 을 받은 시점에 따라 끝나는 방식이 다르다. 어느 경우든 그 뒤에 줄을 지우고 실행 기록을 지운다.
 
 | stop 을 받은 시점 | 진행 스크립트가 하는 일 |
 | :-- | :-- |
 | 대기(queued) 중, 설정을 변경할 시각을 기다리는 동안 | 그대로 끝낸다. 그 케이스와 뒤 케이스는 등록되지 않는다 |
 | 설정 적용 중 | 설정 적용(VM 종료, 값 변경)을 마친 뒤 끝낸다. 값을 변경했으면 그 케이스의 VM 은 꺼진 채로 남는다 |
 | VM 을 켜는 중 | 기다리지 않고 바로 끝낸다. ESX 호스트에서 시작된 켜기 작업은 끝까지 진행된다. 설정은 되돌리지 않는다 |
-| 줄을 등록한 뒤(구성 스냅샷이나 마지막 잡 시작을 기다리는 동안) | 그대로 끝낸다. 등록된 줄은 남아 그 잡은 시작 시각에 시작한다. 그 뒤 케이스의 구성 스냅샷은 읽지 않는다 |
+| 줄을 등록하는 중, 구성 스냅샷을 읽는 중 | 그 단계를 마친 뒤 끝낸다. 60초 안에 끝나지 않으면 강제로 끝낸다 |
+| 줄을 등록한 뒤(구성 스냅샷이나 마지막 잡 시작을 기다리는 동안) | 그대로 끝낸다. 그 뒤 케이스의 구성 스냅샷은 읽지 않는다 |
 
-진행이 멈추면(paused) 로그의 `PAUSED:` 줄에서 이유를 확인하고 고친다. `tcrun-<실행 ID>-jobs.csv` 에서 등록된 케이스를 확인한다. 등록된 케이스의 잡은 시작 시각에 시작한다. 나머지를 실행하려면 `sh ~/.tcgen/tcrun cancel <ESX 호스트>` 로 남은 줄을 지우고(등록된 잡도 지워진다), 실행한 케이스를 탭 4 에서 적용 체크한 뒤 다시 생성해 S 블록을 붙여넣는다.
+진행이 멈추면(paused) 로그의 `PAUSED:` 줄에서 이유를 확인하고 고친다. `tcrun-<실행 ID>-jobs.csv` 에서 등록된 케이스를 확인한다. 등록된 케이스의 잡은 시작 시각에 시작한다. 나머지를 실행하려면 `sh ~/.tcgen/tcrun stop <ESX 호스트>` 로 남은 줄을 지우고(등록된 잡도 지워진다), 실행한 케이스를 탭 4 에서 적용 체크한 뒤 다시 생성해 S 블록을 붙여넣는다.
 
 ## 7. 점프 VM 이 하는 일
 
@@ -571,7 +633,7 @@ files in /home/<계정>/tcgen_log : tcrun-20261120-100000-jobs.csv (which jobs a
 - 한 케이스의 줄은 그 케이스의 모든 VM 과 ESX 호스트에 첫 실행 시각(모니터링 시작 시각, 모니터링이 없으면 잡 시작 시각) 15초 전까지 들어가야 한다. 한 곳이라도 그때까지 줄을 받지 못하면 그 케이스를 등록하지 않고, 이미 줄을 받은 VM 의 줄을 지운다(일부 VM 에서만 시작되는 것을 막는다). 시작 시각은 옮기지 않는다.
 - VM 접속 하나에는 첫 실행 시각 15초 전까지 남은 시간만 준다(최대 60초). VM 도 줄을 받는 때에 자기 시계가 그 시각을 지났으면 줄을 받지 않는다.
 - 등록하지 않은 케이스에서 확인할 VM 이 있으면 `jobs.csv` 의 그 VM 행에 적는다(8.1절): 줄을 지우지 못한 VM, 답이 없던 VM, 줄을 지운 때가 그 VM 의 시계로 첫 실행 시각 뒤인 VM(그 시각의 명령이 이미 실행됐을 수 있다. 시작된 모니터링에는 중지 명령을 실행한다).
-- 줄이 남았거나 뒤늦게 들어올 수 있는 VM 이 있으면 그 케이스는 줄 목록에 남는다. 같은 ESX 호스트의 다음 실행이나 `tcrun cancel` 이 그 VM 의 줄을 다시 지운다.
+- 줄이 남았거나 뒤늦게 들어올 수 있는 VM 이 있으면 그 케이스는 줄 목록에 남는다. 같은 ESX 호스트의 다음 실행이나 `tcrun stop` 이 그 VM 의 줄을 다시 지운다.
 - 다른 실행의 잡 시작과 `잡 시작 최소 간격` 보다 가까우면 로그에 WARN 을 남기고 적은 시각 그대로 등록한다.
 
 ### 7.4 구성 스냅샷과 VCF Operations 기록
@@ -608,21 +670,29 @@ files in /home/<계정>/tcgen_log : tcrun-20261120-100000-jobs.csv (which jobs a
 
 ### 7.5 모니터링
 
+모니터링 중지는 사용자가 정한 규칙이다(2026-11-09 "다음테스트 시작하기 10분전에 설정한 모든 모니터링 종료하도록 만들어줘", "중지 없음 옵션도있어야됨"). 케이스 행의 모니터링 중지 칸에서 케이스마다 고른다.
+
 | 항목 | 때 |
 | :-- | :-- |
 | 시작 | 잡 시작 5분 전(설정 영역의 `모니터링 시작 N분 전`). crontab 줄로 등록한다 |
-| 중지 (중지 명령이 있는 모니터링) | 같은 ESX 호스트의 다음 잡 케이스의 잡 시작 32분 전(`설정 적용 N분 전` + 2분). crontab 줄로 등록한다 |
-| 중지: 최대 대기를 적은 케이스 | 잡 시작 + 최대 대기가 위 시각보다 이르면 그 시각 |
-| 중지: 그 ESX 호스트의 마지막 케이스 | 최대 대기를 적었으면 잡 시작 + 최대 대기. 적지 않았으면 중지 줄을 등록하지 않는다. 같은 ESX 호스트의 다음 실행이 첫 잡 시작 30분 전에 중지 명령을 실행하고, `tcrun cancel` 도 중지 명령을 실행한다 |
+| 중지: 자동 (기본) | 같은 ESX 호스트의 다음 잡 케이스의 잡 시작 10분 전(설정 영역의 `모니터링 중지 N분 전`). 그 케이스의 모든 모니터링(VM, ESX)을 중지한다. crontab 줄로 등록한다 |
+| 중지: 직접 입력 | 모니터링 중지 칸에 적은 시각 |
+| 중지: 중지 없음 | 중지 줄을 만들지 않는다 |
+| 중지: 자동이고 최대 대기를 적은 케이스 | 잡 시작 + 최대 대기가 자동 시각보다 이르면 그 시각 |
+| 중지: 자동이고 그 ESX 호스트의 마지막 케이스 | 최대 대기를 적었으면 잡 시작 + 최대 대기. 적지 않았으면 중지 줄을 등록하지 않는다. 같은 ESX 호스트의 다음 실행이 첫 잡 시작 30분 전에 중지 명령을 실행하고, `tcrun stop` 도 중지 명령을 실행한다 |
 
+- 탭 2 에서 중지 명령을 비운 모니터링은 중지하지 않는다.
+- ESX 호스트가 없는 케이스(BM 서버)는 그 케이스끼리 한 묶음으로 보고 같은 규칙을 쓴다.
+- 다음 케이스가 설정 변경 케이스이면, 그 케이스의 VM 종료와 설정 적용(잡 시작 30분 전)이 앞 케이스의 모니터링 중지(10분 전)보다 먼저다. 이 사이의 ESX 모니터링 값에는 다음 케이스의 VM 종료와 켜기가 들어간다. VM 의 모니터링은 VM 종료 때 끝나고, 앞 케이스의 중지 줄은 VM 이 다시 켜진 뒤에 실행된다.
+- 적용 체크한 케이스의 모니터링 중지는 적용 체크할 때의 값으로 고정된다.
 - 등록하려는 때에 모니터링 시작 시각이 이미 지났으면(설정 변경이 늦게 끝난 경우) 1분 이상 남은 가장 이른 분에 모니터링을 시작하게 등록하고 로그에 WARN 을 남긴다. 잡 시작 시각은 그대로다.
 
 ### 7.6 실행의 끝과 다음 실행
 
 - 진행은 그 ESX 호스트의 마지막 잡 시작 1분 뒤에 끝난다(`done`). 등록한 crontab 줄은 VM 과 ESX 호스트에 그대로 남는다. 잡이 실행되는 동안 VM 에 접속하지 않기 위해서다.
-- 같은 ESX 호스트의 다음 실행을 시작하면, 설정 변경이 없는 케이스는 바로 등록한다. 앞 실행이 남긴 줄은 다음 실행의 첫 잡 시작 30분 전에 지운다. 이때 앞 실행의 마지막 케이스 모니터링이 중지되지 않았으면 중지 명령을 실행한다. 접속하지 못한 VM 의 줄은 남고 로그에 WARN 이 남는다. 그다음 실행이나 `tcrun cancel` 이 그 줄을 다시 지운다.
+- 같은 ESX 호스트의 다음 실행을 시작하면, 설정 변경이 없는 케이스는 바로 등록한다. 앞 실행이 남긴 줄은 다음 실행의 첫 잡 시작 30분 전에 지운다. 이때 앞 실행의 마지막 케이스 모니터링이 중지되지 않았으면 중지 명령을 실행한다. 접속하지 못한 VM 의 줄은 남고 로그에 WARN 이 남는다. 그다음 실행이나 `tcrun stop` 이 그 줄을 다시 지운다.
 - 다음 실행에 앞 실행과 이름이 같은 케이스가 있으면 그 케이스의 앞 실행 줄은 다음 실행을 시작할 때 바로 지운다.
-- 다음 실행 없이 줄을 지우려면 `sh ~/.tcgen/tcrun cancel <ESX 호스트>` 를 실행한다.
+- 다음 실행 없이 줄을 지우려면 `sh ~/.tcgen/tcrun stop <ESX 호스트>` 를 실행한다. 그 실행은 `tcrun status` 에 나오지 않게 된다.
 
 ### 7.7 시각을 지킬 수 없을 때
 
@@ -674,10 +744,10 @@ TC-03,esx01,esx01ev01,2026-11-21 06:00,"not registered (the run ended as paused:
 | `registered` | 그 VM 의 crontab 에 잡 줄을 등록했다. 잡은 `job_start` 에 시작한다 |
 | `registered (...)` | 등록했고 확인할 내용이 있다. 설정을 잡 시작 몇 분 전에 변경했는지, 모니터링이 몇 분 전에 시작하는지(7.7절) |
 | `not registered (<이유>)` | 등록하지 않았다. 그 잡은 시작하지 않는다 |
-| `not registered (<이유>). <그 VM 에서 확인할 것>` | 등록하지 않은 케이스인데 그 VM 에 확인할 것이 있다. `The lines could NOT be removed on this VM again`: 줄이 그 VM 에 남아 있다. `It is not known whether the lines are on this VM`: 답이 없어 알 수 없다. `This VM gave no answer while it was taking the lines ... they may still arrive`: 줄이 뒤늦게 들어올 수 있다. 이 셋은 `sh ~/.tcgen/tcrun cancel <ESX 호스트>` 로 줄을 지운다. `The lines were removed on this VM at <시각> ..., after the first start time`: 줄은 지웠지만 그 시각의 명령이 그 VM 에서 이미 실행됐을 수 있다 |
-| `not registered (the run ended as paused: ...)` | 진행이 멈추거나(`paused`) 중지되거나(`stopped`) 취소돼(`cancelled`) 그 케이스까지 가지 못했다 |
-| `removed before the job start (<누가>)` | 등록했던 줄을 잡 시작 전에 지웠다(`sh tcrun cancel`). 등록 행 아래에 한 행이 더 생긴다 |
-| `NOT removed on this VM (...)` | `tcrun cancel` 이 그 VM 에 접속하지 못해 줄을 지우지 못했다. 그 잡은 `job_start` 에 시작한다. 접속이 되는 때에 cancel 을 다시 실행한다 |
+| `not registered (<이유>). <그 VM 에서 확인할 것>` | 등록하지 않은 케이스인데 그 VM 에 확인할 것이 있다. `The lines could NOT be removed on this VM again`: 줄이 그 VM 에 남아 있다. `It is not known whether the lines are on this VM`: 답이 없어 알 수 없다. `This VM gave no answer while it was taking the lines ... they may still arrive`: 줄이 뒤늦게 들어올 수 있다. 이 셋은 `sh ~/.tcgen/tcrun stop <ESX 호스트>` 로 줄을 지운다. `The lines were removed on this VM at <시각> ..., after the first start time`: 줄은 지웠지만 그 시각의 명령이 그 VM 에서 이미 실행됐을 수 있다 |
+| `not registered (the run ended as paused: ...)` | 진행이 멈추거나(`paused`) `tcrun stop` 으로 끝나(`stopped`) 그 케이스까지 가지 못했다 |
+| `removed before the job start (<누가>)` | 등록했던 줄을 잡 시작 전에 지웠다(`sh tcrun stop`, 다음 실행). 등록 행 아래에 한 행이 더 생긴다 |
+| `NOT removed on this VM (...)` | `tcrun stop` 이 그 VM 에 접속하지 못해 줄을 지우지 못했다. 그 잡은 `job_start` 에 시작한다. 접속이 되는 때에 `tcrun stop` 을 다시 실행한다 |
 
 설정 변경이 있는 케이스는 설정을 변경한 뒤(잡 시작 30분 전쯤)에 행이 생긴다. 그 전에는 파일에 없다. 진행 프로세스가 사라진 경우(`died`. 점프 VM 재부팅 등)에는 그때까지 등록하지 못한 케이스의 행이 생기지 않는다. 행이 없는 케이스는 등록되지 않은 것이다.
 
@@ -763,14 +833,14 @@ tail -f ~/tcgen_log/tcrun-<실행 ID>-<ESX 호스트>.log        # 로그를 계
 - 진행 스크립트는 잡이 시작됐는지, 끝났는지 확인하지 않는다. 잡 명령이 틀려 시작되지 않아도 진행은 계속된다. 처음 쓰는 명령은 VM 에서 직접 확인한다.
 - 설정이 앞 케이스와 다른 케이스는 잡 시작 30분 전에 그 케이스의 VM 을 종료한다. 그때 앞 케이스의 잡이 실행 중이면 중단된다. 시작 시각은 앞 케이스의 잡이 끝나는 때를 보고 정한다.
 - 설정 변경(VM 종료, 설정 적용, VM 전원 ON, 1GB page backing, ssh 로그인)이 30분 안에 끝나지 않으면 그 케이스는 등록되지 않는다. 메모리가 큰 VM 여러 대는 더 걸릴 수 있다. 그때는 설정 영역의 `설정 적용 N분 전` 을 늘린다.
-- 한 ESX 호스트의 케이스는 차례로 실행하는 것을 전제로 한다. 모니터링 중지 시각과 앞 실행이 남긴 줄의 삭제는 같은 ESX 호스트의 다음 케이스(다음 실행의 첫 케이스)의 잡 시작을 기준으로 정한다. 같은 ESX 호스트에서 VM 을 나눠 잡을 겹쳐 실행하면 앞 케이스의 모니터링이 다음 케이스의 잡 시작 32분 전에 중지된다.
-- 같은 ESX 호스트에 실행을 더하면 앞 실행의 마지막 잡이 시작된 뒤에 등록된다(6.4절). 그 전에 시작해야 하는 케이스를 더하려면 `sh ~/.tcgen/tcrun cancel <ESX 호스트>` 로 앞 실행을 끝내고, 남은 케이스와 함께 다시 생성한다.
+- 한 ESX 호스트의 케이스는 차례로 실행하는 것을 전제로 한다. 모니터링 중지 시각과 앞 실행이 남긴 줄의 삭제는 같은 ESX 호스트의 다음 케이스(다음 실행의 첫 케이스)의 잡 시작을 기준으로 정한다. 같은 ESX 호스트에서 VM 을 나눠 잡을 겹쳐 실행하면 앞 케이스의 모니터링이 다음 케이스의 잡 시작 10분 전(설정 영역의 `모니터링 중지 N분 전`)에 중지된다.
+- 같은 ESX 호스트에 실행을 더하면 앞 실행의 마지막 잡이 시작된 뒤에 등록된다(6.4절). 그 전에 시작해야 하는 케이스를 더하려면 `sh ~/.tcgen/tcrun stop <ESX 호스트>` 로 앞 실행을 끝내고, 남은 케이스와 함께 다시 생성한다.
 - 재부팅해야 적용되는 ESX 호스트 설정은 다루지 않는다. 수동으로 적용하고 재부팅한 뒤에 실행한다.
 - 설정을 적용하는 케이스의 VM 은 탭 4 에 적은 ESX 호스트에 등록돼 있어야 한다. DRS 가 VM 을 다른 호스트로 옮겼으면 VM 을 찾지 못해 아무것도 변경하지 않고 멈춘다.
 - 탭 4 에 적지 않은 VM 은 다루지 않는다. ESX 호스트가 있는 케이스에서 이름이 있는 VM 행은 잡이 없어도 그 케이스의 VM 이다(전원 칸대로 켜거나 끈다).
-- 등록한 crontab 줄은 다음 실행이나 `tcrun cancel` 이 지울 때까지 남는다. 줄에는 월과 일이 들어 있어, 지우지 않고 1년이 지나면 같은 날짜에 다시 실행된다.
+- 등록한 crontab 줄은 다음 실행이나 `tcrun stop` 이 지울 때까지 남는다. 줄에는 월과 일이 들어 있어, 지우지 않고 1년이 지나면 같은 날짜에 다시 실행된다.
 - 같은 케이스의 VM 시계가 서로 다르면 잡이 그만큼 어긋나 시작한다. P 블록이 30초를 넘는 차이를 알린다.
-- VM 의 `crontab` 명령이 멈춰 답이 없으면 진행 스크립트는 남은 시간이 지난 뒤 접속을 끊는다. 그 VM 에는 그 뒤에도 줄이 들어갈 수 있다. `jobs.csv` 의 그 VM 행에 `they may still arrive` 가 남으면 그 VM 의 crontab 을 확인하거나 `sh ~/.tcgen/tcrun cancel <ESX 호스트>` 를 실행한다.
+- VM 의 `crontab` 명령이 멈춰 답이 없으면 진행 스크립트는 남은 시간이 지난 뒤 접속을 끊는다. 그 VM 에는 그 뒤에도 줄이 들어갈 수 있다. `jobs.csv` 의 그 VM 행에 `they may still arrive` 가 남으면 그 VM 의 crontab 을 확인하거나 `sh ~/.tcgen/tcrun stop <ESX 호스트>` 를 실행한다.
 - VM 켜기 작업은 최대 90분을 기다린다(`settings.json` 의 `seq_poweron_wait_min`). VM 에 전원 켜기 질문이 대기 중이면 `power.on` 이 끝나지 않는다.
 - ESX 를 재부팅하면 root crontab 의 줄이 지워진다(Broadcom KB 323138). 진행 중에 ESX 를 재부팅하지 않는다.
 - 점프 VM 을 재부팅하면 진행이 끝난다(`died`). 이미 등록한 줄은 VM 에 남아 그 잡은 시작한다. 등록하지 않은 케이스는 다시 생성해 실행한다.
@@ -794,10 +864,13 @@ tail -f ~/tcgen_log/tcrun-<실행 ID>-<ESX 호스트>.log        # 로그를 계
 | `오류: ... 시작 시각 <시각> 이(가) <케이스> 의 시작 시각 <시각> 과 5분 이상 떨어져 있지 않음. ...` | 두 시각 가운데 하나를 고친다(설정 영역의 `잡 시작 최소 간격`) |
 | `오류: ... 시작 시각 <시각> 이(가) 같은 ESX 호스트의 앞 케이스(<시각>)보다 빠름. ...` | 표의 순서를 시작 시각 순서로 맞춘다 |
 | `오류: ... 시작 시각을 <시각> 이후로 고칠 것. 설정이 앞 케이스와 달라 잡 시작 30분 전에 VM 을 종료하는데, ...` | 그 케이스의 시작 시각을 적힌 시각 이후로 늦춘다 |
-| `오류: ... 모니터링을 중지할 시각 <시각> 이(가) 잡 시작 <시각> 보다 빠르거나 같음. ...` | 다음 케이스의 시작 시각을 늦추거나 최대 대기를 늘린다 |
+| `오류: ... 다음 케이스의 시작 시각을 늦추거나 모니터링 중지 칸을 고칠 것. 자동 중지 시각 <시각> 이(가) 이 케이스의 잡 시작 <시각> 보다 빠르거나 같음` | 다음 케이스를 더 늦게 시작하거나 모니터링 중지 칸에서 직접 입력이나 중지 없음을 고른다 |
+| `오류: ... 모니터링 중지 칸의 시각을 잡 시작 <시각> 뒤로 고칠 것. 지금 <시각>` | 직접 입력한 중지 시각을 잡 시작 뒤로 고친다 |
+| `경고: ... 모니터링 중지 칸의 시각 <시각> 이(가) 다음 케이스 <이름> 의 모니터링 시작 <시각> 보다 늦음. ...` | 직접 입력한 중지 시각을 다음 케이스의 모니터링 시작 앞으로 고친다. 그대로 두면 이 케이스의 중지 명령이 다음 케이스의 모니터링도 멈출 수 있다 |
+| `오류: 설정: '모니터링 중지 N분 전'(5)은 '모니터링 시작 N분 전'(5)보다 커야 함. ...` | 설정 영역의 두 칸을 고친다 |
 | `오류: 설정: '설정 적용 N분 전'(10)은 '구성 스냅샷 N분 전'(10)보다 커야 함` | 설정 영역의 두 칸을 고친다 |
 | `오류: 설정: 'Operations 암호' 를 입력할 것 ('Operations 주소' 를 비우면 Operations 에 기록하지 않음)` | 설정 영역의 `Operations 암호` 칸에 암호를 적고 Enter 를 누른다. 기록하지 않으려면 `Operations 주소` 를 비운다 |
-| `알림: 마지막 케이스(<이름>)는 모니터링 중지 시각이 없음. ...` | 오류가 아니다. 정해진 때에 중지하려면 그 케이스의 `최대 대기` 칸에 시간을 적는다(7.5절) |
+| `알림: 마지막 케이스(<이름>)는 모니터링 중지 시각이 없음. ...` | 오류가 아니다. 정해진 때에 중지하려면 모니터링 중지 칸에서 직접 입력을 고르거나 그 케이스의 `최대 대기` 칸에 시간을 적는다 |
 | `경고: N번째 케이스 <이름>: 잡, 모니터링, 설정이 하나도 없고 전원을 끌 VM 도 없어 건너뜀` | 그 케이스는 생성에서 빠진다. 잡을 지정했는지 확인한다 |
 
 점프 VM 터미널의 출력은 다음과 같다.
@@ -805,14 +878,20 @@ tail -f ~/tcgen_log/tcrun-<실행 ID>-<ESX 호스트>.log        # 로그를 계
 | 출력 | 뜻과 할 일 |
 | :-- | :-- |
 | `FAILED  .../tcrun (sha256 differs. Paste block A again. ...)` | A 블록을 붙여넣는 중에 글자가 빠졌거나 작업 폴더에 쓸 수 없다. 작업 폴더의 여유 공간을 확인하고 A 블록을 다시 붙여넣는다 |
-| `==== tcrun 2.13, plan made by tcgen 2.14: paste block A again. Nothing started.` | 점프 VM 의 진행 스크립트가 예전 판이다. A 블록을 다시 붙여넣는다 |
+| `==== tcrun 2.14, plan made by tcgen 2.15: paste block A again. Nothing started.` | 점프 VM 의 진행 스크립트가 예전 판이다. A 블록을 다시 붙여넣는다 |
 | `1 MB cannot be written in ... (disk full or disk quota ...)` | 작업 폴더나 로그 폴더에 쓸 수 없다. 설정 영역에서 두 폴더를 고치고 A 블록을 다시 붙여넣은 뒤 다시 생성한다 |
 | `==== plan FAILED (sha256 differs)` | P 블록이나 S 블록을 붙여넣는 중에 글자가 빠졌다. 그 블록을 다시 붙여넣는다 |
+| `Register these cases in crontab? Type yes or no:` | S 블록이 보인 목록을 확인하고 `yes` 를 입력한다. `no` 면 아무것도 등록하지 않는다 |
+| `==== not confirmed. Nothing started.` | `no` 를 입력했다. 아무것도 등록하지 않았다 |
+| `==== no terminal to ask on (/dev/tty). Nothing started. ...` | 터미널이 아닌 곳에서 S 블록을 실행했다. 점프 VM 의 터미널에 붙여넣는다 |
+| `==== no answer. Nothing started.` | 답을 입력하기 전에 입력이 끝났다(Ctrl+D 등). S 블록을 다시 붙여넣는다 |
 | `==== esx01: run ... was already started on this jump VM` | 같은 S 블록을 두 번 붙여넣었다. 다시 실행하려면 다시 생성한다 |
+| `==== esx01: run ... was ended by sh tcrun stop on this jump VM` | `tcrun stop` 으로 지운 실행의 S 블록을 다시 붙여넣었다. 다시 실행하려면 다시 생성한다 |
+| `tcrun 2.15 has no cancel: ...` | v2.15 에는 `tcrun cancel` 이 없다. `sh ~/.tcgen/tcrun stop [ESX 호스트]` 를 실행한다 |
 | `queued:  run ... esx esx01   waiting for run ... to end (about <시각>, ...)` | 같은 ESX 호스트의 앞 실행이 진행 중이라 대기한다. 앞 실행이 그 시각쯤 `done` 으로 끝나면 스스로 시작한다 |
-| `[PROBLEM] case <이름>: its job start is less than 2 min after the end of run ...` | 같은 ESX 호스트의 앞 실행이 끝나기 전에 시작해야 하는 케이스다. 대기하는 동안 시작 시각이 지나 등록되지 않는다. 시작 시각을 늦추거나, `sh ~/.tcgen/tcrun cancel esx01` 로 앞 실행을 끝내고 남은 케이스와 함께 다시 생성한다 |
-| `crontab lines of case <이름> NOT removed on: <VM> ...` | `tcrun cancel` 이 그 VM 에 접속하지 못했다. 그 VM 의 잡은 아직 시작할 수 있다. 접속이 되는 때에 `sh ~/.tcgen/tcrun cancel esx01` 을 다시 실행한다 |
-| `==== esx01: not started. run ... ended as paused and crontab lines of its case(s) are still on the hosts ...` | 앞 실행이 줄을 남긴 채 멈췄다. `sh ~/.tcgen/tcrun cancel esx01` 을 실행한 뒤 같은 S 블록을 다시 붙여넣는다 |
+| `[PROBLEM] case <이름>: its job start is less than 2 min after the end of run ...` | 같은 ESX 호스트의 앞 실행이 끝나기 전에 시작해야 하는 케이스다. 대기하는 동안 시작 시각이 지나 등록되지 않는다. 시작 시각을 늦추거나, `sh ~/.tcgen/tcrun stop esx01` 로 앞 실행을 끝내고 남은 케이스와 함께 다시 생성한다 |
+| `crontab lines of case <이름> NOT removed on: <VM> ...` | `tcrun stop` 이 그 VM 에 접속하지 못했다. 그 VM 의 잡은 아직 시작할 수 있다. 그 실행은 `tcrun status` 에 남는다. 접속이 되는 때에 `sh ~/.tcgen/tcrun stop esx01` 을 다시 실행한다 |
+| `==== esx01: not started. run ... ended as paused and crontab lines of its case(s) are still on the hosts ...` | 앞 실행이 줄을 남긴 채 멈췄다. `sh ~/.tcgen/tcrun stop esx01` 을 실행한 뒤 같은 S 블록을 다시 붙여넣는다 |
 | `ssh key login failed ... Permission denied` | ESX 호스트에 키가 없다. 6.2절 |
 | `[PROBLEM] VCF Operations: login to VCF Operations <주소> failed (account <계정>, curl exit N: ...)` | 주소, 계정, 암호를 확인한다. `curl exit 6` 이나 `7` 은 점프 VM 에서 그 주소로 접속하지 못한 것이다 |
 | `[PROBLEM] vm <이름>: VCF Operations has no VirtualMachine object with this name. ...` | Operations 에 그 이름의 VM 객체가 없다. VM 이름이 vCenter 의 이름과 같은지 확인한다. 그대로 실행하면 그 VM 의 설정만 기록되지 않는다 |
@@ -834,7 +913,7 @@ Windows 에서는 셸이 필요한 시험을 건너뛴다. 전체 시험은 tcsh
 | `test_seq.py` | 생성기의 단위 시험. 프로파일 읽기, 검증 오류, 시작 시각과 `+간격`, plan, 타임라인, 블록의 글자 규칙, v1 데이터 가져오기 |
 | `test_apply.py` | `tcgen_apply.py` 를 가짜 `vim-cmd`, `esxcli`, vmx 폴더로 실행한다 |
 | `fake_ops.py` | 가짜 VCF Operations(토큰 발급, 객체 조회, 속성 기록). `test_tcrun.py` 의 `OpsTests` 가 쓴다 |
-| `test_tcrun.py` | `tcrun` 통합 시험. 가짜 ssh, crontab, cron, 가상 시계로 실행 전체를 진행한다. 적은 시각 그대로 등록하는지, 설정이 같은 케이스의 일괄 등록, 설정 변경 뒤 등록, 등록 기록, 잡 실행 중 VM 접속이 없는지, 구성 스냅샷, 모니터링, 실행 대기, 앞 실행이 남긴 줄, stop, cancel, check. 한 VM 의 접속이 느리거나 안 될 때 다른 VM 의 잡만 시작되지 않는지, cancel 이 줄을 지우지 못한 VM 을 다시 처리하는지도 본다 |
+| `test_tcrun.py` | `tcrun` 통합 시험. 가짜 ssh, crontab, cron, 가상 시계로 실행 전체를 진행한다. 적은 시각 그대로 등록하는지, 설정이 같은 케이스의 일괄 등록, 설정 변경 뒤 등록, 등록 기록, 잡 실행 중 VM 접속이 없는지, 구성 스냅샷, 모니터링, 실행 대기, 앞 실행이 남긴 줄, stop(줄 삭제와 실행 기록 삭제, v2.14 실행의 줄 삭제), check. 한 VM 의 접속이 느리거나 안 될 때 다른 VM 의 잡만 시작되지 않는지, cancel 이 줄을 지우지 못한 VM 을 다시 처리하는지도 본다 |
 | `test_seq_blocks_shell.py` | 대화형 tcsh 와 bash 에 블록 A, P, S 를 붙여넣는다(LF, CR+LF) |
 | `gui_smoke.py` | 화면을 띄워 버튼과 선택 창을 코드로 조작한다. 수동 실행: `python tests\gui_smoke.py [그림 저장 폴더]` |
 | `gui_fuzz_applied.py` | 탭 4 의 조작을 무작위 순서로 하면서 적용 체크한 케이스의 값이 변경되지 않는지 본다. 수동 실행: `python tests\gui_fuzz_applied.py [시드] [횟수]` |
@@ -845,6 +924,8 @@ Windows 에서는 셸이 필요한 시험을 건너뛴다. 전체 시험은 tcsh
 
 | 항목 | 가짜 환경에서 가정한 것 | 확인 방법 |
 | :-- | :-- | :-- |
+| S 블록의 확인 질문 | 터미널(`/dev/tty`)에서 답을 읽는다. 시험은 tcsh, bash 의 가상 터미널에서 했다 | S 블록을 붙여넣은 뒤 목록과 `Type yes or no:` 가 나오고, `yes` 뒤에 `started:` 가 나오는지 |
+| VM 이름의 색 | 터미널이 ANSI 색 글자를 표시한다 | 목록과 P 블록에서 VM 이름이 초록색으로 보이는지 |
 | `vim-cmd vmsvc/getallvms` 의 출력 | 줄이 `vmid 이름 [데이터스토어] 경로.vmx ...` 형태 | P 블록의 `TCGEN-VM` 줄에 vmid 와 vmx 경로가 맞게 나오는지 |
 | `vim-cmd vmsvc/get.summary` 의 `vmPathName` | `vmPathName = "[데이터스토어] 경로.vmx"` 형태. 없으면 getallvms 의 값을 쓴다 | 위와 같음 |
 | `vim-cmd vmsvc/power.getstate` 의 출력 | `Powered on`, `Powered off`, `Suspended` 가운데 하나가 들어 있다 | P 블록의 `power=on` |
@@ -873,7 +954,7 @@ Windows 에서는 셸이 필요한 시험을 건너뛴다. 전체 시험은 tcsh
 
 v2 는 v1.4 의 프로그램, 데이터 폴더(`tcgen_data`), 설정 폴더(`%APPDATA%\tcgen`)를 고치지 않는다. v1.4 를 그대로 다시 실행하면 된다.
 
-1. 점프 VM 에서 진행 중인 실행이 있거나 crontab 줄이 남아 있으면 `sh ~/.tcgen/tcrun cancel` 로 끝낸다. `sh ~/.tcgen/tcrun status` 로 확인한다.
+1. 점프 VM 에서 진행 중인 실행이 있거나 crontab 줄이 남아 있으면 `sh ~/.tcgen/tcrun stop` 으로 끝낸다(v2.14 까지는 `tcrun cancel`). `sh ~/.tcgen/tcrun status` 로 확인한다.
 2. PC 에서 v1.4 를 실행한다(`dist\tcgen\tcgen.exe` 또는 v1.4 소스 폴더의 `run_gui.bat`). v1.4 소스는 저장소 main 에 없으므로 태그 `tcgen-v1.4` 로 받는다(14절). v1.4 의 데이터가 v2 를 쓰기 전 상태 그대로 보인다. v2 에서 입력한 내용은 `tcgen2_data` 에만 있다.
 3. 점프 VM 의 `~/.tcgen/vmssh`, `askpass`, `setpw`, `vmpw` 는 v1.4 와 같은 파일이다. v1.4 의 B 블록과 D 블록을 그대로 붙여넣을 수 있다. A 블록을 다시 붙여넣을 필요가 없다.
 4. v2 가 VM crontab 에 남긴 줄이 있으면 지운다. 표식이 v1.4 와 같은 `# tcgen 케이스이름 호스트` 이므로 v1.4 의 D 블록으로 지운다.
@@ -920,9 +1001,9 @@ v2 가 적용한 ESX 호스트 옵션과 vmx 의 키는 v1.4 로 돌아가도 �
 | v2.10 | 스냅샷 때 VM 에서 실행할 명령(VCF Operations 기록). 적용 체크할 때 `+간격` 을 날짜 시각으로 고정. [기록 대조] |
 | v2.11 | 구성 스냅샷을 잡 시작 10분 전에 읽음 |
 | v2.12 | 진행 방식을 하나로 함(시작 시각에 잡 시작, 프로세스 확인 없음). `+간격` 의 기준을 바로 윗줄로 변경. `잡 시작 (환산)` 칸. 설정 변경이 없는 케이스는 S 블록 직후에 한꺼번에 등록, 설정 변경은 잡 시작 30분 전. 등록 기록 `jobs.csv`. 탭 5 의 타임라인. 오류와 알림을 한 줄로 줄임. 한 VM 에서 등록이 안 될 때 다른 VM 의 잡만 시작되지 않게 함. `tcrun cancel` 이 접속하지 못한 VM 을 출력하고 다시 실행하면 남은 줄을 지움(2절) |
-
 | v2.13 | 설정 영역에 Operations 주소, 계정, 암호. 구성 스냅샷 때 VM 설정과 호스트 옵션을 VCF Operations 에 기록(7.4절) |
 | v2.14 | 테스트 케이스 파일의 [새로 만들기](4.3절). 저장소 main 에서 v1.4 의 `tcgen` 폴더 삭제(태그 `tcgen-v1.4` 로 받음) |
+| v2.15 | 탭 4 의 `모니터링 중지` 칸(자동, 직접 입력, 중지 없음)과 설정 영역의 `모니터링 중지 N분 전`(기본 10)을 되살림(2026-11-09 사용자 결정. v2.12 에서 요청 없이 빠졌음). S 블록을 붙여넣으면 케이스 목록을 보이고 `yes` 를 받은 뒤 시작. 터미널 출력의 VM 이름은 초록색. `tcrun stop` 이 cancel 의 일(줄 삭제, 모니터링 중지)까지 하고 실행 기록을 지움, `tcrun cancel` 없앰(2026-11-20 사용자 결정) |
 
 ## 16. 개발 자료
 

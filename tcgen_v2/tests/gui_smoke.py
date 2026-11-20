@@ -711,8 +711,9 @@ def main():
     check(app.cb_mode.winfo_manager() == "" and not any(isinstance(w, ttk.Label) and w.cget("text") == "진행 방식" for w in walk(root)),
           "설정 영역에 진행 방식 칸이 없음")
     vis = list(app.t_case.tree.cget("displaycolumns"))
-    check(vis == ["name", "desc", "esx", "power", "job", "mon", "prof", "max_wait", "seq_start", "seq_at", "group", "end_time", "end_ref"],
-          "탭 4 의 열: 시작 시각 옆에 잡 시작 (환산) %s" % vis)
+    check(vis == ["name", "desc", "esx", "power", "job", "mon", "prof", "max_wait", "seq_start", "seq_at", "mon_stop", "group", "end_time",
+                  "end_ref"],
+          "탭 4 의 열: 시작 시각 옆에 잡 시작 (환산), 그 옆에 모니터링 중지(사용자 결정 2026-11-09) %s" % vis)
     heads = [app.t_case.tree.heading(c["key"], "text") for c in app.t_case.columns if c["key"] in vis]
     check(heads[8:10] == ["시작 시각", "잡 시작 (환산)"], "열 제목 %s" % heads)
     check(app.blk_vm.frame.cget("text").startswith("P. 점검 블록") and app.blk_esx.frame.cget("text").startswith("S. 실행 블록"),
@@ -721,8 +722,9 @@ def main():
           and app.lf_tl.winfo_manager() == "grid" and app.esx_pick.winfo_manager() == "" and app.btn_plan.winfo_manager() == "pack",
           "설정 영역의 잡 시작 기준 칸, 탭 5 의 타임라인과 [실행 계획 보기] 가 보임")
     labels = [w.cget("text") for w in walk(app.f_seq) if isinstance(w, ttk.Label)]
-    check(labels == ["잡 시작 기준:", "설정 적용", "분 전", "구성 스냅샷", "분 전", "모니터링 시작", "분 전", "잡 시작 최소 간격", "분"],
-          "설정 영역: 잡 시작 기준 세 칸(타임라인과 같은 순서)과 잡 시작 최소 간격 %s" % labels)
+    check(labels == ["잡 시작 기준:", "설정 적용", "분 전", "구성 스냅샷", "분 전", "모니터링 시작", "분 전", "모니터링 중지", "분 전 (다음 케이스)",
+                     "잡 시작 최소 간격", "분"],
+          "설정 영역: 잡 시작 기준 세 칸(타임라인과 같은 순서), 모니터링 중지(다음 케이스 기준), 잡 시작 최소 간격 %s" % labels)
     gone = [x for x in ("변경 작업 뒤", "스냅샷 뒤", "케이스 사이 간격", "잡 종료 확인 간격", "시작 시각 준비", "프로세스")
             if any(isinstance(w, (ttk.Label, ttk.Button)) and x in str(w.cget("text")) for w in walk(root))]
     check(gone == [], "v2.12 에서 뺀 칸과 글이 화면에 없음 %s" % gone)
@@ -736,7 +738,9 @@ def main():
           and any("설정 변경이 없는 케이스: S 블록을 붙여넣은 직후에 crontab 에 잡을 등록한다" in x for x in helps)
           and any("설정 변경이 있는 케이스: 잡 시작 30분 전에 VM 종료, 설정 적용, VM 전원 ON" in x for x in helps),
           "탭 4 도움말: 시작 시각, +간격(바로 윗줄), 환산 칸, 잡 시작 전에 하는 일")
-    check(not any(w in x for x in helps for w in ("자동", "프로세스", "케이스 사이 간격", "순서 실행")), "도움말에 뺀 기능의 설명이 없음")
+    # v2.11 의 자동 시작('자동' 이라고 적는 시작 시각, 케이스 사이 간격, 잡 종료 확인)은 없다. v2.15 의 모니터링 중지 '자동' 은 D2 결정이다
+    check(not any(w in x for x in helps for w in ("'자동' 이라고", "프로세스", "케이스 사이 간격", "잡 종료 확인", "순서 실행")),
+          "도움말에 뺀 기능의 설명이 없음")
     check(max(len(x) for x in helps) <= 190, "도움말의 한 항목은 190자 이하 (%d)" % max(len(x) for x in helps))
     check(app.help_win.winfo_height() <= app.px(760), "도움말 창은 화면보다 길어지지 않고 스크롤로 본다 (%d)" % app.help_win.winfo_height())
     shot_window(root, "도움말", "tcgen_seq_help4.png")
@@ -981,6 +985,45 @@ def main():
     app.commit_case("c1", "seq_start", "+8")
     app.commit_case("c2", "seq_start", "+10")
 
+    # ---- 모니터링 중지 칸(사용자 결정 2026-11-09 "다음테스트 시작하기 10분전에 설정한 모든 모니터링 종료하도록 만들어줘",
+    #      "중지 없음 옵션도있어야됨", "모니터링 중지시점은 중지 하지 않는 옵션도있어야됨"). v2.12 에서 빠졌던 칸을 v2.15 에서 되살렸다
+    vis = list(app.t_case.tree.cget("displaycolumns"))
+    check("mon_stop" in vis and t.tree.heading("mon_stop", "text") == "모니터링 중지", "순서 실행 화면의 탭 4 에 모니터링 중지 칸 %s" % vis)
+    check(app.v_stop.get() == "10", "설정 영역 '모니터링 중지 N분 전' 기본값 10")
+    a2 = dt.datetime.strptime(at("c2"), "%Y-%m-%d %H:%M")
+    check((app.cases[1].get("stop_mode") or "auto") == "auto"
+          and cell_of(t, "c1", "mon_stop") == core.fmt_short(a2 - dt.timedelta(minutes=10)) + " (자동)",
+          "자동: 같은 ESX 호스트의 다음 케이스 잡 시작 10분 전 %r (다음 케이스 %s)" % (cell_of(t, "c1", "mon_stop"), at("c2")))
+    app.v_stop.set("15")
+    root.update()
+    check(cell_of(t, "c1", "mon_stop") == core.fmt_short(a2 - dt.timedelta(minutes=15)) + " (자동)"
+          and core.load_settings(BASE)["stop_lead_min"] == 15, "분 칸을 바꾸면 다시 계산하고 저장 %r" % cell_of(t, "c1", "mon_stop"))
+    app.v_stop.set("10")
+    root.update()
+    check(cell_of(t, "c2", "mon_stop") == "중지 없음", "중지 없음을 고른 케이스")
+    app.edit_stop("c1")
+    top = last_toplevel(root)
+    radios = [w.cget("text") for w in walk(top) if isinstance(w, ttk.Radiobutton)]
+    check(radios[0].startswith("자동: 같은 ESX 호스트의 다음 케이스 잡 시작 10분 전") and radios[1:] == ["직접 입력", "중지 없음 (중지 줄을 만들지 않음)"],
+          "모니터링 중지 창: 자동, 직접 입력, 중지 없음 %s" % radios)
+    shot_window(root, "모니터링 중지", "tcgen_seq_stop_dialog.png")
+    press(top, "직접 입력")
+    ent = [w for w in walk(top) if isinstance(w, ttk.Entry)][0]
+    ent.delete(0, "end")
+    ent.insert(0, fmt_at(a2 - dt.timedelta(minutes=30)))
+    press(top, "확인")
+    t.refresh("c1")
+    check(app.cases[1]["stop_mode"] == "manual" and cell_of(t, "c1", "mon_stop") == core.fmt_short(a2 - dt.timedelta(minutes=30)) + " (직접)",
+          "직접 입력 %r" % cell_of(t, "c1", "mon_stop"))
+    app.cases[1]["stop_mode"], app.cases[1]["stop_time"] = "auto", ""
+    app.mark_cases()
+    t.refresh("c1")
+    n_log = len(LOG)
+    app.edit_stop("c0")
+    check(len(LOG) > n_log and LOG[-1][0] == "info" and "적용 체크한 케이스의 시작 시각과 모니터링 중지는 고칠 수 없음" in LOG[-1][1],
+          "적용 체크한 케이스의 모니터링 중지 칸은 고정")
+    shot(root, app, 3, "tcgen_seq_tab4_stop.png")
+
     # 설정 영역의 값
     check((app.v_prep.get(), app.v_snaplead.get(), app.v_mon.get(), app.v_spacing.get()) == ("30", "10", "5", "5"),
           "기본값: 설정 적용 30분 전, 구성 스냅샷 10분 전, 모니터링 시작 5분 전, 잡 시작 최소 간격 5분")
@@ -1052,7 +1095,7 @@ def main():
     check(max(len(x) for x in shown) <= 200, "결과 글의 줄은 200자 이하 (%d)" % max(len(x) for x in shown))
     # 타임라인 표(사용자 2026-11-18): 열은 시점, 줄은 설정 변경이 없는 케이스와 있는 케이스
     tl = [[w.cget("text") for w in sorted(app.tl_grid.grid_slaves(row=r), key=lambda w: int(w.grid_info()["column"]))] for r in range(3)]
-    check(tl[0] == ["S 블록 실행 직후", "T-30분", "T-10분", "T-5분", "T", "잡 실행 중", "다음 케이스의 T-32분"], "타임라인의 열 %s" % tl[0])
+    check(tl[0] == ["S 블록 실행 직후", "T-30분", "T-10분", "T-5분", "T", "잡 실행 중", "다음 케이스의 T-10분"], "타임라인의 열 %s" % tl[0])
     check(tl[1] == ["설정 변경이 없는 케이스", "crontab 에 잡 등록", "-", "구성 스냅샷, VM 에서 명령 실행", "모니터링 시작", "잡 시작", "VM 접속 없음",
                     "모니터링 중지"], "타임라인: 설정 변경이 없는 케이스 %s" % tl[1])
     check(tl[2] == ["설정 변경이 있는 케이스", "-", "VM 종료 -> 설정 적용 -> VM 전원 ON -> crontab 에 잡 등록", "구성 스냅샷, VM 에서 명령 실행",
@@ -1117,18 +1160,24 @@ def main():
     app.show_help("5. 생성 결과", [x.replace("{D}", app.jump_dir_text()) for x in app.RESULT_HELP_SEQ])
     root.update()
     helps = help_lines(app)
-    check(any("tcrun-<실행 ID>-jobs.csv" in x for x in helps) and any("sh ~/.tcgen/tcrun cancel" in x for x in helps)
-          and not any(w in x for x in helps for w in ("프로세스", "자동으로 종료", "settle", "순서 실행")), "탭 5 도움말: 등록 기록 파일과 취소 명령")
+    check(any("tcrun-<실행 ID>-jobs.csv" in x for x in helps)
+          and any("sh ~/.tcgen/tcrun stop [ESX 호스트]: 진행을 끝내고 등록한 crontab 줄을 지운다" in x for x in helps)
+          and not any(w in x for x in helps for w in ("프로세스", "자동으로 종료", "settle", "순서 실행", "cancel")),
+          "탭 5 도움말: 등록 기록 파일과 중지 명령(cancel 없음)")
     shot_window(root, "도움말", "tcgen_seq_help5.png")
     last_toplevel(root).destroy()
     # 마지막 케이스의 모니터링 중지는 생성을 멈추는 경고가 아니라 결과의 알림 한 줄이다(사용자 지적 2026-11-18 "이 경고가필요해?")
     app.cases[2]["vms"][0]["monitors"] = ["guest_perf"]
+    old_mode = app.cases[2].get("stop_mode")
+    app.cases[2]["stop_mode"] = "auto"                 # 중지 없음을 고른 케이스는 알리지 않는다
     n_gen = len(LOG)
     gen(app, root)
     shown = app.res_text.get("1.0", "end-1c").split("\n")
     check(app.result is not None and not any(x[0] == "ask" for x in LOG[n_gen:])
-          and "알림: 마지막 케이스(TC-base-a-r3)는 모니터링 중지 시각이 없음. 정하려면 그 케이스의 '최대 대기' 칸에 시간을 적을 것"
-              "(비워 두면 다음 실행이나 tcrun cancel 때 중지)" in shown, "마지막 케이스의 모니터링 중지는 알림 한 줄 %s" % shown[4:])
+          and "알림: 마지막 케이스(TC-base-a-r3)는 모니터링 중지 시각이 없음. 정하려면 모니터링 중지 칸에서 직접 입력을 고르거나 "
+              "최대 대기 칸에 시간을 적을 것(비워 두면 다음 실행이나 tcrun stop 때 중지)" in shown,
+          "마지막 케이스의 모니터링 중지는 알림 한 줄 %s" % shown[4:])
+    app.cases[2]["stop_mode"] = old_mode
     app.cases[2]["vms"][0]["monitors"] = []
     app.mark_cases()
 
@@ -1176,7 +1225,7 @@ def main():
           "적용 체크한 케이스의 시작 시각 칸은 고치는 칸이 열리지 않음")
     n_log = len(LOG)
     app.commit_case("c2", "seq_start", "+9")
-    check(app.cases[2]["seq_start"] == want and any(x[0] == "info" and "적용 체크한 케이스의 시작 시각은 고칠 수 없음" in x[1]
+    check(app.cases[2]["seq_start"] == want and any(x[0] == "info" and "적용 체크한 케이스의 시작 시각과 모니터링 중지는 고칠 수 없음" in x[1]
                                                     for x in LOG[n_log:]), "적용 체크한 케이스의 시작 시각은 고쳐지지 않음")
     app.commit_case("c1", "seq_start", "2031-03-03 03:00")
     check(app.cases[2]["seq_start"] == want and at("c2") == want[:16], "윗줄을 고쳐도 적용 체크한 케이스의 시각은 그대로")

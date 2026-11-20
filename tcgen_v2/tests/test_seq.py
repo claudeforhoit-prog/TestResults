@@ -52,10 +52,11 @@ def vm(name, job="(없음)", monitors=(), profiles=(), end_ref=False, power=None
 
 
 def case(name, esx="esx01", vms=None, esx_monitors=(), esx_profiles=(), max_wait="", applied=False, desc="", group="",
-         seq_start=""):
+         seq_start="", stop_mode="auto", stop_time=""):
     c = core.new_case(esx, "", 0)
     c.update(name=name, vms=vms if vms is not None else [vm(esx + "ev01", "job_a")], esx_monitors=list(esx_monitors),
-             esx_profiles=list(esx_profiles), max_wait=max_wait, applied=applied, desc=desc, group=group, seq_start=seq_start)
+             esx_profiles=list(esx_profiles), max_wait=max_wait, applied=applied, desc=desc, group=group, seq_start=seq_start,
+             stop_mode=stop_mode, stop_time=stop_time)
     return c
 
 
@@ -310,15 +311,18 @@ class SeqValidationTests(unittest.TestCase):
         (사용자 지적 2026-11-18 "이 경고가필요해? 모니터링 걸지도않았는데 왜띄우는거야")."""
         res = gen([case("c1", vms=[vm("esx01ev01", "job_a", ["guest_perf"])])])
         self.assertEqual((res["errors"], res["warnings"]), ([], []))
-        self.assertEqual(res["notes"], ["마지막 케이스(c1)는 모니터링 중지 시각이 없음. 정하려면 그 케이스의 '최대 대기' 칸에 시간을 적을 것"
-                                        "(비워 두면 다음 실행이나 tcrun cancel 때 중지)"])
+        self.assertEqual(res["notes"], ["마지막 케이스(c1)는 모니터링 중지 시각이 없음. 정하려면 모니터링 중지 칸에서 직접 입력을 고르거나 "
+                                        "최대 대기 칸에 시간을 적을 것(비워 두면 다음 실행이나 tcrun stop 때 중지)"])
         self.assertEqual(gen([case("c1")])["notes"], [], "모니터링이 없으면 알림도 없음")
         self.assertEqual(gen([case("c1", vms=[vm("esx01ev01", "job_a", ["guest_nostop"])])])["notes"], [], "중지 명령이 없는 모니터링도 없음")
         self.assertEqual(gen([case("c1", vms=[vm("esx01ev01", "job_a", ["guest_perf"])], max_wait="9:00")])["notes"], [],
                          "최대 대기를 적으면 그 시각에 중지하므로 알리지 않음")
         two = gen([case("a1", vms=[vm("esx01ev01", "job_a", ["guest_perf"])]), case("b1", esx="esx02", esx_monitors=["host_mon"])])
-        self.assertEqual(two["notes"], ["마지막 케이스(a1, b1)는 모니터링 중지 시각이 없음. 정하려면 그 케이스의 '최대 대기' 칸에 시간을 "
-                                        "적을 것(비워 두면 다음 실행이나 tcrun cancel 때 중지)"], "ESX 호스트마다 마지막 케이스. 글은 하나")
+        self.assertEqual(two["notes"], ["마지막 케이스(a1, b1)는 모니터링 중지 시각이 없음. 정하려면 모니터링 중지 칸에서 직접 입력을 "
+                                        "고르거나 최대 대기 칸에 시간을 적을 것(비워 두면 다음 실행이나 tcrun stop 때 중지)"],
+                         "ESX 호스트마다 마지막 케이스. 글은 하나")
+        self.assertEqual(gen([case("c1", vms=[vm("esx01ev01", "job_a", ["guest_perf"])], stop_mode="none")])["notes"], [],
+                         "중지 없음을 고른 케이스는 알리지 않음")
         empty = gen([case("c1", vms=[vm("esx01ev01", "job_a", [], ["none"])])], prof=[{"name": "none", "target": "VM", "text": "# x", "desc": ""}])
         self.assertEqual(empty["warnings"], ["탭 3 'none': 설정 내용이 비어 있음"])
 
@@ -468,7 +472,7 @@ class PlanTests(unittest.TestCase):
         t2 = int(time.mktime(dt.datetime(2026, 11, 16, 18, 0).timetuple()))
         tx = int(time.mktime(dt.datetime(2026, 11, 17, 4, 0).timetuple()))      # 잡 시작 16:00 + 최대 대기 12:00
         want = """TCGEN-PLAN 2
-VER 2.14
+VER 2.15
 RUNID 20261116-143000
 LOGDIR /data/log
 GEN 2026-11-16 14:30:00
@@ -493,6 +497,27 @@ CFGL aff CPU affinity
 CFGL ref_esx 기준 시각 (ESX 호스트 조회)
 CFGL ref_guest 기준 시각 (게스트 조회)
 CFGL none (없음)
+LIST run 20261116-143000: 2 cases. Check them before they are registered in crontab.
+LIST      ${TC_HOST} = host name of the VM, ${TC_START} = start time (14 digits): the variables of tcgen
+LIST ---- ESX host esx01: 1 case
+LIST case 1/2  caseA   job start 2026-11-16 16:00
+LIST   monitoring start 2026-11-16 15:55, stop 2026-11-17 04:00
+LIST   vm esx01ev01
+LIST     job: /home/tester/bench/run_a.sh >> /home/tester/log/run_a-${TC_HOST}-${TC_START}.log 2>&1
+LIST     monitoring guest_perf: /home/tester/mon/start_mon.sh >> /home/tester/log/mon-${TC_HOST}-${TC_START}.log
+LIST     monitoring guest_nostop: /home/tester/mon/once.sh
+LIST   vm esx01ev02
+LIST     job: /home/tester/bench/run_b.sh -n 4 -tag x%%y
+LIST   vm esx01ev03
+LIST     job: (none)
+LIST   vm esx01ev04
+LIST     job: (none)
+LIST   ESX host esx01
+LIST     monitoring host_mon: /bin/sh /vmfs/volumes/ds1/mon/host_mon.sh start '%%H'
+LIST ---- no ESX host: 1 case
+LIST case 2/2  caseB   job start 2026-11-16 18:00
+LIST   vm vm-b
+LIST     job: /home/tester/bench/run_a.sh >> /home/tester/log/run_a-${TC_HOST}-${TC_START}.log 2>&1
 CASE 001 esx01 caseA
 SEG 001 1
 START 001 %d 2026-11-16 16:00
@@ -543,11 +568,12 @@ END 002
         view = gen(self.two())["plan_view"]
         for word in ("실행 ID 20261116-143000", "점프 VM 작업 폴더 ~/.tcgen, 로그 폴더 ~/tcgen_log",
                      "등록 기록 ~/tcgen_log/tcrun-20261116-143000-jobs.csv (케이스, ESX 호스트, VM, 잡 시작, crontab 등록 여부)",
-                     "진행 확인 sh ~/.tcgen/tcrun status, 멈추기 sh ~/.tcgen/tcrun stop, 취소 sh ~/.tcgen/tcrun cancel",
+                     "진행 확인 sh ~/.tcgen/tcrun status, 중지 sh ~/.tcgen/tcrun stop (진행을 끝내고 등록한 crontab 줄을 지우고 시작된 "
+                     "모니터링을 중지함)",
                      "[타임라인]  T = 케이스의 잡 시작 시각", "설정 변경이 없는 케이스\n  S 블록 실행 직후 : crontab 에 잡 등록\n",
                      "설정 변경이 있는 케이스\n  T-30분 : VM 종료 -> 설정 적용 -> VM 전원 ON -> crontab 에 잡 등록\n",
                      "  T-10분 : 구성 스냅샷\n  T-5분 : 모니터링 시작\n  T : 잡 시작\n  잡 실행 중 : VM 접속 없음\n"
-                     "  다음 케이스의 T-32분 : 모니터링 중지\n",
+                     "  다음 케이스의 T-10분 : 모니터링 중지\n",
                      "[ESX 호스트 esx01] 케이스 1개", "[ESX 호스트 없음] 케이스 1개",
                      "1. caseA   잡 시작 2026-11-16 16:00\n",
                      "   설정과 VM 전원: 실행을 시작할 때 호스트와 비교한다. 다르면 11-16 15:30 에 VM 종료, 설정 적용, VM 전원 ON",
@@ -563,7 +589,8 @@ END 002
         self.assertNotIn("설정과 VM 전원", view.split("[ESX 호스트 없음]")[1], "ESX 호스트가 없는 케이스는 설정과 전원 줄이 없음")
         viewd = gen(self.two(), st=settings(jump_dir="/data/tcgen/"))["plan_view"]
         self.assertIn("점프 VM 작업 폴더 /data/tcgen,", viewd)
-        self.assertIn("취소 sh /data/tcgen/tcrun cancel", viewd)
+        self.assertIn("중지 sh /data/tcgen/tcrun stop (", viewd)
+        self.assertNotIn("cancel", view + viewd, "v2.15 에서 tcrun cancel 을 없앰")
         # 글의 줄은 짧다(사용자 지적 2026-11-18: 한 줄, 내부 계산식 없이). 명령과 설정 줄을 뺀 설명 줄은 110자 이하
         for line in view.split("\n"):
             if not line.startswith("     - "):
@@ -572,7 +599,9 @@ END 002
     def test_timeline_table(self):
         """탭 5 의 타임라인(사용자 2026-11-18): 열은 시간 순서의 시점, 줄은 설정 변경이 없는 케이스와 있는 케이스."""
         tb = core.timeline_table(30, 10, 5, True, True, True)
-        self.assertEqual(tb["cols"], ["S 블록 실행 직후", "T-30분", "T-10분", "T-5분", "T", "잡 실행 중", "다음 케이스의 T-32분"])
+        self.assertEqual(tb["cols"], ["S 블록 실행 직후", "T-30분", "T-10분", "T-5분", "T", "잡 실행 중", "다음 케이스의 T-10분"],
+                         "모니터링 중지는 다음 케이스 잡 시작 10분 전(사용자 결정 2026-11-09)")
+        self.assertEqual(core.timeline_table(30, 10, 5, True, True, True, stop_lead=15)["cols"][-1], "다음 케이스의 T-15분")
         self.assertEqual(tb["rows"], [
             ("설정 변경이 없는 케이스", ["crontab 에 잡 등록", "", "구성 스냅샷, VM 에서 명령 실행", "모니터링 시작", "잡 시작", "VM 접속 없음",
                                  "모니터링 중지"]),
@@ -618,7 +647,7 @@ END 002
         res = gen(self.two())
         self.assertIn("SET SNAP_LEAD_MIN 10\n", res["plan"])
         for n, lead in ((7, 5), (10, 8), (3, 5), (12, 12)):
-            r = gen(self.two(), st=settings(seq_snap_lead_min=n, mon_lead_min=lead))
+            r = gen(self.two(), st=settings(seq_snap_lead_min=n, mon_lead_min=lead, stop_lead_min=lead + 5))
             self.assertEqual((r["errors"], r["warnings"], r["notes"]), ([], [], []), (n, lead))
             self.assertIn("SET SNAP_LEAD_MIN %d\n" % n, r["plan"])
             self.assertIn("  T-%d분 : 구성 스냅샷" % n, r["plan_view"])
@@ -705,7 +734,7 @@ class SettingsAndDataTests(unittest.TestCase):
         return snap
 
     def test_names_differ_from_v1(self):
-        self.assertEqual(core.VERSION, "2.14")
+        self.assertEqual(core.VERSION, "2.15")
         for k in self.keys:
             os.environ.pop(k, None)
         self.assertEqual(os.path.basename(core.default_data_dir()), "tcgen2_data")
@@ -1048,9 +1077,9 @@ class SeqStartTests(unittest.TestCase):
         self.assertEqual([s["job"] for s in got], [pc["start_at"] for pc in res["cases"]])
 
     def test_monitoring_stop_times(self):
-        """모니터링 중지(중지 명령이 있는 모니터링): 같은 ESX 호스트의 다음 잡 케이스의 잡 시작 32분 전('설정 적용 N분 전' + 2분).
-        최대 대기를 적었으면 잡 시작 + 최대 대기가 더 이를 때 그 시각. 마지막 케이스는 최대 대기를 적었을 때만. plan 의 MSTOP 줄이고
-        tcrun 이 잡과 함께 crontab 에 등록한다. 잡이 실행되는 동안 VM 에 접속하지 않는다."""
+        """모니터링 중지(중지 명령이 있는 모니터링. 사용자 결정 2026-11-09): 자동은 같은 ESX 호스트의 다음 잡 케이스의 잡 시작 10분 전
+        ('모니터링 중지 N분 전'). 최대 대기를 적었으면 잡 시작 + 최대 대기가 더 이를 때 그 시각. 마지막 케이스는 최대 대기를 적었을 때만.
+        plan 의 MSTOP 줄이고 tcrun 이 잡과 함께 crontab 에 등록한다. 잡이 실행되는 동안 VM 에 접속하지 않는다."""
         gp = [vm("esx01ev01", "job_a", ["guest_perf"])]
         cases = [case("a1", seq_start="18:00", esx_monitors=["host_mon"], vms=gp),
                  case("a2", seq_start="+8"), case("a3", seq_start="+8", max_wait="7:00", vms=gp),
@@ -1062,26 +1091,27 @@ class SeqStartTests(unittest.TestCase):
 
         def ep(*a):
             return int(time.mktime(dt.datetime(*a).timetuple()))
-        self.assertIn("MSTOP 001 %d 2026-11-17 01:28" % ep(2026, 11, 17, 1, 28), lines, "다음 잡 케이스 a2(02:00)의 32분 전")
+        self.assertIn("MSTOP 001 %d 2026-11-17 01:50" % ep(2026, 11, 17, 1, 50), lines, "다음 잡 케이스 a2(02:00)의 10분 전")
         self.assertEqual([x for x in lines if x.startswith("MSTOP 002")], [], "모니터링이 없는 케이스")
         self.assertIn("MSTOP 003 %d 2026-11-17 17:00" % ep(2026, 11, 17, 17, 0), lines, "마지막 케이스: 잡 시작 10:00 + 최대 대기 7:00")
         self.assertIn("MSTOP 004 %d 2026-11-16 20:05" % ep(2026, 11, 16, 20, 5), lines,
-                      "최대 대기(18:05 + 2:00)가 다음 케이스의 32분 전(22:28)보다 이르면 그 시각")
+                      "최대 대기(18:05 + 2:00)가 다음 케이스의 10분 전(22:50)보다 이르면 그 시각")
         self.assertEqual([x for x in lines if x.startswith("MSTOP 005")], [], "중지 명령이 없는 모니터링")
         self.assertEqual([pc["mstop"] for pc in res["cases"]],
-                         [dt.datetime(2026, 11, 17, 1, 28), None, dt.datetime(2026, 11, 17, 17, 0), dt.datetime(2026, 11, 16, 20, 5), None])
+                         [dt.datetime(2026, 11, 17, 1, 50), None, dt.datetime(2026, 11, 17, 17, 0), dt.datetime(2026, 11, 16, 20, 5), None])
         view = res["plan_view"]
-        self.assertIn("   모니터링 중지 (11-17 01:28):", view)
+        self.assertIn("   모니터링 중지 (11-17 01:50):", view)
         self.assertIn("   모니터링 중지 (11-17 17:00):", view)
         self.assertIn("   모니터링 중지: 중지 명령 없음", view)
         last = gen([case("k1", seq_start="18:00", vms=gp)])
         self.assertNotIn("\nMSTOP ", last["plan"])
-        self.assertIn("   모니터링 중지: 자동으로 중지하지 않음(마지막 케이스. '최대 대기' 를 적으면 그 시각에 중지)", last["plan_view"])
+        self.assertIn("   모니터링 중지: 자동으로 중지하지 않음(마지막 케이스. 모니터링 중지 칸에서 직접 입력을 고르거나 '최대 대기' 를 "
+                      "적으면 그 시각에 중지)", last["plan_view"])
         self.assertEqual(len(last["notes"]), 1)
-        close = gen([case("c1", seq_start="18:00", vms=gp), case("c2", seq_start="18:30")])
-        self.assertEqual(close["errors"], ["1번째 케이스 c1: 모니터링을 중지할 시각 11-16 17:58 이(가) 잡 시작 11-16 18:00 보다 빠르거나 같음. "
-                                           "다음 케이스의 시작 시각을 늦추거나 최대 대기를 늘릴 것"])
-        self.assertEqual(gen([case("c1", seq_start="18:00", vms=gp), case("c2", seq_start="18:34")])["errors"], [])
+        close = gen([case("c1", seq_start="18:00", vms=gp), case("c2", seq_start="18:10")])
+        self.assertEqual(close["errors"], ["1번째 케이스 c1: 다음 케이스의 시작 시각을 늦추거나 모니터링 중지 칸을 고칠 것. 자동 중지 시각 "
+                                           "11-16 18:00 이(가) 이 케이스의 잡 시작 11-16 18:00 보다 빠르거나 같음"])
+        self.assertEqual(gen([case("c1", seq_start="18:00", vms=gp), case("c2", seq_start="18:12")])["errors"], [])
 
     def test_records_hold_the_planned_times(self):
         """테스트 기록 CSV: 케이스마다 계획한 잡 시작, 모니터링 시작, 모니터링 중지를 적는다. +간격을 적은 케이스는 간격 열에 그 값."""
@@ -1102,8 +1132,8 @@ class SeqStartTests(unittest.TestCase):
             for r in rows[1:]:
                 row = dict(zip(rows[0], r))
                 got[row["테스트 케이스 이름"]] = (row["잡 시작(KST)"], row["간격"], row["모니터링 시작(KST)"], row["모니터링 중지(KST)"])
-            self.assertEqual(got["a1"], ("2026-11-16 18:00:00", "", "2026-11-16 17:55:00", "2026-11-17 01:28:00"),
-                             "모니터링 중지 = 다음 케이스 a2(02:00)의 32분 전")
+            self.assertEqual(got["a1"], ("2026-11-16 18:00:00", "", "2026-11-16 17:55:00", "2026-11-17 01:50:00"),
+                             "모니터링 중지 = 다음 케이스 a2(02:00)의 10분 전")
             self.assertEqual(got["a2"], ("2026-11-17 02:00:00", "+8:00", "", ""), "모니터링이 없는 케이스는 잡 시작만")
             self.assertEqual(got["a3"], ("2026-11-17 10:00:00", "+8:00", "2026-11-17 09:55:00", "2026-11-17 17:00:00"),
                              "마지막 케이스: 모니터링 중지 = 잡 시작 + 최대 대기 7:00")
@@ -1116,7 +1146,7 @@ class SeqStartTests(unittest.TestCase):
                 when.setdefault((e["테스트 케이스 이름"], e["구분"]), set()).add(e["실행 시각(KST)"])
             self.assertEqual(when[("a1", "잡")], {"2026-11-16 18:00:00"})
             self.assertEqual(when[("a1", "모니터링 시작")], {"2026-11-16 17:55:00"})
-            self.assertEqual(when[("a1", "모니터링 중지")], {"2026-11-17 01:28:00"})
+            self.assertEqual(when[("a1", "모니터링 중지")], {"2026-11-17 01:50:00"})
             self.assertEqual(when[("b1", "모니터링 중지")], {""})
             self.assertEqual(when[("a2", "잡")], {"2026-11-17 02:00:00"})
         finally:
@@ -1510,8 +1540,8 @@ class JumpFileTests(unittest.TestCase):
     def test_versions_match(self):
         self.assertIn("\nTCRUN_VERSION=%s\n" % core.VERSION, payload.TCRUN_SH)
         self.assertIn('\nVERSION = "%s"\n' % core.VERSION, payload.APPLY_PY)
-        self.assertEqual(core.PLAN_FORMAT, "TCGEN-PLAN 2")
-        self.assertIn('= "TCGEN-PLAN 2" ]', payload.TCRUN_SH)
+        self.assertEqual(core.PLAN_FORMAT, "TCGEN-PLAN 2", "줄을 더하기만 할 때는 형식 번호를 올리지 않음(DEVELOPER.md 5절)")
+        self.assertIn('\nPLAN_FMT="%s"\n' % core.PLAN_FORMAT, payload.TCRUN_SH)
 
     def test_pc_code_keeps_python38_syntax(self):
         """PC 쪽 코드는 Python 3.8 에서 동작해야 한다. 3.9 이후에 생긴 문법과 함수를 쓰지 않는다."""

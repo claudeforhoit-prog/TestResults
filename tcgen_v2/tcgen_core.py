@@ -40,7 +40,7 @@ import shutil
 import sys
 import time
 
-VERSION = "2.14"
+VERSION = "2.15"
 KST_TO_UTC = dt.timedelta(hours=9)
 CHUNK = 100            # 붙여넣는 글 한 줄에 담는 명령 조각 길이(문자 수)
 NONE_JOB = "(없음)"
@@ -1020,7 +1020,7 @@ def table_starts(cases, now=None, record_rows=None, generate=False):
     return out
 
 
-def timeline_table(prep, snaplead, lead, has_mon, has_gcmd, has_stop=False, has_ops=False):
+def timeline_table(prep, snaplead, lead, has_mon, has_gcmd, has_stop=False, has_ops=False, stop_lead=10):
     """타임라인(사용자 2026-11-18: 설정 변경이 없는 케이스와 있는 케이스로 나눠, 잡 시작 몇 분 전에 무엇을 하는지)을 표로 돌려준다.
     {"cols": [시점, ...], "rows": [(묶음 제목, [그 시점에 하는 일 또는 "", ...]), ...]}. T 는 케이스의 잡 시작 시각이고, 열은 시간 순서다."""
     snap = "구성 스냅샷" + (", VM 설정을 Operations 에 기록" if has_ops else "") + (", VM 에서 명령 실행" if has_gcmd else "")
@@ -1048,16 +1048,16 @@ def timeline_table(prep, snaplead, lead, has_mon, has_gcmd, has_stop=False, has_
     cols.append("잡 실행 중")
     same.append("VM 접속 없음")
     change.append("VM 접속 없음")
-    if has_stop:
-        cols.append("다음 케이스의 T-%d분" % (prep + 2))
+    if has_stop:                                   # 자동 중지(사용자 결정 2026-11-09): 다음 케이스 잡 시작 N분 전
+        cols.append("다음 케이스의 T-%d분" % stop_lead)
         same.append("모니터링 중지")
         change.append("모니터링 중지")
     return {"cols": cols, "rows": [("설정 변경이 없는 케이스", same), ("설정 변경이 있는 케이스", change)]}
 
 
-def timeline_lines(prep, snaplead, lead, has_mon, has_gcmd, has_stop=False, has_ops=False):
+def timeline_lines(prep, snaplead, lead, has_mon, has_gcmd, has_stop=False, has_ops=False, stop_lead=10):
     """타임라인을 글 줄로 돌려준다(실행 계획 글의 앞부분). 묶음마다 '시점 : 하는 일' 을 시간 순서로 적는다."""
-    tb = timeline_table(prep, snaplead, lead, has_mon, has_gcmd, has_stop, has_ops)
+    tb = timeline_table(prep, snaplead, lead, has_mon, has_gcmd, has_stop, has_ops, stop_lead)
     out = ["[타임라인]  T = 케이스의 잡 시작 시각"]
     for title, cells in tb["rows"]:
         out.append(title)
@@ -1165,6 +1165,89 @@ def swap_cases(cases, i, j, time_mode):
     if time_mode and follow:
         for k in (min(i, j), max(i, j), max(i, j) + 1):
             fit_interval(cases, k)
+
+
+def stop_mode_of(c):
+    """케이스의 모니터링 중지 선택: auto(자동), manual(직접 입력), none(중지 없음). 사용자 결정 2026-11-09(W-20261109-08, -09)."""
+    m = (c.get("stop_mode") or "auto").strip()
+    return m if m in ("auto", "manual", "none") else "auto"
+
+
+def seq_stop_at(c, start_at, next_start, max_wait_min, stop_lead):
+    """모니터링 중지 시각과 오류 글. 사용자 결정 2026-11-09(W-20261109-06 "다음테스트 시작하기 10분전에 설정한 모든 모니터링
+    종료하도록 만들어줘", W-20261109-08, -09 "중지 없음 옵션도있어야됨"):
+    - 자동: 다음 케이스의 잡 시작 stop_lead 분 전('모니터링 중지 N분 전', 기본 10). 최대 대기를 적었으면 잡 시작 + 최대 대기가
+      더 이를 때 그 시각. 다음 케이스가 없고 최대 대기도 없으면 None(중지하지 않음)
+    - 직접 입력: 모니터링 중지 칸에 적은 시각
+    - 중지 없음: None"""
+    mode = stop_mode_of(c)
+    if mode == "none":
+        return None, ""
+    if mode == "manual":
+        try:
+            return parse_dt(c.get("stop_time")), ""
+        except ValueError as e:
+            return None, "모니터링 중지 칸의 시각을 고칠 것. %s" % e
+    ends = []
+    if next_start is not None:
+        ends.append(next_start - dt.timedelta(minutes=stop_lead))
+    if max_wait_min and start_at is not None:
+        ends.append(start_at + dt.timedelta(minutes=max_wait_min))
+    return (min(ends) if ends else None), ""
+
+
+def seq_stop_view(cases, mon_cmds, settings, now=None, record_rows=None):
+    """탭 4 의 모니터링 중지 칸에 보일 값(케이스마다 {"mon_stop", "stop_error", "has_stop", "mode"}). 생성(build_seq)과 같은
+    규칙이고 다음 케이스는 같은 ESX 호스트의 다음 잡 케이스(적용 체크하지 않은 케이스)다. 적용 체크한 케이스는 적용 체크할 때
+    고정한 값(applied_stop), 없으면 테스트 기록 CSV 의 마지막 생성 기록에 있는 값이다(등록한 기록이 다른 케이스 때문에 바뀌지 않게)."""
+    now = now or dt.datetime.now()
+    try:
+        stop_lead = int(settings.get("stop_lead_min", DEFAULT_SETTINGS["stop_lead_min"]))
+    except (TypeError, ValueError):
+        stop_lead = DEFAULT_SETTINGS["stop_lead_min"]
+    stops = set((m.get("name") or "").strip() for m in (mon_cmds or []) if (m.get("stop") or "").strip())
+    tst = table_starts(cases, now, record_rows)
+    latest = latest_records(record_rows or [], True)
+
+    def chain_of(c):
+        return (c.get("esx") or "").strip() or "-"
+
+    def has_job(c):
+        return any(_has_job(v) for v in (c.get("vms") or []))
+
+    out = []
+    for i, c in enumerate(cases):
+        names = list(c.get("esx_monitors") or []) + [m for v in (c.get("vms") or []) for m in (v.get("monitors") or [])]
+        r = {"mon_stop": None, "stop_error": "", "has_stop": any(m in stops for m in names), "mode": stop_mode_of(c)}
+        out.append(r)
+        if not names or not r["has_stop"] or not has_job(c):
+            continue
+        if c.get("applied") and r["mode"] == "auto":
+            fixed = _applied_stop(c)
+            if fixed is None:
+                rec = latest.get((c.get("name") or "").strip()) or {}
+                try:
+                    fixed = parse_dt(rec.get("모니터링 중지(KST)"))
+                except ValueError:
+                    fixed = None
+            r["mon_stop"] = fixed
+            continue
+        start_at = tst[i]["at"]
+        if start_at is None:
+            continue
+        nxt = None
+        for j in range(i + 1, len(cases)):
+            q = cases[j]
+            if chain_of(q) == chain_of(c) and not q.get("applied") and has_job(q):
+                nxt = tst[j]["at"]
+                break
+        try:
+            td = parse_interval(c.get("max_wait"))
+            mw = int(td.total_seconds() // 60) if td else 0
+        except ValueError:
+            mw = 0
+        r["mon_stop"], r["stop_error"] = seq_stop_at(c, start_at, nxt, mw, stop_lead)
+    return out
 
 
 def _applied_stop(c):
@@ -2177,6 +2260,13 @@ def build_seq(cases, run_cmds, mon_cmds, profiles, settings, now=None, record_ro
     if lead < 0:
         errors.append("설정: '모니터링 시작 N분 전' 은 0 이상의 정수")
         lead = DEFAULT_SETTINGS["mon_lead_min"]
+    try:
+        stop_lead = int(settings.get("stop_lead_min", DEFAULT_SETTINGS["stop_lead_min"]))
+    except (TypeError, ValueError):
+        stop_lead = -1
+    if stop_lead < 1:
+        errors.append("설정: '모니터링 중지 N분 전' 은 1 이상의 정수")
+        stop_lead = DEFAULT_SETTINGS["stop_lead_min"]
     sets = [("MON_LEAD_MIN", lead)]
     for key, label, low in SEQ_INT_SETTINGS:
         try:
@@ -2223,7 +2313,8 @@ def build_seq(cases, run_cmds, mon_cmds, profiles, settings, now=None, record_ro
             errors.append("%s: 500자를 넘음 (%d자). 긴 명령은 스크립트 파일로 만들어 그 경로를 적을 것" % (glabel, len(gcmd)))
     ops, ops_errors = ops_settings(settings)
     errors += ops_errors
-    common = {"sets": sets, "logdir": logdir, "addr": addr, "user": user, "lead": lead, "jdir": jdir, "gcmd": gcmd, "ops": ops}
+    common = {"sets": sets, "logdir": logdir, "addr": addr, "user": user, "lead": lead, "jdir": jdir, "gcmd": gcmd, "ops": ops,
+              "stop_lead": stop_lead}
     if errors:
         return plan, errors, warnings, common
     run_by = {r["name"].strip(): r for r in run_cmds if (r.get("name") or "").strip()}
@@ -2447,6 +2538,9 @@ def build_seq(cases, run_cmds, mon_cmds, profiles, settings, now=None, record_ro
         errors.append("설정: '설정 적용 N분 전'(%d)은 '구성 스냅샷 N분 전'(%d)보다 커야 함" % (prep, snaplead))
     if any(pc["has_mon"] for pc in plan) and prep <= common["lead"]:
         errors.append("설정: '설정 적용 N분 전'(%d)은 '모니터링 시작 N분 전'(%d)보다 커야 함" % (prep, common["lead"]))
+    if plan_has_stop(plan) and stop_lead <= common["lead"]:          # 중지 명령이 있는 모니터링이 있을 때만 본다
+        errors.append("설정: '모니터링 중지 N분 전'(%d)은 '모니터링 시작 N분 전'(%d)보다 커야 함. 같거나 작으면 앞 케이스의 "
+                      "중지 명령이 다음 케이스의 모니터링 시작 뒤에 실행됨" % (stop_lead, common["lead"]))
     by_chain, no_stop = {}, []
     for pc in plan:
         by_chain.setdefault(pc["chain"], []).append(pc)
@@ -2483,25 +2577,37 @@ def build_seq(cases, run_cmds, mon_cmds, profiles, settings, now=None, record_ro
                               "그 시각이 앞 케이스 %s 의 잡 시작(%s)보다 늦지 않음"
                               % (label, _md_hm(prev["start_at"] + dt.timedelta(minutes=prep + 2)), prep, prev["name"],
                                  _md_hm(prev["start_at"])))
-            # 모니터링 중지(중지 명령이 있는 모니터링): 다음 잡 케이스의 설정 적용 2분 전(잡 시작 prep + 2분 전). 최대 대기를 적었으면
-            # 잡 시작 + 최대 대기가 더 이를 때 그 시각. 마지막 케이스는 최대 대기가 있을 때만 중지한다. crontab 에 잡과 함께 등록한다
+            # 모니터링 중지(중지 명령이 있는 모니터링). 사용자 결정 2026-11-09(W-20261109-06, -08, -09): 케이스마다 자동, 직접 입력,
+            # 중지 없음 가운데 고른다. 자동은 다음 케이스(같은 ESX 호스트의 다음 잡 케이스)의 잡 시작 '모니터링 중지 N분 전'(기본 10).
+            # 최대 대기를 적었으면 잡 시작 + 최대 대기가 더 이를 때 그 시각. 규칙은 seq_stop_at. crontab 에 잡과 함께 등록한다
             has_stop = bool(pc["emx"]) or any(vm["mx"] for vm in pc["vms"])
-            ends = []
-            if nxt is not None and nxt["start_at"] is not None:
-                ends.append(nxt["start_at"] - dt.timedelta(minutes=prep + 2))
-            if pc["max_wait"]:
-                ends.append(pc["start_at"] + dt.timedelta(minutes=pc["max_wait"]))
-            if has_stop and ends:
-                pc["mstop"] = min(ends)
-                if pc["mstop"] <= pc["start_at"] + dt.timedelta(minutes=1):
-                    errs.append("%s: 모니터링을 중지할 시각 %s 이(가) 잡 시작 %s 보다 빠르거나 같음. 다음 케이스의 시작 시각을 늦추거나 "
-                                  "최대 대기를 늘릴 것" % (label, _md_hm(pc["mstop"]), _md_hm(pc["start_at"])))
-            elif has_stop:
-                no_stop.append(pc["name"])
+            pc["stop_mode"] = stop_mode_of(pc["case"])
+            if has_stop:
+                t, why = seq_stop_at(pc["case"], pc["start_at"], nxt["start_at"] if nxt is not None else None,
+                                     pc["max_wait"], stop_lead)
+                if why:
+                    errs.append("%s: %s" % (label, why))
+                elif t is not None:
+                    pc["mstop"] = t
+                    if t <= pc["start_at"] + dt.timedelta(minutes=1):
+                        if pc["stop_mode"] == "manual":
+                            errs.append("%s: 모니터링 중지 칸의 시각을 잡 시작 %s 뒤로 고칠 것. 지금 %s"
+                                          % (label, _md_hm(pc["start_at"]), _md_hm(t)))
+                        else:
+                            errs.append("%s: 다음 케이스의 시작 시각을 늦추거나 모니터링 중지 칸을 고칠 것. 자동 중지 시각 %s 이(가) "
+                                          "이 케이스의 잡 시작 %s 보다 빠르거나 같음" % (label, _md_hm(t), _md_hm(pc["start_at"])))
+                    elif pc["stop_mode"] == "manual" and nxt is not None and nxt["start_at"] is not None and nxt["has_mon"] \
+                            and t >= nxt["start_at"] - dt.timedelta(minutes=common["lead"]):
+                        warnings.append("%s: 모니터링 중지 칸의 시각 %s 이(가) 다음 케이스 %s 의 모니터링 시작 %s 보다 늦음. "
+                                        "이 케이스의 중지 명령이 다음 케이스의 모니터링도 멈출 수 있음"
+                                        % (label, _md_hm(t), nxt["name"],
+                                           _md_hm(nxt["start_at"] - dt.timedelta(minutes=common["lead"]))))
+                elif pc["stop_mode"] == "auto":
+                    no_stop.append(pc["name"])
     if no_stop:
         # 생성을 막지 않는 알림으로 보인다(사용자 지적 2026-11-18 "이 경고가필요해?"). 그 대상(중지 명령이 있는 모니터링)이 있을 때만 낸다
-        common["notes"].append("마지막 케이스(%s)는 모니터링 중지 시각이 없음. 정하려면 그 케이스의 '최대 대기' 칸에 시간을 적을 것"
-                               "(비워 두면 다음 실행이나 tcrun cancel 때 중지)" % ", ".join(no_stop))
+        common["notes"].append("마지막 케이스(%s)는 모니터링 중지 시각이 없음. 정하려면 모니터링 중지 칸에서 직접 입력을 고르거나 "
+                               "최대 대기 칸에 시간을 적을 것(비워 두면 다음 실행이나 tcrun stop 때 중지)" % ", ".join(no_stop))
     return plan, errors, warnings, common
 
 
@@ -2510,6 +2616,75 @@ def build_seq(cases, run_cmds, mon_cmds, profiles, settings, now=None, record_ro
 SNAPSHOT_LABELS = [("h1", "구분"), ("h2", "항목"), ("time", "수집 시각"), ("basic", "VM 기본 정보"), ("adv", "vm advanced config"),
                    ("guest", "Guest OS"), ("aff", "CPU affinity"), ("ref_esx", "기준 시각 (ESX 호스트 조회)"),
                    ("ref_guest", "기준 시각 (게스트 조회)"), ("none", "(없음)")]
+
+
+def _list_cmd(text):
+    """확인 목록에 보일 명령 글. 변수는 crontab 에 들어가는 이름(${TC_HOST}, ${TC_START})으로 적는다. ASCII 만 쓴다."""
+    t = VAR_START_RE.sub("${TC_START}", VAR_HOST_RE.sub("${TC_HOST}", (text or "").strip()))
+    return t.encode("ascii", "replace").decode("ascii")
+
+
+def confirm_lines(plan, common, run_id):
+    """S 블록을 붙여넣으면 tcrun 이 crontab 에 등록하기 전에 보이고 확인을 받는 목록(사용자 요청 2026-11-20 "생성기 점프 VM 에
+    복사 붙여넣기 하면 테스트케이스 이름, 호스트 혹은 VM 명, 시작 시간, 실행 명령어 모니터링 목록 리스트업되고 확인한 다음
+    실행되도록하고싶어 확인작업필수"). plan 의 LIST 줄이다. tcrun 의 글과 같이 ASCII 영어이고, VM 이름은 'vm <이름>' 으로 적어
+    tcrun 이 터미널에서 초록색으로 보인다("출력물에서 VM 명은 그린색이나 노란색으로 표기되도록")."""
+    lead = common["lead"]
+    fmt = lambda d: d.strftime("%Y-%m-%d %H:%M")
+    chains = []
+    for pc in plan:
+        if pc["chain"] not in chains:
+            chains.append(pc["chain"])
+    body, n, uses_var = [], 0, False
+    for ch in chains:
+        mine = [pc for pc in plan if pc["chain"] == ch]
+        body.append("---- %s: %d case%s" % (("ESX host " + ch) if ch != "-" else "no ESX host", len(mine),
+                                            "" if len(mine) == 1 else "s"))
+        for pc in mine:
+            n += 1
+            has_job = any(vm["job"] for vm in pc["vms"])
+            head = "case %d/%d  %s" % (n, len(plan), pc["name"])
+            if has_job and pc.get("start_at"):
+                head += "   job start %s" % fmt(pc["start_at"])
+            elif pc.get("applyat"):
+                head += "   no job: settings and VM power at %s" % fmt(pc["applyat"])
+            body.append(head)
+            if has_job and pc["has_mon"] and pc.get("start_at"):
+                has_stop = bool(pc["emx"]) or any(vm["mx"] for vm in pc["vms"])
+                if pc.get("mstop"):
+                    stop = fmt(pc["mstop"])
+                elif not has_stop:
+                    stop = "none (no stop command)"
+                elif pc.get("stop_mode") == "none":
+                    stop = "none (chosen in tcgen)"
+                else:
+                    stop = "not set (last case)"
+                body.append("  monitoring start %s, stop %s" % (fmt(pc["start_at"] - dt.timedelta(minutes=lead)), stop))
+            ents = pc["entries"]
+            for vm in pc["vms"]:
+                if not vm["name"]:
+                    continue
+                if vm["power"] == "off":
+                    body.append("  vm %s   (powered off for this case)" % vm["name"])
+                    continue
+                body.append("  vm %s" % vm["name"])
+                jobs = [e for e in ents if e["role"] == "VM" and e["host"] == vm["name"] and e["kind"] == "잡"]
+                if has_job:
+                    body.append("    job: %s" % (_list_cmd(jobs[0]["cmd"]) if jobs else "(none)"))
+                for e in ents:
+                    if e["role"] == "VM" and e["host"] == vm["name"] and e["kind"] == "모니터링 시작":
+                        body.append("    monitoring %s: %s" % (e["name"], _list_cmd(e["cmd"])))
+            emons = [e for e in ents if e["role"] == "ESX" and e["kind"] == "모니터링 시작"]
+            if emons:
+                body.append("  ESX host %s" % pc["esx"])
+                body += ["    monitoring %s: %s" % (e["name"], _list_cmd(e["cmd"])) for e in emons]
+    uses_var = any("${TC_HOST}" in x or "${TC_START}" in x for x in body)
+    # 첫 줄은 ==== 로 시작하지 않는다(tcrun 의 출력에서 ==== 는 문제나 중단을 알리는 줄이다)
+    out = ["run %s: %d case%s. Check them before they are registered in crontab." % (run_id, len(plan),
+                                                                                         "" if len(plan) == 1 else "s")]
+    if uses_var:
+        out.append("     ${TC_HOST} = host name of the VM, ${TC_START} = start time (14 digits): the variables of tcgen")
+    return out + body
 
 
 def plan_text(plan, common, run_id, now):
@@ -2526,6 +2701,7 @@ def plan_text(plan, common, run_id, now):
     out += ["CFGL %s %s" % kv for kv in SNAPSHOT_LABELS]
     if common.get("gcmd"):              # 구성 스냅샷 때 케이스의 켜져 있는 VM 마다 실행할 명령
         out.append("GCMD " + common["gcmd"])
+    out += ["LIST " + x for x in confirm_lines(plan, common, run_id)]      # S 블록의 확인 목록(tcrun 이 등록 전에 보이고 묻는다)
     if common.get("ops"):               # VCF Operations: 구성 스냅샷 때 VM 설정과 호스트 옵션을 객체의 속성으로 기록한다
         o = common["ops"]
         out += ["OPS HOST " + o["host"], "OPS USER " + o["user"], "OPS ENC " + o["enc"], "OPS KEY " + o["key"],
@@ -2578,10 +2754,10 @@ def plan_view(plan, common, run_id):
     out = ["실행 ID %s" % run_id,
            "점프 VM 작업 폴더 %s, 로그 폴더 %s" % (jdir, common["logdir"]),
            "등록 기록 %s/tcrun-%s-jobs.csv (케이스, ESX 호스트, VM, 잡 시작, crontab 등록 여부)" % (common["logdir"], run_id),
-           "진행 확인 sh %s/tcrun status, 멈추기 sh %s/tcrun stop, 취소 sh %s/tcrun cancel" % (jdir, jdir, jdir),
+           "진행 확인 sh %s/tcrun status, 중지 sh %s/tcrun stop (진행을 끝내고 등록한 crontab 줄을 지우고 시작된 모니터링을 중지함)" % (jdir, jdir),
            ""]
     out += timeline_lines(prep, snaplead, lead, any(pc["has_mon"] for pc in plan), bool(gcmd), plan_has_stop(plan),
-                          bool(common.get("ops")))
+                          bool(common.get("ops")), common.get("stop_lead", DEFAULT_SETTINGS["stop_lead_min"]))
     if gcmd:
         out.append("스냅샷 때 VM 에서 실행할 명령: %s" % gcmd)
     if common.get("ops"):
@@ -2651,9 +2827,13 @@ def plan_view(plan, common, run_id):
                 if not stops:
                     out.append("   모니터링 중지: 중지 명령 없음")
                 elif pc.get("mstop"):
-                    items("모니터링 중지 (%s)" % pc["mstop"].strftime("%m-%d %H:%M"), stops)
+                    items("모니터링 중지 (%s%s)" % (pc["mstop"].strftime("%m-%d %H:%M"),
+                                                " 직접 입력" if pc.get("stop_mode") == "manual" else ""), stops)
+                elif pc.get("stop_mode") == "none":
+                    out.append("   모니터링 중지: 중지 없음(모니터링 중지 칸에서 고름)")
                 else:
-                    out.append("   모니터링 중지: 자동으로 중지하지 않음(마지막 케이스. '최대 대기' 를 적으면 그 시각에 중지)")
+                    out.append("   모니터링 중지: 자동으로 중지하지 않음(마지막 케이스. 모니터링 중지 칸에서 직접 입력을 고르거나 "
+                               "'최대 대기' 를 적으면 그 시각에 중지)")
     return "\n".join(out) + "\n"
 
 
@@ -3123,7 +3303,8 @@ def generate_seq(cases, run_cmds, mon_cmds, profiles, settings, now=None, write=
     res["plan_view"] = plan_view(plan, common, run_id)
     sets = dict(common["sets"])
     tl = (sets.get("PREP_LEAD_MIN", 30), sets.get("SNAP_LEAD_MIN", 10), sets["MON_LEAD_MIN"],
-          any(pc["has_mon"] for pc in plan), bool(common.get("gcmd")), plan_has_stop(plan), bool(common.get("ops")))
+          any(pc["has_mon"] for pc in plan), bool(common.get("gcmd")), plan_has_stop(plan), bool(common.get("ops")),
+          common.get("stop_lead", DEFAULT_SETTINGS["stop_lead_min"]))
     res["timeline"] = timeline_lines(*tl)
     res["timeline_table"] = timeline_table(*tl)
     # 설정이나 VM 전원을 호스트와 비교하는 케이스(seg 1)와 변경 시각. ESX 호스트의 첫 케이스는 실행을 시작할 때 비교하고,

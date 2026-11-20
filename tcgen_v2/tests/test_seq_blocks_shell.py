@@ -24,6 +24,13 @@ import unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import fakeenv  # noqa: E402
+
+GREEN = "\x1b[1;32m"
+
+
+def plain(text):
+    """터미널 출력에서 색 글자(ESC [ ... m)를 뺀 글. v2.15 부터 터미널의 VM 이름은 초록색이다."""
+    return re.sub(r"\x1b\[[0-9;]*m", "", text)
 from fakeenv import core  # noqa: E402
 from test_blocks_shell import run_pty  # noqa: E402
 
@@ -85,13 +92,16 @@ class SeqBlockTests(unittest.TestCase):
             os.environ["TZ"] = self.old_tz
         time.tzset()
 
-    def paste(self, shell, steps, crlf=False):
+    def paste(self, shell, steps, crlf=False, tty=False):
+        """tty: tcrun start 의 확인 질문을 터미널(/dev/tty)에서 받는다(TCRUN_TEST_TTY 를 쓰지 않음). 답은 steps 에 넣는다."""
         argv, set_prompt, prompt_re = SHELLS[shell]
         conv = (lambda t: t.replace("\n", "\r\n")) if crlf else (lambda t: t)
         steps = [(w, idle, conv(t)) for w, idle, t in steps]
         last = steps[-1]
         steps[-1] = (last[0], last[1], last[2] + "exit\n")
         env = dict(self.e.env)
+        if tty:
+            env.pop("TCRUN_TEST_TTY", None)
         return run_pty(argv, env, self.e.jump, [(None, 0, set_prompt), (prompt_re, 0.5, "")] + steps, timeout=180)
 
     def tfile(self, name):
@@ -142,7 +152,9 @@ class SeqBlockTests(unittest.TestCase):
         # P 블록 (plan 은 지금 만든다: 잡 시작은 가상 시계로 30분 뒤)
         self.make()
         RID = self.rid
-        out = self.paste(shell, [(None, 0, self.res["check"]), (r"saved: /\S+check\.log\r?\n", 0.5, "")], crlf)
+        raw = self.paste(shell, [(None, 0, self.res["check"]), (r"saved: /\S+check\.log\r?\n", 0.5, "")], crlf)
+        self.assertIn("[ok] vm %sesx01ev01\x1b[0m (esx01ev01): ssh login works" % GREEN, raw, "점검 출력의 VM 이름은 터미널에서 초록색")
+        out = plain(raw)
         plan = os.path.join(e.tcgen, "runs", RID, "plan")
         with open(plan, encoding="utf-8") as f:
             self.assertEqual(f.read(), self.res["plan"], "plan 이 그대로 올라감(한글 설명 포함)")
@@ -156,7 +168,17 @@ class SeqBlockTests(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(e.log, "tcrun-%s-check.log" % RID)))
         # S 블록: 셸을 끝내도(터미널을 닫아도) 진행은 계속된다. 잡을 등록하고, 적은 시각에 잡이 시작하고, 1분 뒤에 진행이 끝난다
         cron = e.start_cron()
-        out = self.paste(shell, [(None, 0, self.res["run"]), (r"files in /\S+ : tcrun-", 0.5, "")], crlf)
+        # 붙여넣으면 케이스 목록을 보이고 터미널에서 yes 를 받은 뒤에 시작한다(사용자 요청 2026-11-20 "확인작업필수")
+        raw = self.paste(shell, [(None, 0, self.res["run"]), (r"Type yes or no: \Z", 0.3, "yes\r"),
+                                 (r"files in /\S+ : tcrun-", 0.5, "")], crlf, tty=True)
+        out = plain(raw)
+        text = self.at.strftime("%Y-%m-%d %H:%M")
+        for word in ("run %s: 1 case. Check them before they are registered in crontab." % RID,
+                     "case 1/1  paste1   job start %s" % text, "  vm esx01ev01", "  vm esx01ev02",
+                     "Register these cases in crontab? Type yes or no: "):
+            self.assertIn(word, out)
+        self.assertLess(out.index("case 1/1  paste1"), out.index("Type yes or no: "))
+        self.assertIn("  vm %sesx01ev01\x1b[0m" % GREEN, raw, "확인 목록의 VM 이름은 터미널에서 초록색")
         self.assertRegex(out, r"started: run %s esx esx01   log: %s/tcrun-%s-esx01\.log" % (RID, re.escape(e.log), RID))
         self.assertIn("status: sh %s/tcrun status" % e.tcgen, out)
         self.assertIn("tcrun-%s-jobs.csv (which jobs are registered in crontab)" % RID, out)
@@ -173,14 +195,15 @@ class SeqBlockTests(unittest.TestCase):
         self.assertEqual(sorted(t for h, t, line in cron.fired), [job_at - 60, job_at, job_at], cron.fired)
         tab = e.vm_crontab("esx01ev01")
         self.assertEqual([x for x in tab if " # tcgen " not in x], ["30 9 * * 1 /home/tester/existing.sh"], "원래 있던 줄은 그대로")
-        self.assertEqual(len([x for x in tab if " # tcgen paste1 esx01ev01" in x]), 2, "등록한 줄은 남는다(다음 실행이나 cancel 이 지움)")
+        self.assertEqual(len([x for x in tab if " # tcgen paste1 esx01ev01" in x]), 2, "등록한 줄은 남는다(다음 실행이나 tcrun stop 이 지움)")
         rep = e.log_text(RID, "esx01", "-perfreport_cases.csv")
         self.assertTrue(rep.startswith("\ufeff테스트 그룹,케이스명,설명,호스트 이름,"))
         self.assertIn("\r\n그룹,paste1,한글 설명,esx01,%s:00," % text, rep)
         if again:
             # 같은 S 블록을 다시 붙여넣어도 다시 시작하지 않는다
-            out = self.paste(shell, [(None, 0, self.res["run"]), (r"files in /\S+ : tcrun-", 0.5, "")], crlf)
+            out = self.paste(shell, [(None, 0, self.res["run"]), (r"files in /\S+ : tcrun-", 0.5, "")], crlf, tty=True)
             self.assertIn("==== esx01: run %s was already started on this jump VM. Not started again." % RID, out)
+            self.assertNotIn("Type yes or no", out, "이미 시작한 실행은 묻지 않음")
             self.assertEqual(len(cron.fired), 3)
 
     def test_flow_tcsh_lf(self):

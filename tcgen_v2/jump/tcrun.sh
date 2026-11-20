@@ -1,5 +1,5 @@
 #!/bin/sh
-# tcrun 2.14 - tcgen sequence runner. Runs on the jump VM (POSIX sh). tcgen block A installs it in the jump VM work folder
+# tcrun 2.15 - tcgen sequence runner. Runs on the jump VM (POSIX sh). tcgen block A installs it in the jump VM work folder
 # (setting of tcgen, ~/.tcgen when empty). tcrun uses the folder it is in as its work folder (D below).
 #
 #   sh <work folder>/tcrun check <plan>       read-only checks: ESX key login, tools, VMs, settings and power, VM login, clocks
@@ -8,11 +8,11 @@
 #   sh <work folder>/tcrun run <plan> <esx>   run the cases of one ESX host in the order of the table
 #   sh <work folder>/tcrun status [-a]        state of every ESX host of the latest run, of every run that is running or
 #                                             queued, and of every run that left crontab lines on the hosts
-#   sh <work folder>/tcrun stop [esx]         ask the runners to stop (flag file). Crontab lines that are registered stay:
-#                                             their jobs still start. Monitoring that runs stays.
-#   sh <work folder>/tcrun cancel [esx]       end every runner now (running or queued), take the crontab lines of its cases
-#                                             out (jobs that have not started will not start) and stop monitoring that runs.
-#                                             Also removes the lines that an ended run left on the hosts
+#   sh <work folder>/tcrun stop [esx]         end every run (running, queued or ended): the runner ends at its next check,
+#                                             the crontab lines of its cases are removed (jobs that have not started will not
+#                                             start, jobs that run are not touched), the monitoring that has started is
+#                                             stopped with its stop commands, and the run is removed from tcrun status.
+#                                             The logs and records in the log folder stay
 #   sh <work folder>/tcrun key                print the line that registers the ssh key of this jump VM on an ESX host
 #   sh <work folder>/tcrun version
 #
@@ -31,10 +31,10 @@
 #   - SNAP_LEAD_MIN before the job start of every case: config snapshot (one login per VM, read only).
 # The jobs are not looked for: tcrun does not log in to a VM while its job runs. The runner of an ESX host ends 1 min
 # after the last job start. The crontab lines stay on the hosts until the next run of that ESX host registers its
-# first lines, or until "tcrun cancel".
+# first lines, or until "tcrun stop".
 # Record of the registration: <log folder>/tcrun-<run id>-jobs.csv (case, esx, vm, job_start, crontab).
 
-TCRUN_VERSION=2.14
+TCRUN_VERSION=2.15
 case "$0" in        # the work folder is the folder of this file
   */tcrun) D=$(cd "${0%/tcrun}" 2>/dev/null && pwd) ;;
   tcrun) D=$(pwd) ;;
@@ -42,11 +42,25 @@ case "$0" in        # the work folder is the folder of this file
 esac
 [ -n "$D" ] && [ -f "$D/tcrun" ] || D=$HOME/.tcgen
 MD=$D/minutes        # job start times claimed by the runners on this jump VM (see claim_start)
+SL=$D/stopped_runs   # "<run id> <ESX host>" of every runner that sh tcrun stop removed: block S does not start it again
+PLAN_FMT="TCGEN-PLAN 2"
 LC_ALL=C
 export LC_ALL
 umask 077
 
-say() { printf '%s\n' "$*"; }
+# VM names ("vm <name>") are shown green on a terminal (user request 2026-11-20). Text into files and pipes stays plain.
+# TCRUN_COLOR=always or never overrides the terminal test of vm_color (always is for the tests).
+vm_color() {
+  if [ "${TCRUN_COLOR:-auto}" = always ] || { [ "${TCRUN_COLOR:-auto}" != never ] && [ -t 1 ]; }; then
+    VC_E=$(printf '\033')
+    sed -e "s/^vm \([A-Za-z0-9][A-Za-z0-9._-]*\)/vm ${VC_E}[1;32m\1${VC_E}[0m/" \
+        -e "s/\([ (]\)vm \([A-Za-z0-9][A-Za-z0-9._-]*\)/\1vm ${VC_E}[1;32m\2${VC_E}[0m/g"
+  else
+    cat
+  fi
+}
+say() { if [ -t 1 ] && [ "${TCRUN_COLOR:-auto}" != never ]; then printf '%s\n' "$*" | vm_color; else printf '%s\n' "$*"; fi; }
+vm_list() { VL_O=; for VL_X in "$@"; do VL_O="${VL_O:+$VL_O, }vm $VL_X"; done; printf '%s' "$VL_O"; }
 now() { date +%s; }
 fmt() { date -d "@$1" "+$2" 2>/dev/null || date -r "$1" "+$2"; }
 fmtu() { date -u -d "@$1" "+$2" 2>/dev/null || date -u -r "$1" "+$2"; }
@@ -96,7 +110,7 @@ addr_ok() {
 load_plan() {
   PLAN=$1
   [ -n "$PLAN" ] && [ -f "$PLAN" ] || { say "tcrun: plan file not found: $PLAN"; exit 2; }
-  [ "$(head -n 1 "$PLAN")" = "TCGEN-PLAN 2" ] || { say "tcrun: not a tcgen plan of format 2: $PLAN"; exit 2; }
+  [ "$(head -n 1 "$PLAN")" = "$PLAN_FMT" ] || { say "tcrun: not a tcgen plan of format ${PLAN_FMT#TCGEN-PLAN }: $PLAN"; exit 2; }
   PVER=$(hget VER)
   RUNID=$(hget RUNID)
   case "$RUNID" in ""|*[!A-Za-z0-9._-]*) say "tcrun: bad RUNID in the plan"; exit 2 ;; esac
@@ -1241,7 +1255,7 @@ register_case() {   # register the crontab lines of case $SEQ (ctx loaded) at th
   #  - every login gets only the time that is left until then, and a host does not take the lines when its own clock
   #    has reached that time (CRON_DL)
   #  - when one host fails, the lines are removed again on the hosts that have them, first on those that answered in time
-  # The case is listed in $W/times before the first login: when the runner is ended here, cancel removes its lines.
+  # The case is listed in $W/times before the first login: when the runner is ended here, tcrun stop removes its lines.
   say "$SEQ $RG_F $TJOB" >> "$W/times"
   CRON_DL=$((RG_F - 15))
   RG_HAVE=; RG_SLOW=; RG_UNK=; RG_ZONE=
@@ -1342,9 +1356,9 @@ register_case() {   # register the crontab lines of case $SEQ (ctx loaded) at th
       *" $RG_X "*)
         [ "$RG_X" = "@esx" ] && continue
         if [ "$RG_X" = "$RG_UNK" ]; then
-          say "$RG_X It is not known whether the lines are on this VM: it did not answer. Run sh $D/tcrun cancel $CHF" >> "$W/jobs.note"
+          say "$RG_X It is not known whether the lines are on this VM: it did not answer. Run sh $D/tcrun stop $CHF" >> "$W/jobs.note"
         else
-          say "$RG_X The lines could NOT be removed on this VM again: what they start still starts. Run sh $D/tcrun cancel $CHF" >> "$W/jobs.note"
+          say "$RG_X The lines could NOT be removed on this VM again: what they start still starts. Run sh $D/tcrun stop $CHF" >> "$W/jobs.note"
         fi
         continue ;;
     esac
@@ -1356,7 +1370,7 @@ register_case() {   # register the crontab lines of case $SEQ (ctx loaded) at th
         [ -n "$RG_EZONE" ] && RG_LATER="$RG_LATER @esx"
       elif [ "$RG_X" = "$RG_ZONE" ]; then
         RG_LATER="$RG_LATER $RG_X"
-        say "$RG_X This VM gave no answer while it was taking the lines, and it had none when tcrun removed them at $(tstr "$RG_K") (clock of the VM): they may still arrive. Look at its crontab, or run sh $D/tcrun cancel $CHF" >> "$W/jobs.note"
+        say "$RG_X This VM gave no answer while it was taking the lines, and it had none when tcrun removed them at $(tstr "$RG_K") (clock of the VM): they may still arrive. Look at its crontab, or run sh $D/tcrun stop $CHF" >> "$W/jobs.note"
       fi
       continue
     fi
@@ -1369,7 +1383,7 @@ register_case() {   # register the crontab lines of case $SEQ (ctx loaded) at th
     log "WARN case $CNAME is not registered, but its lines were still on$(say "$RG_HALF" | sed "s/@esx/esx $CHF/") at the first start time $(tstr "$RG_F"): what was to start then may have started there (see $JOBS)"
     if [ "$HASMON" = 1 ]; then
       CM_ONLY=$RG_HALF
-      cancel_mon_stop
+      mon_stop_now
       CM_ONLY=
     fi
   fi
@@ -1378,12 +1392,12 @@ register_case() {   # register the crontab lines of case $SEQ (ctx loaded) at th
   rm -f "$W/times.new"
   RG_KEEP=$(say $UR_BAD $RG_LATER)
   if [ -n "$RG_KEEP" ]; then
-    # lines may be on a host, or may still arrive there: the case stays listed, so that cancel and the next run remove
+    # lines may be on a host, or may still arrive there: the case stays listed, so that tcrun stop and the next run remove
     # them. Its start time stays recorded: the job may still start there
     say "$SEQ $RG_F $TJOB $(say "$RG_KEEP" | tr ' ' ',')" >> "$W/times"
     [ "$(cat "$MD/$TJOB/who" 2>/dev/null)" = "$ME" ] && : > "$MD/$TJOB/reg" 2>/dev/null
-    [ -n "$UR_BAD" ] && log "WARN case $CNAME is not registered, but its lines could not be removed on:$(say "$UR_BAD" | sed "s/@esx/esx $CHF/"). What they start still starts there. Remove them: sh $D/tcrun cancel $CHF"
-    [ -n "$RG_LATER" ] && log "WARN case $CNAME is not registered, but$(say "$RG_LATER" | sed "s/@esx/esx $CHF/") gave no answer while it was taking the lines: they may still arrive there. Look at its crontab, or run sh $D/tcrun cancel $CHF"
+    [ -n "$UR_BAD" ] && log "WARN case $CNAME is not registered, but its lines could not be removed on:$(say "$UR_BAD" | sed "s/@esx/esx $CHF/"). What they start still starts there. Remove them: sh $D/tcrun stop $CHF"
+    [ -n "$RG_LATER" ] && log "WARN case $CNAME is not registered, but$(say "$RG_LATER" | sed "s/@esx/esx $CHF/") gave no answer while it was taking the lines: they may still arrive there. Look at its crontab, or run sh $D/tcrun stop $CHF"
   else
     release_start "$TJOB" "$ME"
   fi
@@ -1540,7 +1554,7 @@ run_case() {
         STEP=wait-cleanup
         setstate running "waiting until $(tstr "$RC_W") to remove the crontab lines that run(s) $(say $TAKE) left${AT:+ ($PREP min before the job start $ATTEXT of case $CNAME)}"
         if ! wait_until "$RC_W"; then
-          stopped "before the crontab lines that run(s) $(say $TAKE) left were removed. The crontab lines of this run stay registered: its jobs start at their times. To remove them: sh $D/tcrun cancel $CHF"
+          stopped "before the crontab lines that run(s) $(say $TAKE) left were removed"
           return 1
         fi
       fi
@@ -1573,7 +1587,7 @@ run_case() {
       STEP=wait-snapshot
       setstate running "waiting until $(tstr "$RC_S") to take the config snapshot of case $CNAME ($SNAPLEAD min before the job start $ATTEXT)"
       if ! wait_until "$RC_S"; then
-        stopped "before the config snapshot of case $CNAME. Its crontab lines stay registered: the job starts at $ATTEXT. To remove them: sh $D/tcrun cancel $CHF"
+        stopped "before the config snapshot of case $CNAME"
         return 1
       fi
     fi
@@ -1592,13 +1606,14 @@ run_case() {
   return 0
 }
 
-on_signal() {       # the runner is ended by a signal (sh tcrun cancel sends TERM). The login that runs is ended, and the
+on_signal() {       # the runner is ended by a signal (sh tcrun stop sends TERM when the runner does not end at its next
+                    # check). The login that runs is ended, and the
                     # registration record gets rows for the cases that were not registered
   [ -n "$G_P" ] && kill "$G_P" 2>/dev/null
   log "ended by a signal"
   OS_C=$CNAME
   HOW=stopped; HOW_TEXT="ended by a signal"
-  if [ -f "$RD/$CHF.cancelling" ]; then HOW=cancelled; HOW_TEXT="sh tcrun cancel"; fi
+  [ -f "$RD/$CHF.stopping" ] && HOW_TEXT="sh tcrun stop"
   if [ -n "$JOBS" ] && [ -n "$SEQS" ]; then
     rm -f "$W/jobs.note"
     if [ -n "$RP_NOW" ]; then
@@ -1704,7 +1719,7 @@ cmd_run() {
       setstate running "every case is handled. Waiting until 1 min after the last job start ($(tstr "$CR_LAST")), then this runner ends"
       if ! wait_until $((CR_LAST + 60)); then
         CR_ALL=1
-        stopped "while the runner waited for the last job start. The crontab lines stay registered: the jobs start at their times. To remove them: sh $D/tcrun cancel $CHF"
+        stopped "while the runner waited for the last job start"
       fi
     fi
   fi
@@ -1713,7 +1728,7 @@ cmd_run() {
     log "run finished: $TOTAL case(s), $NREG job case(s) registered, $NREGBAD not registered"
     CR_T="all $TOTAL case(s) finished: $NREG job case(s) registered"
     [ "$NREGBAD" -gt 0 ] && CR_T="$CR_T, $NREGBAD NOT registered (see $JOBS)"
-    setstate done "$CR_T. The crontab lines stay on the hosts until the next run of this ESX host registers its first lines, or sh $D/tcrun cancel $CHF"
+    setstate done "$CR_T. The crontab lines stay on the hosts until the next run of this ESX host registers its first lines, or sh $D/tcrun stop $CHF"
     return 0
   fi
   jobs_rest
@@ -1726,10 +1741,12 @@ cmd_run() {
     log "run ended ($HOW) after every case was handled: $NREG job case(s) registered, $NREGBAD not registered (see $JOBS)"
   elif [ "$IDX" = 0 ]; then
     log "run ended ($HOW) before its first case. Not finished:$CR_REST"
-    log "the cases that are registered start at their times (see $JOBS). To go on with the others: sh $D/tcrun cancel $CHF (removes the lines that are left), fix the cause, generate again in tcgen and paste block S"
   else
     log "run ended ($HOW) at case $CNAME. Not finished:$CR_REST"
-    log "the cases that are registered start at their times (see $JOBS). To go on with the others: sh $D/tcrun cancel $CHF (removes the lines that are left), fix the cause, generate again in tcgen and paste block S"
+  fi
+  # stopped: sh tcrun stop asked for it and removes the crontab lines of this run next
+  if [ -z "$CR_ALL" ] && [ "$HOW" != stopped ]; then
+    log "the cases that are registered start at their times (see $JOBS). To go on with the others: sh $D/tcrun stop $CHF (removes the lines that are left), fix the cause, generate again in tcgen and paste block S"
   fi
   setstate "$HOW" "$HOW_TEXT"
   return 1
@@ -1739,7 +1756,7 @@ cmd_run() {
 # One runner at a time works for an ESX host. A run that is started while another run still works for the same ESX host
 # waits in the queue and starts when that run has ended as done.
 # <run>/<host>.work/times holds one line "<case number> <first start time> <job start>" for every case whose crontab
-# lines are on the hosts, from the registration until the lines are removed (by the next run or by cancel).
+# lines are on the hosts, from the registration until the lines are removed (by the next run or by tcrun stop).
 # A fourth field lists the hosts where the lines could not be removed ("vm1,vm2,@esx"): only those still have them.
 run_end() {         # run_end <run id> <ESX host of the plan>: when the runner of that run for the ESX host ends: 1 min
                     # after its latest job start (epoch; "" when its plan has no job start for the host)
@@ -1752,8 +1769,9 @@ run_end() {         # run_end <run id> <ESX host of the plan>: when the runner o
   [ -n "$RE_M" ] && say $((RE_M / 60 * 60 + 60))
   return 0
 }
-state_of() {        # state_of <run dir> <host file name>: state of that runner: running, queued, done, paused, stopped, cancelled,
-                    # died (the state says running or queued, but the runner is gone) or none
+state_of() {        # state_of <run dir> <host file name>: state of that runner: running, queued, done, paused, stopped,
+                    # cancelled (written by tcrun 2.14 and earlier), died (the state says running or queued, but the runner
+                    # is gone) or none
   SO_S=$(grep '^state=' "$1/$2.state" 2>/dev/null | cut -d= -f2-)
   case "$SO_S" in
     running|queued) alive "$1/$2.pid" || SO_S=died ;;
@@ -1793,7 +1811,7 @@ host_block() {      # prints why run $RUNID must not be started for ESX host $CH
     HB_D=$D/runs/$HB_R
     HB_S=$(state_of "$HB_D" "$CHF")
     [ "$HB_S" = done ] && continue
-    say "run $HB_R of this ESX host ended as $HB_S and crontab lines of its case(s) are still on the hosts ($(open_case_name "$HB_D" "$CHF")): their jobs may still start. Remove them first: sh $D/tcrun cancel $CHF"
+    say "run $HB_R of this ESX host ended as $HB_S and crontab lines of its case(s) are still on the hosts ($(open_case_name "$HB_D" "$CHF")): their jobs may still start. Remove them first: sh $D/tcrun stop $CHF"
     return 0
   done
   return 0
@@ -1835,6 +1853,35 @@ running_for() {     # print the RUNID of a run that is still running for this ES
   done
   return 1
 }
+confirm_start() {   # print the cases of the plan (its LIST lines) and ask on the terminal. 0 = yes was typed.
+                    # User request 2026-11-20: the cases are listed and checked before they run, the check is required.
+                    # The answer is read from the terminal (/dev/tty): the block gives tcrun no input. TCRUN_TEST_TTY is for the tests.
+  CF_IN=${TCRUN_TEST_TTY:-/dev/tty}
+  if ! ( : < "$CF_IN" ) 2>/dev/null; then
+    say "==== no terminal to ask on ($CF_IN). Nothing started. Paste block S into a terminal of the jump VM."
+    return 1
+  fi
+  grep '^LIST ' "$PLAN" | cut -c6- | vm_color
+  exec 3< "$CF_IN"
+  while :; do
+    printf '%s' "Register these cases in crontab? Type yes or no: "
+    CF_A=
+    if ! IFS= read -r CF_A <&3; then
+      say ""
+      say "==== no answer. Nothing started."
+      exec 3<&-
+      return 1
+    fi
+    CF_A=$(printf '%s' "$CF_A" | tr -d '\r\011' | tr 'A-Z' 'a-z' | sed 's/^ *//; s/ *$//')
+    case "$CF_A" in
+      yes|y) exec 3<&-; return 0 ;;
+      no|n) exec 3<&-; say "==== not confirmed. Nothing started."; return 1 ;;
+      "") ;;
+      *) say "     type yes or no" ;;
+    esac
+  done
+}
+
 cmd_start() {
   load_plan "$1"
   if [ "$PVER" != "$TCRUN_VERSION" ]; then
@@ -1856,12 +1903,24 @@ cmd_start() {
       exit 2
     fi
   done
+  CS_NEW=0
+  for CS_CH in $(chains); do
+    CS_F=$(chfile "$CS_CH")
+    [ -f "$RD/$CS_F.state" ] || [ -f "$RD/$CS_F.pid" ] || grep -qxF "$RUNID $CS_F" "$SL" 2>/dev/null || CS_NEW=1
+  done
+  if [ "$CS_NEW" = 1 ] && ! confirm_start; then
+    exit 4
+  fi
   CS_N=0; CS_L=
   JOBS=$LOGDIR/tcrun-$RUNID-jobs.csv
   jobs_head
   old_claims
   for CS_CH in $(chains); do
     CS_F=$(chfile "$CS_CH")
+    if grep -qxF "$RUNID $CS_F" "$SL" 2>/dev/null; then
+      say "==== $CS_F: run $RUNID was ended by sh tcrun stop on this jump VM. Not started again. Generate again in tcgen to run again."
+      continue
+    fi
     if [ -f "$RD/$CS_F.state" ] || [ -f "$RD/$CS_F.pid" ]; then
       say "==== $CS_F: run $RUNID was already started on this jump VM. Not started again. Generate again in tcgen to run again."
       continue
@@ -1902,13 +1961,13 @@ cmd_start() {
       release_mine "$CS_F"
     fi
   done
-  say "status: sh $D/tcrun status       stop: sh $D/tcrun stop       cancel: sh $D/tcrun cancel"
+  say "status: sh $D/tcrun status       stop: sh $D/tcrun stop (ends the run, removes its crontab lines and stops its monitoring)"
   say "files in $LOGDIR : tcrun-$RUNID-jobs.csv (which jobs are registered in crontab), tcrun-$RUNID-<esx>.log, -result.csv, -perfreport_cases.csv, -config-<case number>-<case>.csv (config snapshot)"
 }
 cmd_status() {
   CT_ALL=0
   [ "$1" = "-a" ] && CT_ALL=1
-  [ -d "$D/runs" ] || { say "no run on this jump VM yet"; return 0; }
+  [ -d "$D/runs" ] || { say "no run on this jump VM"; return 0; }
   latest_run
   CT_LAST=$LR
   CT_N=0
@@ -1943,7 +2002,7 @@ cmd_status() {
         tail -n 3 "$CT_L/tcrun-$CT_D-$CT_X.log" 2>/dev/null | sed 's/^/   > /'
       fi
       if [ -n "$CT_OPEN" ]; then
-        say "   crontab lines on the hosts: case $CT_OPEN. To remove them: sh $D/tcrun cancel $CT_X"
+        say "   crontab lines on the hosts: case $CT_OPEN. To remove them: sh $D/tcrun stop $CT_X"
       fi
     done
   done
@@ -1952,43 +2011,81 @@ cmd_status() {
     for CT_C in $(chains); do                  # ESX hosts of the latest run whose runner wrote no state
       CT_X=$(chfile "$CT_C")
       [ -f "$D/runs/$CT_LAST/$CT_X.state" ] && continue
+      grep -qxF "$CT_LAST $CT_X" "$SL" 2>/dev/null && continue       # removed by sh tcrun stop
       CT_N=$((CT_N + 1))
       say "== run $CT_LAST  esx $CT_X : not started (no state file. A full disk or an error at the start: see below)"
       tail -n 5 "$D/runs/$CT_LAST/$CT_X.out" 2>/dev/null | sed 's/^/   > /'
     done
   fi
-  [ "$CT_N" -gt 0 ] || say "no run on this jump VM yet"
-  [ "$CT_N" -gt 0 ] && say "stop: sh $D/tcrun stop [esx]   cancel: sh $D/tcrun cancel [esx]"
+  [ "$CT_N" -gt 0 ] || say "no run on this jump VM"
+  [ "$CT_N" -gt 0 ] && say "stop: sh $D/tcrun stop [esx]   (ends the runs, removes their crontab lines and stops their monitoring. Then they are not shown here)"
   return 0
 }
-cmd_stop() {
-  CP_N=0
-  for CP_F in "$D"/runs/*/*.pid; do
-    [ -f "$CP_F" ] || continue
-    alive "$CP_F" || continue
-    CP_X=$(basename "$CP_F" .pid)
-    [ -z "$1" ] || [ "$1" = "$CP_X" ] || continue
-    CP_D=$(dirname "$CP_F")
-    : > "$CP_D/$CP_X.stop"
-    say "stop requested: run $(basename "$CP_D") esx $CP_X. The runner ends at its next check."
-    CP_N=$((CP_N + 1))
-  done
-  [ "$CP_N" -gt 0 ] || say "no running tcrun${1:+ for $1}"
-  [ "$CP_N" -gt 0 ] && say "stop ends the runners only: crontab lines that are registered stay, so those jobs still start at their times, and monitoring that runs stays. To remove the lines: sh $D/tcrun cancel [esx]"
-  latest_run
-  if [ -n "$LR" ] && [ -f "$D/runs/$LR/plan" ]; then
-    PLAN=$D/runs/$LR/plan
-    for CP_C in $(chains); do
-      CP_X=$(chfile "$CP_C")
-      [ -z "$1" ] || [ "$1" = "$CP_X" ] || continue
-      alive "$D/runs/$LR/$CP_X.pid" && continue
-      CP_S=$(state_of "$D/runs/$LR" "$CP_X")
-      [ "$CP_S" = none ] && CP_S=
-      CP_T=$(grep '^text=' "$D/runs/$LR/$CP_X.state" 2>/dev/null | cut -d= -f2-)
-      [ "$CP_S" = died ] && CP_T="the runner is gone. Its last state: $CP_T"
-      CP_O=$(open_case_name "$D/runs/$LR" "$CP_X")
-      say "run $LR esx $CP_X: not running (${CP_S:-not started}${CP_T:+: $CP_T})${CP_O:+. Crontab lines of case $CP_O are on the hosts: to remove them: sh $D/tcrun cancel $CP_X}"
+cmd_stop() {        # stop [esx]: end every run of this jump VM (with an ESX host: only what works for that ESX host). Each
+                    # runner that is running or queued ends at its next check, the crontab lines of the cases are removed
+                    # from the hosts, the monitoring that has started is stopped with its stop commands, and the run is
+                    # removed from tcrun status. A run stays in tcrun status only while crontab lines of it are on a host
+                    # that could not be reached. The logs and records in the log folder stay
+  case "$1" in -?*|*[!A-Za-z0-9._-]*) say "tcrun stop: bad ESX host name: $1"; return 2 ;; esac
+  # first every runner gets the stop flag (the newest run first: a queued run ends before the run it waits for).
+  # SP_LIVE notes "<run id>/<ESX host>/<pid>/<state>" of each of them: a runner may end before stop_chain gets to it
+  SP_LIVE=
+  for SP_RID in $(ls "$D/runs" 2>/dev/null | sort -r); do
+    for SP_F in "$D/runs/$SP_RID"/*.pid; do
+      alive "$SP_F" || continue
+      SP_X=$(basename "$SP_F" .pid)
+      [ -z "$1" ] || [ "$1" = "$SP_X" ] || continue
+      SP_LIVE="$SP_LIVE $SP_RID/$SP_X/$(cat "$SP_F" 2>/dev/null)/$(state_of "$D/runs/$SP_RID" "$SP_X")"
+      : > "${SP_F%.pid}.stop"
     done
+  done
+  SP_K=0; SP_LEFT=0
+  for SP_RID in $(ls "$D/runs" 2>/dev/null | sort -r); do
+    case "$SP_RID" in ""|.|..|*[!A-Za-z0-9._-]*) continue ;; esac
+    SP_RD=$D/runs/$SP_RID
+    SP_ANY=
+    for SP_F in "$SP_RD"/*.state "$SP_RD"/*.pid; do
+      [ -f "$SP_F" ] && SP_ANY=1
+    done
+    [ -n "$SP_ANY" ] || continue                  # no runner of this run was started (or it was removed already)
+    if [ ! -f "$SP_RD/plan" ] || [ "$(head -n 1 "$SP_RD/plan")" != "$PLAN_FMT" ] \
+       || [ "$(grep '^RUNID ' "$SP_RD/plan" | head -n 1 | cut -d' ' -f2-)" != "$SP_RID" ]; then
+      SP_LEFT=$((SP_LEFT + 1))
+      say "== run $SP_RID: tcrun $TCRUN_VERSION cannot read its plan ($SP_RD/plan). Not stopped: it stays in tcrun status."
+      continue
+    fi
+    load_plan "$SP_RD/plan"
+    [ -n "$SO" ] || ssh_setup
+    SP_GONE=0
+    for CH in $(chains); do
+      CHF=$(chfile "$CH")
+      [ -z "$1" ] || [ "$1" = "$CHF" ] || continue
+      if alive "$RD/$CHF.pid" || [ -s "$RD/$CHF.work/times" ] || live_at_stop; then
+        SP_K=$((SP_K + 1))
+        if ! stop_chain; then
+          SP_LEFT=$((SP_LEFT + 1))
+          continue
+        fi
+        forget_chain
+        say "   removed from tcrun status. The log stays: $LOGDIR/tcrun-$RUNID-$CHF.log"
+      elif [ -f "$RD/$CHF.state" ]; then
+        SP_K=$((SP_K + 1))
+        SP_S=$(ended_text "$(state_of "$RD" "$CHF")")
+        forget_chain
+        say "== run $RUNID esx $CHF: $SP_S, no crontab lines on the hosts. Removed from tcrun status."
+      else
+        continue
+      fi
+      SP_GONE=$((SP_GONE + 1))
+    done
+    [ "$SP_GONE" -gt 0 ] && forget_run
+  done
+  if [ "$SP_K" = 0 ] && [ "$SP_LEFT" = 0 ]; then
+    say "nothing to stop${1:+ for $1}: tcrun status shows no run${1:+ of this ESX host}"
+  elif [ "$SP_LEFT" -gt 0 ]; then
+    say "==== $SP_LEFT run(s) stay in tcrun status (see the lines above). Run sh $D/tcrun stop${1:+ $1} again when the hosts can be reached."
+  else
+    say "stop finished: tcrun status shows no run${1:+ of this ESX host} now. The logs and records stay in the log folder."
   fi
   return 0
 }
@@ -2002,7 +2099,7 @@ cmd_key() {
   say "sh $D/esxssh <esx host> hostname"
 }
 
-# ---------------------------------------------------------------- cancel, removing the lines of a run
+# ---------------------------------------------------------------- stop: ending the runs and removing their lines
 csay() { [ -n "$CC_SAY" ] && say "$*"; return 0; }
 latest_run() {      # LR = the latest run on this jump VM that has a state file (the run that status shows first)
   LR=
@@ -2013,7 +2110,7 @@ latest_run() {      # LR = the latest run on this jump VM that has a state file 
     done
   done
 }
-cancel_mon_stop() { # run the monitoring stop commands of case $SEQ now, once (VM lines: \% of the crontab form stands for %).
+mon_stop_now() { # run the monitoring stop commands of case $SEQ now, once (VM lines: \% of the crontab form stands for %).
                     # CM_ONLY: when set, only on these VMs ("@esx": the ESX host)
   for CM_VM in $REGVMS; do
     vhas MX "$CM_VM" || continue
@@ -2079,12 +2176,12 @@ close_case() {      # close_case: remove the crontab lines of every case of the 
     rm -f "$W/jobs.note"
     for CC_X in $JOBVMS; do
       case " $UR_BAD " in
-        *" $CC_X "*) say "$CC_X =NOT removed on this VM (${CC_BY:-closed}: the VM could not be reached): its job still starts at $ATTEXT. Run sh $D/tcrun cancel $CHF again" >> "$W/jobs.note" ;;
+        *" $CC_X "*) say "$CC_X =NOT removed on this VM (${CC_BY:-closed}: the VM could not be reached): its job still starts at $ATTEXT. Run sh $D/tcrun stop $CHF again" >> "$W/jobs.note" ;;
         *) if [ -n "$CC_L" ]; then case " $CC_L " in *" $CC_X "*) ;; *) say "$CC_X -" >> "$W/jobs.note" ;; esac; fi ;;
       esac
     done
     if [ -n "$UR_BAD" ]; then
-      # the lines are still on a host: the case stays in the list, so that cancel can be run again
+      # the lines are still on a host: the case stays in the list, so that tcrun stop can be run again
       say "$CC_Q ${CC_MON:-0} $(grep "^$CC_Q " "$W/times.close" | head -n 1 | cut -d' ' -f3) $(say $UR_BAD | tr ' ' ',')" >> "$W/times.keep"
       CC_BAD=$((CC_BAD + 1))
       csay "   crontab lines of case $CNAME NOT removed on:$(say "$UR_BAD" | sed "s/@esx/esx $CHF/") (job start $ATTEXT). What they start still starts there."
@@ -2095,7 +2192,7 @@ close_case() {      # close_case: remove the crontab lines of every case of the 
     if [ "$HASMON" = 1 ] && [ -n "$CC_MON" ] && [ "$(now)" -ge $((CC_MON - 60)) ]; then
       if [ -z "$MSTOP" ] || [ "$(now)" -lt "$MSTOP" ]; then
         CM_ONLY=$CC_L
-        cancel_mon_stop
+        mon_stop_now
         CM_ONLY=
       fi
     fi
@@ -2126,7 +2223,7 @@ close_open() {      # close_open <run id> <closed by> [names]: remove the lines 
     SEQS=$(cseqs "$CH")
     if close_case; then
       [ "$CC_N" -gt 0 ] && log "the crontab lines of $CC_N case(s) of run $1 are removed"
-      [ "$CC_BAD" -gt 0 ] && log "WARN the crontab lines of $CC_BAD case(s) of run $1 could not be removed on every host (see the WARN lines above). The next run of this ESX host tries again. sh $D/tcrun cancel $CHF removes them too, and it ends the run that works for this ESX host"
+      [ "$CC_BAD" -gt 0 ] && log "WARN the crontab lines of $CC_BAD case(s) of run $1 could not be removed on every host (see the WARN lines above). The next run of this ESX host tries again. sh $D/tcrun stop $CHF removes them too, and it ends the run that works for this ESX host"
       if [ ! -s "$RD/$CHF.work/times" ]; then
         ST=$RD/$CHF.state
         TOTAL=$(say "$SEQS" | grep -c .); IDX=$TOTAL; STEP=end; CNAME=
@@ -2154,107 +2251,142 @@ take_over() {       # take_over [names]: remove the lines that earlier runs of t
   done
   TAKE=
 }
-cancel_chain() {    # cancel the runner of run $RUNID for ESX host $CH (running or queued) and remove the lines of its cases
+stop_chain() {      # stop_chain: end the runner of run $RUNID for ESX host $CH (running or queued), remove the crontab lines
+                    # of its cases from the hosts and stop the monitoring that has started (close_case). The runner ends at
+                    # its next check. While it changes settings or VM power on the ESX host, tcrun stop waits for that task
+                    # (it ends within its own time limit). Otherwise a runner that has not ended after 60 s is ended (TERM).
+                    # A login of the runner takes at most 60 s, so a registration of many VMs or of many cases can take longer
+                    # 0 = no line of it is left on the hosts. 1 = lines are left on a host that could not be reached, or the
+                    # plan holds an ESX address that tcrun does not accept (then nothing was done)
   ST=$RD/$CHF.state; PIDF=$RD/$CHF.pid; STOPF=$RD/$CHF.stop
   LOG=$LOGDIR/tcrun-$RUNID-$CHF.log; RES=$LOGDIR/tcrun-$RUNID-$CHF-result.csv
   JOBS=$LOGDIR/tcrun-$RUNID-jobs.csv
   EADDR=$(esxaddr "$CH")
   SEQS=$(cseqs "$CH")
-  CN_S=$(state_of "$RD" "$CHF")
+  SC_S=$(state_of "$RD" "$CHF")
   CNAME=$(grep '^case=' "$ST" 2>/dev/null | cut -d= -f2-)
   STEP=$(grep '^step=' "$ST" 2>/dev/null | cut -d= -f2-)
-  IDX=$(grep '^pos=' "$ST" 2>/dev/null | cut -d= -f2- | cut -d/ -f1); TOTAL=$(say "$SEQS" | grep -c .)
-  if [ "$CH" != "-" ] && ! addr_ok "$EADDR"; then say "== run $RUNID esx $CHF: bad ESX address in the plan. Not cancelled."; return 1; fi
-  if [ "$CN_S" = done ]; then
-    say "== run $RUNID esx $CHF: removing the crontab lines that this run left on the hosts"
+  if [ "$CH" != "-" ] && ! addr_ok "$EADDR"; then
+    say "== run $RUNID esx $CHF: bad ESX address in the plan. Not stopped: its crontab lines were not removed."
+    return 1
+  fi
+  SC_LIVE=; SC_REC=
+  live_at_stop && SC_REC=$LS_REC
+  if alive "$PIDF" || [ -n "$SC_REC" ]; then
+    SC_LIVE=1
+    [ -n "$SC_REC" ] && SC_S=${SC_REC#*/}       # the state when tcrun stop started (the runner may have ended since)
+    say "== run $RUNID esx $CHF: stopping (state $SC_S, case ${CNAME:-none}, step ${STEP:-none})"
   else
-    say "== run $RUNID esx $CHF: cancelling (state $CN_S, case ${CNAME:-none}, step ${STEP:-none})"
+    say "== run $RUNID esx $CHF: $(ended_text "$SC_S"). Removing the crontab lines that it left on the hosts"
   fi
-  W=$RD/$CHF.cancel.$$
+  W=$RD/$CHF.stopwork.$$
   mkdir -p "$W" || { say "   cannot create $W"; return 1; }
-  if alive "$PIDF"; then
-    CN_P=$(cat "$PIDF")
-    : > "$RD/$CHF.cancelling"                      # tells the runner why it is ended (rows of the registration record)
+  if [ -n "$SC_LIVE" ]; then
+    SC_P=$(cat "$PIDF" 2>/dev/null)
+    [ -n "$SC_P" ] || SC_P=${SC_REC%%/*}
     : > "$STOPF"
-    kill -s TERM -- "-$CN_P" 2>/dev/null || kill -s TERM "$CN_P" 2>/dev/null
-    CN_I=0
-    while alive "$PIDF" && [ "$CN_I" -lt 30 ]; do sleep 1; CN_I=$((CN_I + 1)); done
-    if alive "$PIDF"; then kill -s KILL -- "-$CN_P" 2>/dev/null || kill -s KILL "$CN_P" 2>/dev/null; fi
-    rm -f "$RD/$CHF.cancelling"
-    say "   the runner (pid $CN_P) was ended at step ${STEP:-?}"
-    case "$STEP" in
-      apply|poweron|poweroff|rollback)
-        say "   WARN it was changing settings or VM power on the ESX host. That task goes on to its end on the host: check the VMs" ;;
-    esac
+    SC_I=0; SC_E=0; SC_T=0; SC_KILL=     # SC_I: seconds in other steps (at most SC_GRACE), SC_E: seconds in tasks on the ESX host
+    SC_GRACE=${TCRUN_STOP_GRACE:-60}      # TCRUN_STOP_GRACE: only for the tests (a shorter wait before TERM)
+    case "$SC_GRACE" in ""|*[!0-9]*) SC_GRACE=60 ;; esac
+    while alive "$PIDF"; do
+      SC_STEP=$(grep '^step=' "$ST" 2>/dev/null | cut -d= -f2-)
+      case "$SC_STEP" in
+        apply|poweroff|rollback)
+          if [ "$SC_T" = 0 ]; then
+            say "   the runner changes settings or VM power on the ESX host (step $SC_STEP). tcrun stop waits until that task has ended"
+            SC_T=1
+          fi
+          [ "$SC_E" -lt $((SHUT_WAIT * 60 + 960)) ] || { SC_KILL=1; break; }
+          SC_E=$((SC_E + 1)) ;;
+        *)
+          [ "$SC_I" -lt "$SC_GRACE" ] || { SC_KILL=1; break; }
+          SC_I=$((SC_I + 1)) ;;
+      esac
+      sleep 1
+    done
+    if [ -n "$SC_KILL" ]; then
+      : > "$RD/$CHF.stopping"                     # tells the runner why it is ended (rows of the registration record)
+      kill -s TERM -- "-$SC_P" 2>/dev/null || kill -s TERM "$SC_P" 2>/dev/null
+      SC_I=0
+      while alive "$PIDF" && [ "$SC_I" -lt 30 ]; do sleep 1; SC_I=$((SC_I + 1)); done
+      if alive "$PIDF"; then kill -s KILL -- "-$SC_P" 2>/dev/null || kill -s KILL "$SC_P" 2>/dev/null; fi
+      rm -f "$RD/$CHF.stopping"
+      say "   the runner (pid $SC_P) did not end at a check and was ended at step ${SC_STEP:-?}"
+      case "$SC_STEP" in
+        apply|poweron|poweroff|rollback)
+          say "   WARN it was changing settings or VM power on the ESX host. That task goes on to its end on the host: check the VMs" ;;
+      esac
+    else
+      say "   the runner (pid $SC_P) ended: $(grep '^text=' "$ST" 2>/dev/null | cut -d= -f2-)"
+    fi
+    STEP=$(grep '^step=' "$ST" 2>/dev/null | cut -d= -f2-)
+    CNAME=$(grep '^case=' "$ST" 2>/dev/null | cut -d= -f2-)
   fi
-  log "CANCEL requested (sh tcrun cancel). state was $CN_S, case ${CNAME:-none}, step ${STEP:-none}"
-  CC_SAY=1; CC_BY="sh tcrun cancel"; CC_ONLY=
+  IDX=$(grep '^pos=' "$ST" 2>/dev/null | cut -d= -f2- | cut -d/ -f1); TOTAL=$(say "$SEQS" | grep -c .)
+  log "STOP (sh tcrun stop). state was $SC_S, case ${CNAME:-none}, step ${STEP:-none}"
+  CC_SAY=1; CC_BY="sh tcrun stop"; CC_ONLY=
   close_case
-  if [ "$CC_BAD" -gt 0 ]; then
-    say "   WARN the crontab lines of $CC_BAD case(s) could NOT be removed on every host (see the lines above and $LOG). Run sh $D/tcrun cancel $CHF again when the hosts can be reached."
-  fi
   if [ "$CC_N" -gt 0 ]; then
     say "   the crontab lines of $CC_N case(s) were removed: their jobs that have not started will not start. Jobs that run now are not touched."
   elif [ "$CC_BAD" = 0 ]; then
-    say "   no crontab lines of this run are registered on the hosts"
+    say "   no crontab lines of this run were on the hosts"
   fi
   CC_SAY=
   # job start times of this run and ESX host that have not come yet
-  CN_N=$(now)
-  for CN_D in "$MD"/[0-9]*; do
-    [ -d "$CN_D" ] || continue
-    CN_T=$(basename "$CN_D")
-    case "$CN_T" in *[!0-9]*) continue ;; esac
-    [ "$CN_T" -gt "$CN_N" ] || continue
-    case "$(cat "$CN_D/who" 2>/dev/null)" in "run $RUNID, esx $CHF, "*) rm_claim "$CN_T" ;; esac
+  SC_N=$(now)
+  for SC_D in "$MD"/[0-9]*; do
+    [ -d "$SC_D" ] || continue
+    SC_C=$(basename "$SC_D")
+    case "$SC_C" in *[!0-9]*) continue ;; esac
+    [ "$SC_C" -gt "$SC_N" ] || continue
+    case "$(cat "$SC_D/who" 2>/dev/null)" in "run $RUNID, esx $CHF, "*) rm_claim "$SC_C" ;; esac
   done
   rm -f "$W"/* 2>/dev/null
   rmdir "$W" 2>/dev/null
-  CN_L="Crontab lines removed"
-  [ "$CC_BAD" -gt 0 ] && CN_L="Crontab lines of $CC_BAD case(s) are STILL on a host that could not be reached: run sh $D/tcrun cancel $CHF again"
-  if [ "$CN_S" = done ]; then
-    IDX=$TOTAL; STEP=end; CNAME=
-    if [ "$CC_BAD" -gt 0 ]; then
-      log "WARN not every crontab line of this run could be removed (sh tcrun cancel)"
-      setstate done "all $TOTAL case(s) finished. $CN_L"
-    else
-      log "the crontab lines of this run were removed (sh tcrun cancel)"
-      setstate done "all $TOTAL case(s) finished. The crontab lines of the run were removed $(stamp) by sh tcrun cancel"
-    fi
-    say "   done. The run stays done."
-    return 0
+  if [ "$CC_BAD" -gt 0 ]; then
+    log "WARN STOPPED. The crontab lines of $CC_BAD case(s) are still on a host that could not be reached (see the WARN lines above)"
+    setstate stopped "stopped at $(stamp) by sh tcrun stop. Crontab lines of $CC_BAD case(s) are STILL on a host that could not be reached: run sh $D/tcrun stop $CHF again. Settings that the run applied stay as they are"
+    say "   WARN the crontab lines of $CC_BAD case(s) could NOT be removed on every host (see the lines above and $LOG). This run stays in tcrun status: run sh $D/tcrun stop $CHF again when the hosts can be reached."
+    return 1
   fi
-  log "CANCELLED. Settings that this run applied stay as they are."
-  setstate cancelled "cancelled at $(stamp) by sh tcrun cancel. $CN_L. Settings that the run applied stay as they are"
-  say "   cancelled. Settings that this run applied stay as they are."
-}
-cmd_cancel() {      # cancel [esx]: every runner that is running or queued, and every case that an ended run left open.
-                    # The newest run first, so that a queued run is ended before the run it waits for
-  CN_K=0
-  for CN_RID in $(ls "$D/runs" 2>/dev/null | sort -r); do
-    CN_PL=$D/runs/$CN_RID/plan
-    [ -f "$CN_PL" ] || continue
-    CN_HIT=
-    for CN_F in "$D/runs/$CN_RID"/*.pid; do
-      alive "$CN_F" && CN_HIT=1
-    done
-    for CN_F in "$D/runs/$CN_RID"/*.work/times; do
-      [ -s "$CN_F" ] && CN_HIT=1
-    done
-    [ -n "$CN_HIT" ] || continue
-    [ "$(head -n 1 "$CN_PL")" = "TCGEN-PLAN 2" ] || continue
-    load_plan "$CN_PL"
-    [ -n "$SO" ] || ssh_setup
-    for CH in $(chains); do
-      CHF=$(chfile "$CH")
-      [ -z "$1" ] || [ "$1" = "$CHF" ] || continue
-      alive "$RD/$CHF.pid" || [ -s "$RD/$CHF.work/times" ] || continue
-      CN_K=$((CN_K + 1))
-      cancel_chain
-    done
-  done
-  [ "$CN_K" -gt 0 ] || say "nothing to cancel${1:+ for $1}: no run is running or queued, and no crontab lines of a run are on the hosts"
+  if [ -n "$SC_LIVE" ]; then
+    log "STOPPED by sh tcrun stop. Settings that this run applied stay as they are. The run is removed from tcrun status, this log stays"
+    say "   stopped. Settings that this run applied stay as they are."
+  else
+    log "sh tcrun stop removed the crontab lines that this run left. The run is removed from tcrun status, this log stays"
+  fi
   return 0
+}
+live_at_stop() {    # live_at_stop: 0 = the runner of run $RUNID for ESX host $CHF was alive when tcrun stop started.
+                    # LS_REC = "<pid>/<state>" of that time
+  LS_REC=
+  for LS_X in $SP_LIVE; do
+    case "$LS_X" in "$RUNID/$CHF/"*) LS_REC=${LS_X#"$RUNID/$CHF/"} ;; esac
+  done
+  [ -n "$LS_REC" ]
+}
+ended_text() {      # ended_text <state of an ended runner>: "ended as done", "the runner died", ...
+  case "$1" in died) say "the runner died" ;; *) say "ended as $1" ;; esac
+}
+forget_chain() {    # forget_chain: remove ESX host $CHF of run $RUNID from tcrun status: its files in the run folder are
+                    # deleted one by one, and "<run id> <ESX host>" is added to $SL (block S does not start it again)
+  rm -f "$RD/$CHF.state" "$RD/$CHF.pid" "$RD/$CHF.stop" "$RD/$CHF.stopping" "$RD/$CHF.out"
+  if [ -d "$RD/$CHF.work" ]; then
+    rm -f "$RD/$CHF.work"/* 2>/dev/null
+    rmdir "$RD/$CHF.work" 2>/dev/null
+  fi
+  grep -qxF "$RUNID $CHF" "$SL" 2>/dev/null || say "$RUNID $CHF" >> "$SL"
+}
+forget_run() {      # forget_run: delete the folder of run $RUNID when no ESX host of it is left (no state file, no runner)
+  case "$RUNID" in ""|.|..|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  [ "$RD" = "$D/runs/$RUNID" ] && [ -d "$RD" ] || return 0
+  for FR_F in "$RD"/*.state; do
+    [ -f "$FR_F" ] && return 1
+  done
+  for FR_F in "$RD"/*.pid; do
+    alive "$FR_F" && return 1
+  done
+  rm -rf "$RD"
 }
 
 # ---------------------------------------------------------------- check (reads only)
@@ -2393,7 +2525,7 @@ check_body() {
         continue
       fi
       VMS=$(grep "^VM $SEQ " "$PLAN" | cut -d' ' -f3)
-      say "-- case $CNAME   VMs: $(say $VMS)"
+      say "-- case $CNAME   $(vm_list $VMS)"
       CB_AT=$(clines START | head -n 1 | cut -d' ' -f1)
       case "$CB_AT" in ""|*[!0-9]*) CB_AT= ;; esac
       if [ -n "$CB_AT" ]; then
@@ -2402,11 +2534,11 @@ check_body() {
         else
           ck_ok "start time: job at $(clines START | head -n 1 | cut -d' ' -f2-) ($(( (CB_AT - $(now)) / 60 )) min from now)"
           if [ -n "$CB_END" ] && [ $((CB_AT / 60 * 60)) -lt $((CB_END + 120)) ]; then
-            ck_bad "case $CNAME: its job start is less than 2 min after the end of run $CB_BUSY of this ESX host (about $(tstr "$CB_END")). The lines of this run are registered after that end, so this case would not be registered. To run it: sh $D/tcrun cancel $CHF, then generate the cases that are left of that run together with this one."
+            ck_bad "case $CNAME: its job start is less than 2 min after the end of run $CB_BUSY of this ESX host (about $(tstr "$CB_END")). The lines of this run are registered after that end, so this case would not be registered. To run it: sh $D/tcrun stop $CHF, then generate the cases that are left of that run together with this one."
           fi
           if has MS || has EMS; then
             CB_MS=$(clines MSTOP | head -n 1 | cut -d' ' -f2-)
-            ck_ok "monitoring: starts $LEAD min before the job start. Stop: ${CB_MS:-not registered (last case without a maximum wait: the monitoring goes on until the next run or sh $D/tcrun cancel $CHF)}"
+            ck_ok "monitoring: starts $LEAD min before the job start. Stop: ${CB_MS:-not registered (the case has no monitoring stop time: the monitoring goes on until the next run of this ESX host or sh $D/tcrun stop $CHF)}"
           fi
           CB_M=$((CB_AT / 60 * 60))
           for CB_D in "$MD"/[0-9]*; do
@@ -2503,10 +2635,10 @@ cmd_check() {
   mkdir -p "$W" || exit 2
   CK_LOG=$LOGDIR/tcrun-$RUNID-check.log
   if [ -d "$LOGDIR" ] && [ -w "$LOGDIR" ]; then
-    check_body 2>&1 | tee "$CK_LOG"
+    check_body 2>&1 | tee "$CK_LOG" | vm_color
     say "saved: $CK_LOG"
   else
-    check_body 2>&1
+    check_body 2>&1 | vm_color
   fi
 }
 
@@ -2516,12 +2648,12 @@ case "$1" in
   check) cmd_check "$2" ;;
   status) cmd_status "$2" ;;
   stop) cmd_stop "$2" ;;
-  cancel) cmd_cancel "$2" ;;
+  cancel) say "tcrun $TCRUN_VERSION has no cancel: sh $D/tcrun stop [esx] ends the runs, removes their crontab lines and stops their monitoring"; exit 2 ;;
   key) cmd_key ;;
   version) say "$TCRUN_VERSION" ;;
   *)
     say "tcrun $TCRUN_VERSION (tcgen sequence runner)"
-    say "usage: sh $D/tcrun check <plan> | start <plan> | run <plan> <esx> | status [-a] | stop [esx] | cancel [esx] | key | version"
+    say "usage: sh $D/tcrun check <plan> | start <plan> | run <plan> <esx> | status [-a] | stop [esx] | key | version"
     exit 2
     ;;
 esac

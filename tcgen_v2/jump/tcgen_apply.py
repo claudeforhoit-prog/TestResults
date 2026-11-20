@@ -51,7 +51,7 @@ import subprocess
 import sys
 import time
 
-VERSION = "2.14"
+VERSION = "2.15"
 VMFS_ROOT = os.environ.get("TCGEN_VMFS_ROOT", "/vmfs/volumes")
 TMP = os.environ.get("TCGEN_TMP", "/tmp/tcgen")
 POLL = float(os.environ.get("TCGEN_POLL_SEC", "5"))

@@ -504,6 +504,11 @@ class FakeEnv(object):
             f.write("%.4f\n" % (15.0 / self.speed))
         self.env = {"HOME": self.jump, "PATH": self.fakebin + ":/usr/bin:/bin", "TERM": "dumb", "FAKE_PW": TEST_PW,
                     "FAKE_ROOT": r, "FAKE_VMS": self.vms, "LANG": "C", "USER": "tester", "TZ": "Asia/Seoul"}
+        # tcrun start 의 확인 질문(v2.15)에 줄 답. 시험은 터미널이 없으므로 TCRUN_TEST_TTY 의 파일에서 읽는다(시험 전용)
+        self.answer = os.path.join(r, "answer")
+        with open(self.answer, "w") as f:
+            f.write("yes\n")
+        self.env["TCRUN_TEST_TTY"] = self.answer
         self.tcgen = os.path.join(self.jump, ".tcgen")
         self.jdir = None                 # jdir=True: 점프 VM 작업 폴더를 홈 밖(<시험 폴더>/data/tcgen)에 둔다
         if jdir:
@@ -663,10 +668,12 @@ class FakeEnv(object):
     # ---- plan 과 tcrun
     def settings(self, **over):
         s = dict(core.DEFAULT_SETTINGS)
-        # 시험의 기본값: 모니터링 시작 1분 전, 설정 적용 10분 전, 구성 스냅샷 3분 전(가상 시계로 케이스 하나가 십몇 분 안에 끝나게)
+        # 시험의 기본값: 모니터링 시작 1분 전, 설정 적용 10분 전, 구성 스냅샷 3분 전(가상 시계로 케이스 하나가 십몇 분 안에 끝나게).
+        # 모니터링 중지(자동)는 다음 케이스 잡 시작 12분 전: v2.14 까지 시험에 쓰던 시각(설정 적용 10분 + 2분)을 그대로 쓴다.
+        # 설정 적용보다 늦은 중지(사용자 기본값 10분과 같은 관계)는 StopRuleTests 가 본다
         s.update(record_csv=os.path.join(self.root, "pc", "rec.csv"), log_dir=os.path.join(self.root, "pc"), run_mode="seq",
                  jump_log_dir=self.log, mon_lead_min=1, seq_boot_wait_min=5, seq_shutdown_wait_min=1,
-                 seq_prep_lead_min=10, seq_snap_lead_min=3)
+                 seq_prep_lead_min=10, seq_snap_lead_min=3, stop_lead_min=12)
         if self.jdir:
             s["jump_dir"] = self.jdir
         s.update(over)
